@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A stand-in daemon that serves a local directory as the "SD card". It follows the same protocol and
 //! path rules as the real one, so the client and MCP tools can be tested without the console.
 //! It is not a model of the console's quirks (FS result codes, memory limits, timing).

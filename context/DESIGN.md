@@ -21,6 +21,7 @@ One protocol crate means the two halves can't drift apart.
 | Needs hbmenu's NetLoader open | Receives builds itself, writes them to the SD card |
 | A hung game needs the user | Separate process, survives the game; force-closes it (`pm:shell` TerminateProgram) |
 | Recovering the console | Reboot (`bpc`). Should recover many fatal screens, not a kernel hang |
+| Stuck console, or the SD card needed on the PC | Reboot to hekate (see below): boot a chosen hekate entry, or hekate's USB mass storage so the PC mounts the SD card with no one pulling it |
 | Relaunching with full memory | Launch a title with Atmosphère's hbl override (hbl_config path can point at a specific .nro). **Least proven: prototype early.** Fallback: a small launcher app left open in hbmenu |
 | Sleep drops Wi-Fi | Turn auto-sleep off during a session |
 | Seeing and playing | Screenshots (`caps:sc`), virtual controller (`hid:dbg`), memory read/write (as sys-botbase does) |
@@ -30,8 +31,11 @@ One protocol crate means the two halves can't drift apart.
 Only the power button should ever need the user.
 
 ## Toolchain
-- Target `aarch64-nintendo-switch-freestanding` (tier 3): nightly + `-Z build-std`. Pin the nightly in
-  `rust-toolchain.toml`.
+- Target `aarch64-nintendo-switch-freestanding` (tier 3): nightly + `-Z build-std`. The nightly is pinned in
+  `daemon/rust-toolchain.toml` (nightly-2026-09-08: newer ones break nx's `unwinding` dependency). The host
+  side (`proto`, `mcp`) builds on stable.
+- `nx` is vendored in `third_party/nx` with a small patch (argv, for nxlink); see its `PATCHES.md`.
+  `context/NX_SERVICES.md` lists what nx covers and the wrappers we must write.
 - [`nx`](https://github.com/aarch64-switch-rs/nx): pure-Rust libnx replacement (IPC, fs, sockets, hid,
   allocators; sysmodules and NROs). emuiibo is a Rust sysmodule on it, so use it as a reference.
 - `cargo-nx` builds the .nsp/.nro.
@@ -51,7 +55,18 @@ Only the power button should ever need the user.
 ## Build order
 1. Toolchain: nightly, build-std, a hello-world NRO on `nx` that runs on hardware.
 2. Daemon v0: ping, list/read files, upload a build. MCP server exposing those.
-3. Launch / force-close / reboot. Prototype the hbl-override launch early.
+3. Launch / force-close / reboot. Prototype the hbl-override launch early. Reboot comes in two forms:
+   - plain reboot through `bpc` (Atmosphère's bpc mitm may still route it to `reboot_payload.bin`);
+   - **reboot to hekate**: read hekate's payload from the SD card, hand it to Atmosphère with
+     `bpc:ams` SetRebootPayload, then reboot through `bpc`. Before handing it over, fill in hekate's boot
+     config (the block hekate reads from its own payload) to pick what hekate does: boot a named
+     `hekate_ipl.ini` entry (e.g. back into Atmosphère, emuMMC or sysMMC) or start USB mass storage of the
+     SD card, so the PC can mount it. nx-agent does this ("Remote Hekate").
+   Verify the boot config layout and payload size limit against hekate's and Atmosphère's sources first.
+   hekate is GPL-2.0, which doesn't combine with GPL-3.0: take the layout as facts, write the code ourselves.
+   A bad payload or boot config can leave the console on a black screen until someone holds the power
+   button (and injects a payload, on an RCM setup), so gate this behind a confirm step and test it first with
+   the user watching.
 4. Screenshots and button input.
 5. Watchdog: detect a hung app (no heartbeat or log output) and recover.
 6. GDB stub integration.

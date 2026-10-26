@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! One client connection's state and request handling.
 
 use alloc::format;

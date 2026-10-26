@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Client against the mock daemon: the protocol, chunking and path rules, end to end over TCP.
 
 use std::sync::Arc;

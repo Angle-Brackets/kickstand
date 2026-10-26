@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! switch-mcp: an MCP server (stdio) for the daemon on the Switch, plus a few CLI commands for using
 //! the daemon by hand.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The daemon as an NRO. Start it with nxlink, passing the token as an argument:
 //! `nxlink -s -a <switch-ip> switch-mcp-daemon.nro --token <token>`. Press + on the console to exit.
 //! Without `--token` it uses `/config/switch-mcp/token.txt` like the sysmodule does.

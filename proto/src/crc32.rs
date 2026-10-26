@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! CRC-32 (IEEE, as zlib), used to verify uploads end to end. Bitwise to keep the daemon small; it
 //! runs once per uploaded byte, which is fine next to SD write speed.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! TCP command server: one client at a time, one request then one response.
 
 use alloc::vec::Vec;

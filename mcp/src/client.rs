@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Async client for the daemon. Keeps one connection open and reconnects when it drops (the daemon
 //! closes idle clients after two minutes, and Wi-Fi comes and goes).
 

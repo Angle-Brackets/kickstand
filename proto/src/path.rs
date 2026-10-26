@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! SD card path rules, shared so the MCP server can reject a bad path before it reaches the console.
 //!
 //! Paths are absolute from the SD root (`/switch/paperboat/paperboat.nro`); the daemon adds `sdmc:`.

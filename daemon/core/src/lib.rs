@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The switch-mcp daemon. The same code runs as the boot-time sysmodule (`sysmodule/`) and as an NRO
 //! launched from hbmenu (`app/`), which is how it's tested before anything is installed.
 

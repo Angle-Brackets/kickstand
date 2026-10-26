@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The MCP tools. Each one is a thin wrapper over [`Client`]; failures come back as tool errors
 //! (`isError: true`) with the daemon's message, so the agent can read and react to them.
 

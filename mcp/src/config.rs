@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Where the Switch's address and the shared token come from.
 //!
 //! - host: `--host`, then `$SWITCH_IP`, then `~/.config/switch-mcp/host`
@@ -27,10 +28,10 @@ pub fn host(arg: Option<String>) -> Result<String> {
 }
 
 pub fn load_token() -> Result<String> {
-    if let Ok(t) = std::env::var("SWITCH_MCP_TOKEN") {
-        if !t.trim().is_empty() {
-            return Ok(t.trim().to_string());
-        }
+    if let Ok(t) = std::env::var("SWITCH_MCP_TOKEN")
+        && !t.trim().is_empty()
+    {
+        return Ok(t.trim().to_string());
     }
     let path = config_dir()?.join("token");
     let token = std::fs::read_to_string(&path)
@@ -41,10 +42,10 @@ pub fn load_token() -> Result<String> {
 /// Returns the token, generating and saving a new one first if there is none.
 pub fn ensure_token() -> Result<(String, PathBuf)> {
     let path = config_dir()?.join("token");
-    if let Ok(t) = std::fs::read_to_string(&path) {
-        if !t.trim().is_empty() {
-            return Ok((t.trim().to_string(), path));
-        }
+    if let Ok(t) = std::fs::read_to_string(&path)
+        && !t.trim().is_empty()
+    {
+        return Ok((t.trim().to_string(), path));
     }
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;

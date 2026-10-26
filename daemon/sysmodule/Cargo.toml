@@ -2,6 +2,7 @@
 name = "switch-mcp-sysmodule"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "The daemon as an Atmosphère sysmodule"
 
 [dependencies]

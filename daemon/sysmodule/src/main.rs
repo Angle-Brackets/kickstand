@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! The daemon as a sysmodule: `atmosphere/contents/<program id>/exefs.nsp`. Logs to
 //! `/switch-mcp/logs/daemon.log`. Develop without `boot2.flag` so a crash can't stop the console booting.
 

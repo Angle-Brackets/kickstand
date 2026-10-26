@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! stdout over nxlink, like libnx's `nxlinkStdio()`.
 //!
 //! `nxlink -s` on the PC sends the NRO to hbmenu's NetLoader, which appends `<hex addr>_NXLINK_` to the

@@ -6,6 +6,7 @@ members = ["nxlink", "hello", "core", "app", "sysmodule"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 nx = { path = "../third_party/nx" }

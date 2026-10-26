@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! SD card access for the session. Paths here are already normalized and policy-checked SD-root paths
 //! (`/switch/...`); this module adds the `sdmc:` mount name and maps fs results to protocol errors.
 
@@ -82,10 +83,10 @@ pub fn create_dirs(dir: &str) -> Result<(), Error> {
     for part in dir.split('/').filter(|p| !p.is_empty()) {
         at.push('/');
         at.push_str(part);
-        if let Err(rc) = fs::create_directory(&full(&at)) {
-            if !fsp_rc::ResultPathAlreadyExists::matches(rc) {
-                return Err(io_error("mkdir", &at, rc));
-            }
+        if let Err(rc) = fs::create_directory(&full(&at))
+            && !fsp_rc::ResultPathAlreadyExists::matches(rc)
+        {
+            return Err(io_error("mkdir", &at, rc));
         }
     }
     Ok(())

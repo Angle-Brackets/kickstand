@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Daemon log. Lines go to nxlink when the NRO build was started by nxlink, and are appended to
 //! `/switch-mcp/logs/daemon.log` when [`enable_file`] has been called (the sysmodule has no other output).
 
@@ -26,7 +27,7 @@ pub fn enable_file() {
 pub fn _log(args: core::fmt::Arguments) {
     let mut line = String::new();
     let ms = crate::uptime_ms();
-    let _ = write!(line, "[{}.{:03}] {}\n", ms / 1000, ms % 1000, args);
+    let _ = writeln!(line, "[{}.{:03}] {}", ms / 1000, ms % 1000, args);
     nxlink::print!("{line}");
     if FILE_ENABLED.load(Ordering::Relaxed) {
         append_to_file(line.as_bytes());
