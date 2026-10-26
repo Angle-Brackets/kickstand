@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Where the Switch's address and the shared token come from.
 //!
-//! - host: `--host`, then `$SWITCH_IP`, then `~/.config/switch-mcp/host`
-//! - token: `$SWITCH_MCP_TOKEN`, then `~/.config/switch-mcp/token` (created by `switch-mcp token`)
+//! - host: `--host`, then `$SWITCH_IP`, then `~/.config/kickstand/host`
+//! - token: `$KICKSTAND_TOKEN`, then `~/.config/kickstand/token` (created by `kickstand token`)
 
 use std::path::PathBuf;
 
@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 
 fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(dir).join("switch-mcp"));
+        return Ok(PathBuf::from(dir).join("kickstand"));
     }
     let home = std::env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".config/switch-mcp"))
+    Ok(PathBuf::from(home).join(".config/kickstand"))
 }
 
 pub fn host(arg: Option<String>) -> Result<String> {
@@ -28,14 +28,14 @@ pub fn host(arg: Option<String>) -> Result<String> {
 }
 
 pub fn load_token() -> Result<String> {
-    if let Ok(t) = std::env::var("SWITCH_MCP_TOKEN")
+    if let Ok(t) = std::env::var("KICKSTAND_TOKEN")
         && !t.trim().is_empty()
     {
         return Ok(t.trim().to_string());
     }
     let path = config_dir()?.join("token");
     let token = std::fs::read_to_string(&path)
-        .with_context(|| format!("no token: run `switch-mcp token` or set SWITCH_MCP_TOKEN ({})", path.display()))?;
+        .with_context(|| format!("no token: run `kickstand token` or set KICKSTAND_TOKEN ({})", path.display()))?;
     Ok(token.trim().to_string())
 }
 

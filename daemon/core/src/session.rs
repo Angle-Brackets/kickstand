@@ -11,7 +11,7 @@ use proto::{DaemonKind, ErrorKind, PROTOCOL_VERSION, Request, Response, crc32};
 use crate::sd;
 
 /// Uploads are staged here, then renamed over the target once verified.
-const STAGING_FILE: &str = "/switch-mcp/staging/upload.part";
+const STAGING_FILE: &str = "/kickstand/staging/upload.part";
 
 struct Upload {
     path: String,

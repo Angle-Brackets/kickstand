@@ -10,7 +10,7 @@ license = "GPL-3.0-only"
 
 [workspace.dependencies]
 nx = { path = "../third_party/nx" }
-proto = { package = "switch-mcp-proto", path = "../proto" }
+proto = { package = "kickstand-proto", path = "../proto" }
 nxlink = { path = "nxlink" }
 daemon-core = { path = "core" }
 

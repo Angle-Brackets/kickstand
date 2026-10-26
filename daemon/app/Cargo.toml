@@ -1,9 +1,14 @@
 [package]
-name = "switch-mcp-daemon"
+name = "kickstand-nro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The daemon as an hbmenu NRO, for testing before the sysmodule is installed"
+
+# The NRO is named after the binary: kickstand.nro.
+[[bin]]
+name = "kickstand"
+path = "src/main.rs"
 
 [dependencies]
 nx = { workspace = true, features = ["socket", "fs", "input"] }
@@ -12,4 +17,4 @@ nxlink.workspace = true
 proto.workspace = true
 
 [package.metadata.nx.nro]
-nacp = { default_name = "switch-mcp daemon", default_author = "Angle-Brackets", version = "0.1.0" }
+nacp = { default_name = "kickstand daemon", default_author = "Angle-Brackets", version = "0.1.0" }

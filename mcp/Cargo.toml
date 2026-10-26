@@ -1,12 +1,12 @@
 [package]
-name = "switch-mcp"
+name = "kickstand"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "MCP server that drives the switch-mcp daemon on a Nintendo Switch"
+description = "MCP server that drives the kickstand daemon on a Nintendo Switch"
 
 [dependencies]
-proto = { package = "switch-mcp-proto", path = "../proto" }
+proto = { package = "kickstand-proto", path = "../proto" }
 rmcp = { version = "3.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "io-std", "time", "fs", "sync"] }
 serde = { version = "1", features = ["derive"] }

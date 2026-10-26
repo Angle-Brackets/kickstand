@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The daemon as an NRO. Start it with nxlink, passing the token as an argument:
-//! `nxlink -s -a <switch-ip> switch-mcp-daemon.nro --token <token>`. Press + on the console to exit.
-//! Without `--token` it uses `/config/switch-mcp/token.txt` like the sysmodule does.
+//! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`. Press + on the console to exit.
+//! Without `--token` it uses `/config/kickstand/token.txt` like the sysmodule does.
 
 #![no_std]
 #![no_main]
@@ -18,7 +18,7 @@ use nx::diag::log::lm::LmLogger;
 use nx::service::hid;
 use nx::{input, svc, thread, util};
 
-nx::rrt0_define_module_name!("switch-mcp-daemon");
+nx::rrt0_define_module_name!("kickstand");
 nx::rrt0_initialize_heap!();
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -36,7 +36,7 @@ fn main() {
     if token.is_none() {
         log!("no token: pass --token <t> or create {}", proto::path::TOKEN_PATH);
     }
-    log!("switch-mcp daemon {} (NRO); press + to exit", daemon_core::VERSION);
+    log!("kickstand daemon {} (NRO); press + to exit", daemon_core::VERSION);
 
     let server = thread::Builder::new()
         .name("server")

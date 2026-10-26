@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The daemon as a sysmodule: `atmosphere/contents/<program id>/exefs.nsp`. Logs to
-//! `/switch-mcp/logs/daemon.log`. Develop without `boot2.flag` so a crash can't stop the console booting.
+//! `/kickstand/logs/daemon.log`. Develop without `boot2.flag` so a crash can't stop the console booting.
 
 #![no_std]
 #![no_main]
@@ -11,7 +11,7 @@ use nx::diag::abort;
 use nx::diag::log::lm::LmLogger;
 use nx::{svc, util};
 
-nx::rrt0_define_module_name!("switch-mcp");
+nx::rrt0_define_module_name!("sys-kickstand");
 // A sysmodule must pick its own heap; the NRO default would take all free memory. 4 MiB covers the
 // socket transfer memory (~0.6 MiB), two frame buffers and fs sessions.
 nx::alloc_set_default_heap_size!(0x40_0000);
@@ -24,7 +24,7 @@ fn main() {
         let _ = svc::sleep_thread(1_000_000_000);
     }
     daemon_core::log::enable_file();
-    log!("switch-mcp daemon {} (sysmodule) starting", daemon_core::VERSION);
+    log!("kickstand daemon {} (sysmodule) starting", daemon_core::VERSION);
 
     let token = daemon_core::read_token_file();
     if token.is_none() {

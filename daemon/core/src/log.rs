@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Daemon log. Lines go to nxlink when the NRO build was started by nxlink, and are appended to
-//! `/switch-mcp/logs/daemon.log` when [`enable_file`] has been called (the sysmodule has no other output).
+//! `/kickstand/logs/daemon.log` when [`enable_file`] has been called (the sysmodule has no other output).
 
 use alloc::string::String;
 use core::fmt::Write;
@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use nx::fs::{self, FileOpenOption};
 
-pub const LOG_DIR: &str = "sdmc:/switch-mcp/logs";
-pub const LOG_PATH: &str = "sdmc:/switch-mcp/logs/daemon.log";
+pub const LOG_DIR: &str = "sdmc:/kickstand/logs";
+pub const LOG_PATH: &str = "sdmc:/kickstand/logs/daemon.log";
 
 /// The log is cut back to empty once it passes this size, so it can't fill the card.
 const MAX_LOG_SIZE: usize = 1024 * 1024;
@@ -18,7 +18,7 @@ static FILE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Starts appending to [`LOG_PATH`]. The SD card must be mounted as `sdmc`.
 pub fn enable_file() {
-    let _ = fs::create_directory("sdmc:/switch-mcp");
+    let _ = fs::create_directory("sdmc:/kickstand");
     let _ = fs::create_directory(LOG_DIR);
     FILE_ENABLED.store(true, Ordering::Relaxed);
 }

@@ -439,6 +439,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "kickstand"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "getrandom 0.3.4",
+ "kickstand-proto",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kickstand-proto"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,30 +736,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "switch-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "getrandom 0.3.4",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "switch-mcp-proto",
- "tokio",
-]
-
-[[package]]
-name = "switch-mcp-proto"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
 
 [[package]]
 name = "syn"

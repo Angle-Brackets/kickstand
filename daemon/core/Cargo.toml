@@ -3,7 +3,7 @@ name = "daemon-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "switch-mcp daemon: command server shared by the sysmodule and the test NRO"
+description = "kickstand daemon: command server shared by the sysmodule and the test NRO"
 
 [dependencies]
 nx = { workspace = true, features = ["socket", "fs"] }

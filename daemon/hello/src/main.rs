@@ -10,7 +10,7 @@ use nx::diag::log::lm::LmLogger;
 use nx::{svc, util, version};
 use nxlink::println;
 
-nx::rrt0_define_module_name!("switch-mcp-hello");
+nx::rrt0_define_module_name!("kickstand-hello");
 nx::rrt0_initialize_heap!();
 
 #[unsafe(no_mangle)]

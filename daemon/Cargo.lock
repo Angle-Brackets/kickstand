@@ -49,9 +49,9 @@ dependencies = [
 name = "daemon-core"
 version = "0.1.0"
 dependencies = [
+ "kickstand-proto",
  "nx",
  "nxlink",
- "switch-mcp-proto",
 ]
 
 [[package]]
@@ -104,6 +104,24 @@ version = "0.1.0"
 dependencies = [
  "nx",
  "nxlink",
+]
+
+[[package]]
+name = "kickstand-nro"
+version = "0.1.0"
+dependencies = [
+ "daemon-core",
+ "kickstand-proto",
+ "nx",
+ "nxlink",
+]
+
+[[package]]
+name = "kickstand-proto"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -269,33 +287,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
-name = "switch-mcp-daemon"
-version = "0.1.0"
-dependencies = [
- "daemon-core",
- "nx",
- "nxlink",
- "switch-mcp-proto",
-]
-
-[[package]]
-name = "switch-mcp-proto"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "switch-mcp-sysmodule"
-version = "0.1.0"
-dependencies = [
- "daemon-core",
- "nx",
- "switch-mcp-proto",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,6 +306,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sys-kickstand"
+version = "0.1.0"
+dependencies = [
+ "daemon-core",
+ "kickstand-proto",
+ "nx",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Wire protocol between the switch-mcp daemon (on the console) and the MCP server (on the PC).
+//! Wire protocol between the kickstand daemon (on the console) and the MCP server (on the PC).
 //!
 //! Framing: every message is a little-endian `u32` length followed by that many bytes of postcard.
 //! The client sends one [`Request`] and waits for one [`Response`]; the first request on a connection

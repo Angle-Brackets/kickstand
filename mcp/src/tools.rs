@@ -14,12 +14,12 @@ use serde::Deserialize;
 
 use crate::client::{Client, check_path};
 
-/// Default and maximum bytes `switch_read_file` returns inline; use `switch_download` for more.
+/// Default and maximum bytes `read_file` returns inline; use `download` for more.
 const READ_DEFAULT: u64 = 64 * 1024;
 const READ_MAX: u64 = 1024 * 1024;
 
 #[derive(Clone)]
-pub struct SwitchTools {
+pub struct Tools {
     client: Arc<Client>,
     tool_router: ToolRouter<Self>,
 }
@@ -52,7 +52,7 @@ pub struct DownloadArgs {
 pub struct UploadArgs {
     /// File on this PC to send.
     pub local_path: String,
-    /// Destination on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/ or /switch-mcp/.
+    /// Destination on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/ or /kickstand/.
     pub remote_path: String,
 }
 
@@ -65,13 +65,13 @@ fn fail(e: anyhow::Error) -> CallToolResult {
 }
 
 #[tool_router]
-impl SwitchTools {
+impl Tools {
     pub fn new(client: Arc<Client>) -> Self {
-        SwitchTools { client, tool_router: Self::tool_router() }
+        Tools { client, tool_router: Self::tool_router() }
     }
 
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
-    async fn switch_ping(&self) -> CallToolResult {
+    async fn ping(&self) -> CallToolResult {
         let result = async {
             let (version, kind) = self.client.hello().await?;
             let (rtt, uptime) = self.client.ping().await?;
@@ -86,7 +86,7 @@ impl SwitchTools {
     }
 
     #[tool(description = "List a directory on the Switch's SD card. Keys, NAND backups and /Nintendo are not readable.")]
-    async fn switch_list_dir(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
+    async fn list_dir(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
             let (mut entries, truncated) = self.client.list_dir(&path).await?;
@@ -108,7 +108,7 @@ impl SwitchTools {
     }
 
     #[tool(description = "Size and type of a file or directory on the Switch's SD card.")]
-    async fn switch_stat(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
+    async fn stat(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
             let e = self.client.stat(&path).await?;
@@ -118,7 +118,7 @@ impl SwitchTools {
     }
 
     #[tool(description = "Read part of a file on the Switch's SD card, such as a log or a crash report in /atmosphere/crash_reports. Text comes back as text; binary data as base64.")]
-    async fn switch_read_file(&self, Parameters(args): Parameters<ReadArgs>) -> CallToolResult {
+    async fn read_file(&self, Parameters(args): Parameters<ReadArgs>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
             let offset = args.offset.unwrap_or(0);
@@ -138,7 +138,7 @@ impl SwitchTools {
     }
 
     #[tool(description = "Copy a whole file from the Switch's SD card to this PC.")]
-    async fn switch_download(&self, Parameters(args): Parameters<DownloadArgs>) -> CallToolResult {
+    async fn download(&self, Parameters(args): Parameters<DownloadArgs>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
             let size = self.client.stat(&path).await?.size;
@@ -149,8 +149,8 @@ impl SwitchTools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Only /switch/paperboat/, /switch/ttydrecomp/ and /switch-mcp/ are writable.")]
-    async fn switch_upload(&self, Parameters(args): Parameters<UploadArgs>) -> CallToolResult {
+    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Only /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/ are writable.")]
+    async fn upload(&self, Parameters(args): Parameters<UploadArgs>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
             let data = tokio::fs::read(&args.local_path).await?;
@@ -169,7 +169,7 @@ impl SwitchTools {
 
 #[tool_handler(
     router = self.tool_router,
-    name = "switch-mcp",
-    instructions = "Tools for a real Nintendo Switch running the switch-mcp daemon. Paths are absolute from the SD card root. Start with switch_ping."
+    name = "kickstand",
+    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping."
 )]
-impl ServerHandler for SwitchTools {}
+impl ServerHandler for Tools {}

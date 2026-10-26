@@ -1,9 +1,9 @@
 [package]
-name = "switch-mcp-proto"
+name = "kickstand-proto"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "Wire protocol shared by the switch-mcp daemon and MCP server"
+description = "Wire protocol shared by the kickstand daemon and MCP server"
 
 [lib]
 name = "proto"

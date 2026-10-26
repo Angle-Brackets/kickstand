@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! switch-mcp: an MCP server (stdio) for the daemon on the Switch, plus a few CLI commands for using
+//! kickstand: an MCP server (stdio) for the daemon on the Switch, plus a few CLI commands for using
 //! the daemon by hand.
 
 mod client;
@@ -19,7 +19,7 @@ use client::{Client, check_path};
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// The Switch's IP address. Defaults to $SWITCH_IP, then ~/.config/switch-mcp/host.
+    /// The Switch's IP address. Defaults to $SWITCH_IP, then ~/.config/kickstand/host.
     #[arg(long, global = true)]
     host: Option<String>,
     /// The daemon's port.
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
 
     match command {
         Command::Serve => {
-            let service = tools::SwitchTools::new(client).serve(rmcp::transport::stdio()).await?;
+            let service = tools::Tools::new(client).serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
         Command::Ping => {

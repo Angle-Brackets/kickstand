@@ -10,4 +10,4 @@ nx = { workspace = true, features = ["socket"] }
 nxlink.workspace = true
 
 [package.metadata.nx.nro]
-nacp = { default_name = "switch-mcp hello", default_author = "Angle-Brackets", version = "0.1.0" }
+nacp = { default_name = "kickstand hello", default_author = "Angle-Brackets", version = "0.1.0" }

@@ -8,13 +8,13 @@ use alloc::string::String;
 
 /// The directories uploads may write into. Everything else on the card is read-only to the daemon.
 /// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet.
-pub const WRITE_ROOTS: &[&str] = &["/switch/paperboat/", "/switch/ttydrecomp/", "/switch-mcp/"];
+pub const WRITE_ROOTS: &[&str] = &["/switch/paperboat/", "/switch/ttydrecomp/", "/kickstand/"];
 
 /// Where uploads are staged before being moved into place.
-pub const STAGING_DIR: &str = "/switch-mcp/staging";
+pub const STAGING_DIR: &str = "/kickstand/staging";
 
 /// Where the daemon reads its shared token from.
-pub const TOKEN_PATH: &str = "/config/switch-mcp/token.txt";
+pub const TOKEN_PATH: &str = "/config/kickstand/token.txt";
 
 /// Top-level directories that are never read: NAND images and backups, and Nintendo's own content.
 const DENIED_ROOTS: &[&str] = &["/emummc", "/backup", "/nintendo", "/atmosphere/automatic_backups"];
@@ -42,7 +42,7 @@ impl PathError {
             PathError::BadComponent => "path contains '..', ':', '\\' or a control character",
             PathError::ReadDenied => "reading keys, NAND backups or /Nintendo is not allowed",
             PathError::WriteDenied => {
-                "writes are limited to /switch/paperboat/, /switch/ttydrecomp/ and /switch-mcp/"
+                "writes are limited to /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/"
             }
         }
     }
@@ -151,11 +151,11 @@ mod tests {
     fn write_rules() {
         assert!(check_write("/switch/paperboat/paperboat.nro").is_ok());
         assert!(check_write("/Switch/PaperBoat/x.nro").is_ok());
-        assert!(check_write("/switch-mcp/staging/1").is_ok());
+        assert!(check_write("/kickstand/staging/1").is_ok());
         assert_eq!(check_write("/switch/paperboat"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/switch/paperboat2/x"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/atmosphere/contents/x"), Err(PathError::WriteDenied));
-        assert_eq!(check_write("/switch-mcp/prod.keys"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/kickstand/prod.keys"), Err(PathError::WriteDenied));
     }
 
     #[test]

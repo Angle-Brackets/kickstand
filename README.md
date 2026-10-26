@@ -1,4 +1,4 @@
-# switch-mcp
+# Kickstand
 
 Lets an AI agent develop and test on a real Nintendo Switch (Atmosphère) without anyone holding it:
 deploy builds, launch and force-close them, reboot, take screenshots, press buttons, read memory and
@@ -15,20 +15,19 @@ yet on hardware. See `context/DESIGN.md` and `context/AGENT_LOG.md`.
 
 ## Build
 ```sh
-cargo build --release                                   # PC side: target/release/switch-mcp
-cd daemon && cargo nx build --release -p switch-mcp-daemon   # console side (needs cargo-nx, see AGENT_LOG)
+cargo build --release                                   # PC side: target/release/kickstand
+cd daemon && cargo nx build --release -p kickstand-nro   # console side (needs cargo-nx, see AGENT_LOG)
 ```
 
 ## Use
 ```sh
-target/release/switch-mcp token                  # create the shared token (~/.config/switch-mcp/token)
-echo 192.168.x.y > ~/.config/switch-mcp/host     # or pass --host / set SWITCH_IP
+target/release/kickstand token                  # create the shared token (~/.config/kickstand/token)
+echo 192.168.x.y > ~/.config/kickstand/host     # or pass --host / set SWITCH_IP
 scripts/run-daemon-nro.sh                        # start the daemon NRO through hbmenu's NetLoader (press Y first)
-target/release/switch-mcp ping                   # also: ls, cat, get, put
-claude mcp add switch -- "$PWD/target/release/switch-mcp" serve
+target/release/kickstand ping                   # also: ls, cat, get, put
+claude mcp add kickstand -- "$PWD/target/release/kickstand" serve
 ```
-MCP tools: `switch_ping`, `switch_list_dir`, `switch_stat`, `switch_read_file`, `switch_download`,
-`switch_upload`. Writes are limited to `/switch/paperboat/`, `/switch/ttydrecomp/` and `/switch-mcp/`; keys,
+MCP tools: `ping`, `list_dir`, `stat`, `read_file`, `download`, `upload`. Writes are limited to `/switch/paperboat/`, `/switch/ttydrecomp/` and `/kickstand/`; keys,
 NAND backups and `/Nintendo` are never read.
 
 ## License

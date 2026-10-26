@@ -8,7 +8,7 @@ report, fix it and repeat.
 
 ## Architecture
 ```
-switch-mcp/
+kickstand/
   daemon/   sysmodule on the `nx` crate: command server, launch/kill/reboot, screenshots, input, files, watchdog
   proto/    shared command and response types (no_std + serde), used by both sides
   mcp/      MCP server on rmcp: a thin client to the daemon over TCP
