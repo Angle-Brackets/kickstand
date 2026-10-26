@@ -1,0 +1,14 @@
+[package]
+name = "switch-mcp-daemon"
+version.workspace = true
+edition.workspace = true
+description = "The daemon as an hbmenu NRO, for testing before the sysmodule is installed"
+
+[dependencies]
+nx = { workspace = true, features = ["socket", "fs", "input"] }
+daemon-core.workspace = true
+nxlink.workspace = true
+proto.workspace = true
+
+[package.metadata.nx.nro]
+nacp = { default_name = "switch-mcp daemon", default_author = "Angle-Brackets", version = "0.1.0" }

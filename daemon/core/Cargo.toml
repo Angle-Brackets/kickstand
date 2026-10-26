@@ -1,0 +1,10 @@
+[package]
+name = "daemon-core"
+version.workspace = true
+edition.workspace = true
+description = "switch-mcp daemon: command server shared by the sysmodule and the test NRO"
+
+[dependencies]
+nx = { workspace = true, features = ["socket", "fs"] }
+proto.workspace = true
+nxlink.workspace = true

@@ -1,0 +1,21 @@
+# Console-side workspace: build with `cargo nx build --release -p <crate>` from this directory.
+[workspace]
+resolver = "3"
+members = ["nxlink", "hello", "core", "app", "sysmodule"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+nx = { path = "../third_party/nx" }
+proto = { package = "switch-mcp-proto", path = "../proto" }
+nxlink = { path = "nxlink" }
+daemon-core = { path = "core" }
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+debug = true
+opt-level = "s"

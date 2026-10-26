@@ -1,0 +1,4 @@
+# Newer nightlies drop core::intrinsics::abort, which `unwinding` (an nx dependency) still calls.
+[toolchain]
+channel = "nightly-2026-09-08"
+components = ["rust-src", "clippy", "rustfmt"]

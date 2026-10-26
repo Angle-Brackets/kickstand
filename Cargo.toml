@@ -1,0 +1,5 @@
+# Host-side workspace (stable Rust). The console side lives in daemon/, its own workspace on nightly.
+[workspace]
+resolver = "3"
+members = ["proto", "mcp"]
+exclude = ["daemon", "third_party"]

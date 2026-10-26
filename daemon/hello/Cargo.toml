@@ -1,0 +1,12 @@
+[package]
+name = "hello"
+version.workspace = true
+edition.workspace = true
+description = "Toolchain check: prints over nxlink and exits"
+
+[dependencies]
+nx = { workspace = true, features = ["socket"] }
+nxlink.workspace = true
+
+[package.metadata.nx.nro]
+nacp = { default_name = "switch-mcp hello", default_author = "Angle-Brackets", version = "0.1.0" }

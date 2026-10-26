@@ -1,0 +1,8 @@
+[package]
+name = "nxlink"
+version.workspace = true
+edition.workspace = true
+description = "stdout over nxlink for nx-based NROs"
+
+[dependencies]
+nx = { workspace = true, features = ["socket"] }
