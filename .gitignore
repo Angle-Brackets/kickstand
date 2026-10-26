@@ -1,0 +1,9 @@
+target/
+*.nsp
+*.nro
+*.nso
+*.npdm
+*.elf
+# Screenshots and logs pulled from the console
+captures/
+logs/
