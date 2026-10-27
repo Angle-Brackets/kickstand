@@ -7,7 +7,10 @@ use crate::client::Client;
 use crate::mock;
 
 async fn start(token: &str) -> (Arc<Client>, std::path::PathBuf) {
-    let root = std::env::temp_dir().join(format!("kickstand-test-{}-{token}", std::process::id()));
+    // Tests run in parallel, so each gets its own fake SD card.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("kickstand-test-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("atmosphere/crash_reports")).unwrap();
     std::fs::write(root.join("atmosphere/crash_reports/01.log"), "crash!").unwrap();

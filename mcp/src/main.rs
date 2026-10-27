@@ -57,6 +57,8 @@ enum Command {
         #[command(subcommand)]
         action: SysmoduleCmd,
     },
+    /// End the NRO daemon (back to hbmenu), as if + were pressed.
+    Exit,
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
@@ -157,6 +159,10 @@ async fn main() -> Result<()> {
                 }
             };
             println!("{status:?}");
+        }
+        Command::Exit => {
+            client.exit().await?;
+            println!("the NRO daemon is exiting");
         }
         Command::Token | Command::Mock { .. } => unreachable!(),
     }

@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -60,6 +60,9 @@ pub enum Request {
     /// Ends the NRO daemon after replying, returning the console to hbmenu (and freeing the port for
     /// the sysmodule). Refused by the sysmodule.
     Exit,
+    /// NRO only: replies, stops any running sysmodule, closes its listener, then starts the installed
+    /// sysmodule and exits, so the sysmodule's first bind finds the port free.
+    Handover,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -56,6 +56,13 @@ fn main() {
     wait_for_plus();
     STOP.store(true, Ordering::Relaxed);
     let _ = server.join();
+    // The listener is closed now, so the sysmodule can bind the port on its first try.
+    if daemon_core::HANDOVER_REQUESTED.load(Ordering::Relaxed) {
+        match daemon_core::start_sysmodule() {
+            Ok(pid) => log!("handed over to the sysmodule (pid {pid})"),
+            Err(rc) => log!("starting the sysmodule failed: {rc}"),
+        }
+    }
     log!("exiting");
     nxlink::disconnect();
 }

@@ -827,37 +827,41 @@ pub mod net {
                 }
             };
 
+            // Owning the fd from here on closes it if a later step fails (it used to leak). Each call's
+            // service handle is a statement temporary, so it's released before the drop needs one.
+            let listener = Self(listenfd);
+
             let yes = 1i32;
-            if let BsdResult::Err(errno) = socket_server.get_service().set_sock_opt(
+            let res = socket_server.get_service().set_sock_opt(
                 listenfd,
                 SOL_SOCKET,
                 SocketOptions::ReuseAddr as i32,
                 Buffer::from_other_var(&yes),
-            )? {
+            )?;
+            if let BsdResult::Err(errno) = res {
                 return ResultCode::new_err(nx::result::pack_value(
                     rc::RESULT_MODULE,
                     1000 + errno.cast_unsigned(),
                 ));
             }
 
-            if let BsdResult::Err(errno) = socket_server
-                .get_service()
-                .bind(listenfd, Buffer::from_var(&ipaddr))?
-            {
+            let res = socket_server.get_service().bind(listenfd, Buffer::from_var(&ipaddr))?;
+            if let BsdResult::Err(errno) = res {
                 return ResultCode::new_err(nx::result::pack_value(
                     rc::RESULT_MODULE,
                     1000 + errno.cast_unsigned(),
                 ));
             };
 
-            if let BsdResult::Err(errno) = socket_server.get_service().listen(listenfd, 5)? {
+            let res = socket_server.get_service().listen(listenfd, 5)?;
+            if let BsdResult::Err(errno) = res {
                 return ResultCode::new_err(nx::result::pack_value(
                     rc::RESULT_MODULE,
                     1000 + errno.cast_unsigned(),
                 ));
             };
 
-            Ok(Self(listenfd))
+            Ok(listener)
         }
 
         pub fn accept(&self) -> Result<(TcpStream, SocketAddrRepr)> {
@@ -998,17 +1002,17 @@ pub mod net {
                 }
             };
 
-            if let BsdResult::Err(errno) = socket_server
-                .get_service()
-                .connect(socket, Buffer::from_var(&destination))?
-            {
+            // Closes the fd if the connect fails (it used to leak).
+            let stream = Self(socket);
+            let res = socket_server.get_service().connect(socket, Buffer::from_var(&destination))?;
+            if let BsdResult::Err(errno) = res {
                 return ResultCode::new_err(nx::result::pack_value(
                     rc::RESULT_MODULE,
                     1000 + errno.cast_unsigned(),
                 ));
             };
 
-            Ok(Self(socket))
+            Ok(stream)
         }
 
         pub fn linger(&self) -> Result<Option<Duration>> {
@@ -1271,17 +1275,17 @@ pub mod net {
                 }
             };
 
-            if let BsdResult::Err(errno) = socket_server
-                .get_service()
-                .connect(socket, Buffer::from_var(&destination))?
-            {
+            // Closes the fd if the connect fails (it used to leak).
+            let stream = Self(socket);
+            let res = socket_server.get_service().connect(socket, Buffer::from_var(&destination))?;
+            if let BsdResult::Err(errno) = res {
                 return ResultCode::new_err(nx::result::pack_value(
                     rc::RESULT_MODULE,
                     1000 + errno.cast_unsigned(),
                 ));
             };
 
-            Ok(Self(socket))
+            Ok(stream)
         }
 
         /// Receives data on the socket from the remote address to which it is connected.

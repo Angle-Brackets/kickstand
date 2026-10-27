@@ -55,6 +55,8 @@ Only the power button should ever need the user.
 ## Build order
 1. Toolchain: nightly, build-std, a hello-world NRO on `nx` that runs on hardware.
 2. Daemon v0: ping, list/read files, upload a build. MCP server exposing those.
+   Done, on hardware. The sysmodule installs over the network and takes over from the NRO (`handover`),
+   with boot2 off.
 3. Launch / force-close / reboot. Prototype the hbl-override launch early. Reboot comes in two forms:
    - plain reboot through `bpc` (Atmosphère's bpc mitm may still route it to `reboot_payload.bin`);
    - **reboot to hekate**: read hekate's payload from the SD card, hand it to Atmosphère with
@@ -67,7 +69,11 @@ Only the power button should ever need the user.
    A bad payload or boot config can leave the console on a black screen until someone holds the power
    button (and injects a payload, on an RCM setup), so gate this behind a confirm step and test it first with
    the user watching.
+   Then turn on boot2 for the sysmodule (with the user's go-ahead) once it has run a while without trouble.
 4. Screenshots and button input.
+   Also a simple on-screen UI for the NRO daemon (user's request): IP and port, connected client, last
+   requests, "press + to exit", using nx's text console. The black screen confused us once. A UI for the
+   sysmodule would be an overlay (Tesla is C++; look for a Rust option).
 5. Watchdog: detect a hung app (no heartbeat or log output) and recover.
 6. GDB stub integration.
 Steps 1–4 are the useful core: deploy, test, look, recover.

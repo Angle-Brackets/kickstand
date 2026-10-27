@@ -186,25 +186,25 @@ impl Client {
         expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
-    /// Starts the sysmodule and, if the NRO daemon is the one answering, ends it so the sysmodule can
-    /// take over the port. Waits until the sysmodule answers. Returns its status.
+    /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
+    /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
     pub async fn handover(&self) -> Result<SysmoduleStatus> {
-        let status = self.sysmodule(Request::SysmoduleStart).await?;
         if self.hello().await?.1 == DaemonKind::Nro {
-            self.exit().await?;
+            let resp = self.request(Request::Handover).await;
+            *self.conn.lock().await = None;
+            expect(resp?, |r| matches!(r, Response::Ok))?;
         }
-        // The sysmodule retries its bind every few seconds.
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
             match self.hello().await {
-                Ok((_, DaemonKind::Sysmodule)) => return Ok(status),
+                Ok((_, DaemonKind::Sysmodule)) => return self.sysmodule(Request::SysmoduleStatus).await,
                 Ok((_, DaemonKind::Nro)) => *self.conn.lock().await = None,
                 Err(_) => {}
             }
             if Instant::now() > deadline {
                 return Err(anyhow!("the sysmodule didn't answer within 30s; see /kickstand/logs/daemon.log"));
             }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
@@ -241,9 +241,23 @@ impl Client {
 
     async fn connected<'a>(&self, slot: &'a mut Option<Conn>) -> Result<&'a mut Conn> {
         if slot.is_none() {
-            *slot = Some(self.connect().await?);
+            *slot = Some(self.connect_retrying().await?);
         }
         Ok(slot.as_mut().unwrap())
+    }
+
+    /// The console's TCP stack sometimes resets a connection made right after another one closed (seen
+    /// with the sysmodule), so a failed Hello is retried a couple of times. Refused connections (no
+    /// daemon) and protocol errors fail straight away.
+    async fn connect_retrying(&self) -> Result<Conn> {
+        let mut attempt = 0;
+        loop {
+            match self.connect().await {
+                Err(e) if attempt < 2 && is_reset(&e) => attempt += 1,
+                other => return other,
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     async fn connect(&self) -> Result<Conn> {
@@ -287,6 +301,12 @@ async fn recv(conn: &mut Conn) -> Result<Response> {
         anyhow::Ok(proto::decode::<Response>(&body)?)
     };
     timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon did not reply within {REPLY_TIMEOUT:?}"))?
+}
+
+fn is_reset(e: &anyhow::Error) -> bool {
+    e.chain().filter_map(|c| c.downcast_ref::<std::io::Error>()).any(|io| {
+        matches!(io.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn expect(resp: Response, ok: impl Fn(&Response) -> bool) -> Result<Response> {

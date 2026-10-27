@@ -67,6 +67,7 @@ impl<'a> Session<'a> {
                 Response::Ok
             }
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
+            Request::Handover => self.handover(),
         }
     }
 
@@ -209,6 +210,25 @@ impl<'a> Session<'a> {
         Response::Sysmodule(sysmodule_status())
     }
 
+    fn handover(&mut self) -> Response {
+        if self.kind != DaemonKind::Nro {
+            return Response::error(ErrorKind::Unsupported, "only the NRO daemon hands over");
+        }
+        let status = sysmodule_status();
+        if !status.installed {
+            return Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP));
+        }
+        // An old instance would hold or contend for the port; replace it.
+        if status.pid.is_some()
+            && let Err(rc) = services::pm::terminate_program(path::SYSMODULE_PROGRAM_ID)
+        {
+            return system_error("stopping the running sysmodule", rc);
+        }
+        crate::HANDOVER_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+        self.exit_requested = true;
+        Response::Ok
+    }
+
     fn abort_upload(&mut self) {
         if self.upload.take().is_some() {
             let _ = sd::remove_if_exists(STAGING_FILE);
@@ -238,7 +258,7 @@ fn sysmodule_start() -> Response {
     if !status.installed {
         return Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP));
     }
-    match services::pm::launch_sd_program(path::SYSMODULE_PROGRAM_ID) {
+    match crate::start_sysmodule() {
         Ok(pid) => {
             crate::log!("sysmodule started, pid {pid}");
             Response::Sysmodule(SysmoduleStatus { pid: Some(pid), ..status })

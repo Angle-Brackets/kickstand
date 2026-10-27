@@ -13,6 +13,14 @@ mod session;
 
 pub use proto::DaemonKind;
 
+/// Set when a client asked the NRO daemon to hand over to the sysmodule; the NRO starts it on exit.
+pub static HANDOVER_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Starts the installed sysmodule; returns its pid.
+pub fn start_sysmodule() -> nx::result::Result<u64> {
+    services::pm::launch_sd_program(proto::path::SYSMODULE_PROGRAM_ID)
+}
+
 /// The daemon's version, reported in [`proto::Response::Hello`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
