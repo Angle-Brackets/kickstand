@@ -194,6 +194,14 @@ impl Client {
         }
     }
 
+    /// The daemon's resource limit usage (see [`Request::Resources`]).
+    pub async fn resources(&self) -> Result<proto::Resources> {
+        match self.request(Request::Resources).await? {
+            Response::Resources(r) => Ok(r),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Asks the NRO daemon to exit. The connection is dropped afterwards.
     pub async fn exit(&self) -> Result<()> {
         let resp = self.request(Request::Exit).await;
@@ -378,4 +386,20 @@ pub fn parse_hekate_target(spec: &str, entries: &[String]) -> Result<HekateTarge
 pub fn check_path(path: &str, write: bool) -> Result<String> {
     let checked = if write { proto::path::check_write(path) } else { proto::path::check_read(path) };
     checked.map_err(|e| anyhow!("{path}: {}", e.describe()))
+}
+
+/// One line per resource: `name: current (peak) / limit`, memory in KiB, plus the process's own memory.
+pub fn describe_resources(r: &proto::Resources) -> String {
+    let mut out = String::new();
+    for u in &r.limits {
+        let (cur, peak, lim) = if u.name == "memory" {
+            (u.current / 1024, u.peak / 1024, u.limit / 1024)
+        } else {
+            (u.current, u.peak, u.limit)
+        };
+        let unit = if u.name == "memory" { " KiB" } else { "" };
+        out.push_str(&format!("{}: {cur}{unit} (peak {peak}) of {lim}, {} left\n", u.name, lim - cur));
+    }
+    out.push_str(&format!("this process: {} of {} KiB\n", r.process_used / 1024, r.process_total / 1024));
+    out
 }

@@ -59,6 +59,8 @@ enum Command {
     },
     /// End the NRO daemon (back to hbmenu), as if + were pressed.
     Exit,
+    /// Resource limit usage of the daemon's group (for the sysmodule: all system processes)
+    Resources,
     /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
     /// --yes, only lists the entries and says what would happen.
     Reboot {
@@ -189,6 +191,7 @@ async fn main() -> Result<()> {
             client.reboot_to_hekate(target).await?;
             println!("rebooting into hekate: {what}");
         }
+        Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
         Command::Exit => {
             client.exit().await?;
             println!("the NRO daemon is exiting");

@@ -78,6 +78,7 @@ impl<'a> Session<'a> {
                 Response::Ok
             }
             Request::RebootToHekate { target } => self.reboot_to_hekate(target),
+            Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
         }
@@ -321,6 +322,41 @@ pub fn install_hekate(target: HekateTarget) -> Result<(), Response> {
     }
     payload[proto::hekate::BOOT_CFG_OFFSET..proto::hekate::MAGIC_OFFSET].copy_from_slice(&proto::hekate::boot_cfg(target));
     services::power::set_reboot_payload(&payload).map_err(|rc| system_error("setting the reboot payload (bpc:ams)", rc))
+}
+
+/// This process's resource limit usage (shared with the rest of its group) and its own memory.
+fn resources() -> nx::result::Result<proto::Resources> {
+    use nx::svc::{self, InfoId, LimitableResource};
+    let me = svc::CURRENT_PROCESS_PSEUDO_HANDLE;
+    let limit = svc::get_info(InfoId::ResourceLimit, 0, 0)? as svc::Handle;
+    let kinds = [
+        (LimitableResource::Memory, "memory"),
+        (LimitableResource::Threads, "threads"),
+        (LimitableResource::Events, "events"),
+        (LimitableResource::TransferMemories, "transfer memories"),
+        (LimitableResource::Sessions, "sessions"),
+    ];
+    let mut limits = alloc::vec::Vec::new();
+    let result: nx::result::Result<()> = (|| {
+        for (kind, name) in kinds {
+            let mut peak = 0;
+            nx::result::pack(unsafe { svc::asm::get_resource_limit_peak_value(&mut peak, limit, kind) }, ())?;
+            limits.push(proto::ResourceUsage {
+                name: name.into(),
+                current: svc::get_resource_limit_current_value(limit, kind)?,
+                peak,
+                limit: svc::get_resource_limit_limit_value(limit, kind)?,
+            });
+        }
+        Ok(())
+    })();
+    let _ = svc::close_handle(limit);
+    result?;
+    Ok(proto::Resources {
+        limits,
+        process_used: svc::get_info(InfoId::UsedMemorySize, me, 0)?,
+        process_total: svc::get_info(InfoId::TotalMemorySize, me, 0)?,
+    })
 }
 
 fn system_error(what: &str, rc: nx::result::ResultCode) -> Response {

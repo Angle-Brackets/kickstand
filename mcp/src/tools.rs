@@ -145,6 +145,12 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
+    #[tool(description = "Resource limit usage of the daemon's group: memory, threads, events, transfer memories, sessions (current, peak, limit), plus the daemon's own memory. From the sysmodule this is the limit all system processes share, so it shows how close the system is to running out.")]
+    async fn resources(&self) -> CallToolResult {
+        let result = async { anyhow::Ok(crate::client::describe_resources(&self.client.resources().await?)) };
+        result.await.map_or_else(fail, ok)
+    }
+
     #[tool(description = "List a directory on the Switch's SD card. Keys, NAND backups and /Nintendo are not readable.")]
     async fn list_dir(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
         let result = async {

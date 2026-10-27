@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -120,6 +120,10 @@ pub enum Request {
     /// Warm reboot into hekate (Atmosphère's `reboot_payload.bin`), never a cold reboot. The daemon replies
     /// first, then reboots; it doesn't come back unless the sysmodule starts at boot.
     RebootToHekate { target: HekateTarget },
+    /// How much of its resource limit (memory, threads, events, transfer memories, sessions) the
+    /// daemon's group uses, and the daemon's own memory. For the sysmodule that group is the one every
+    /// system process shares; for the NRO it's the application's.
+    Resources,
 }
 
 /// What hekate does after a [`Request::RebootToHekate`].
@@ -147,7 +151,27 @@ pub enum Response {
     UploadDone { path: String, size: u64 },
     Deleted { path: String, was_dir: bool },
     Sysmodule(SysmoduleStatus),
+    Resources(Resources),
     Error(Error),
+}
+
+/// Answer to [`Request::Resources`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Resources {
+    /// One per limitable resource, in kernel order: memory (bytes), threads, events, transfer
+    /// memories, sessions.
+    pub limits: Vec<ResourceUsage>,
+    /// The daemon process's own memory in use and available, in bytes.
+    pub process_used: u64,
+    pub process_total: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ResourceUsage {
+    pub name: String,
+    pub current: i64,
+    pub peak: i64,
+    pub limit: i64,
 }
 
 /// Whether the daemon is running as the real sysmodule or as a test NRO from hbmenu.
