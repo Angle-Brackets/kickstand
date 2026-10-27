@@ -6,7 +6,7 @@ use alloc::string::String;
 
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
-use proto::{DaemonKind, ErrorKind, PROTOCOL_VERSION, Request, Response, crc32};
+use proto::{DaemonKind, ErrorKind, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
 
 use crate::sd;
 
@@ -26,12 +26,18 @@ pub struct Session<'a> {
     kind: DaemonKind,
     authed: bool,
     upload: Option<Upload>,
+    exit_requested: bool,
 }
 
 impl<'a> Session<'a> {
     /// `token` is the shared secret clients must present; with `None` every Hello is refused.
     pub fn new(token: Option<&'a str>, kind: DaemonKind) -> Self {
-        Session { token, kind, authed: false, upload: None }
+        Session { token, kind, authed: false, upload: None, exit_requested: false }
+    }
+
+    /// Whether the client asked the NRO daemon to exit (checked after the reply is sent).
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
@@ -53,6 +59,14 @@ impl<'a> Session<'a> {
                 Response::Ok
             }
             Request::Delete { path, recursive } => self.delete(&path, recursive),
+            Request::SysmoduleStatus => Response::Sysmodule(sysmodule_status()),
+            Request::SysmoduleStart => sysmodule_start(),
+            Request::SysmoduleStop => self.sysmodule_stop(),
+            Request::Exit if self.kind == DaemonKind::Nro => {
+                self.exit_requested = true;
+                Response::Ok
+            }
+            Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
         }
     }
 
@@ -182,6 +196,19 @@ impl<'a> Session<'a> {
         }
     }
 
+    fn sysmodule_stop(&mut self) -> Response {
+        if self.kind == DaemonKind::Sysmodule {
+            return Response::error(ErrorKind::Unsupported, "the sysmodule can't stop itself; use the NRO daemon");
+        }
+        if sysmodule_status().pid.is_some()
+            && let Err(rc) = services::pm::terminate_program(path::SYSMODULE_PROGRAM_ID)
+        {
+            return system_error("terminating the sysmodule", rc);
+        }
+        crate::log!("sysmodule stopped");
+        Response::Sysmodule(sysmodule_status())
+    }
+
     fn abort_upload(&mut self) {
         if self.upload.take().is_some() {
             let _ = sd::remove_if_exists(STAGING_FILE);
@@ -193,6 +220,36 @@ impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.abort_upload();
     }
+}
+
+fn sysmodule_status() -> SysmoduleStatus {
+    SysmoduleStatus {
+        installed: sd::stat(path::SYSMODULE_NSP).is_ok(),
+        boot2: sd::stat(path::SYSMODULE_BOOT2_FLAG).is_ok(),
+        pid: services::pm::process_id(path::SYSMODULE_PROGRAM_ID),
+    }
+}
+
+fn sysmodule_start() -> Response {
+    let status = sysmodule_status();
+    if status.pid.is_some() {
+        return Response::Sysmodule(status);
+    }
+    if !status.installed {
+        return Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP));
+    }
+    match services::pm::launch_sd_program(path::SYSMODULE_PROGRAM_ID) {
+        Ok(pid) => {
+            crate::log!("sysmodule started, pid {pid}");
+            Response::Sysmodule(SysmoduleStatus { pid: Some(pid), ..status })
+        }
+        Err(rc) => system_error("launching the sysmodule", rc),
+    }
+}
+
+fn system_error(what: &str, rc: nx::result::ResultCode) -> Response {
+    let message = format!("{what}: {rc}");
+    Response::Error(proto::Error { kind: ErrorKind::System, message, result: Some(rc.get_value()) })
 }
 
 fn forbidden(e: PathError) -> Response {

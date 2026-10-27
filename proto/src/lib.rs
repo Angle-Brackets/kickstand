@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -51,6 +51,15 @@ pub enum Request {
     /// Deletes a file, or a directory (which must be empty unless `recursive`). Only inside the write
     /// roots, like uploads ([`path::check_write`]).
     Delete { path: String, recursive: bool },
+    /// Reports on the sysmodule ([`path::SYSMODULE_PROGRAM_ID`]); the next two also act on it.
+    SysmoduleStatus,
+    /// Starts the installed sysmodule (pm:shell), whether or not it boots with the console.
+    SysmoduleStart,
+    /// Terminates the sysmodule. Refused by the sysmodule itself.
+    SysmoduleStop,
+    /// Ends the NRO daemon after replying, returning the console to hbmenu (and freeing the port for
+    /// the sysmodule). Refused by the sysmodule.
+    Exit,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -66,6 +75,7 @@ pub enum Response {
     ChunkOk { received: u64 },
     UploadDone { path: String, size: u64 },
     Deleted { path: String, was_dir: bool },
+    Sysmodule(SysmoduleStatus),
     Error(Error),
 }
 
@@ -74,6 +84,16 @@ pub enum Response {
 pub enum DaemonKind {
     Sysmodule,
     Nro,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SysmoduleStatus {
+    /// `exefs.nsp` is on the SD card.
+    pub installed: bool,
+    /// `flags/boot2.flag` is on the SD card, so it starts at boot.
+    pub boot2: bool,
+    /// Its process id, if it's running.
+    pub pid: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -104,6 +124,10 @@ pub enum ErrorKind {
     /// during an upload.
     UploadState,
     ChecksumMismatch,
+    /// A system service call failed (`result` has the code).
+    System,
+    /// The request doesn't apply to this kind of daemon (e.g. `Exit` sent to the sysmodule).
+    Unsupported,
 }
 
 impl Response {

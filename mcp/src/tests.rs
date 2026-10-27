@@ -81,6 +81,21 @@ async fn delete_files_and_dirs() {
 }
 
 #[tokio::test]
+async fn sysmodule_install_and_status() {
+    let (client, root) = start("tok").await;
+    let status = client.sysmodule(proto::Request::SysmoduleStatus).await.unwrap();
+    assert!(!status.installed && !status.boot2 && status.pid.is_none());
+    client.install_sysmodule(b"NSP0").await.unwrap();
+    assert_eq!(std::fs::read(root.join(&proto::path::SYSMODULE_NSP[1..])).unwrap(), b"NSP0");
+    assert_eq!(std::fs::read_to_string(root.join(&proto::path::TOKEN_PATH[1..])).unwrap(), "tok\n");
+    let status = client.sysmodule(proto::Request::SysmoduleStatus).await.unwrap();
+    assert!(status.installed && !status.boot2);
+    // Other programs' contents stay read-only.
+    let err = client.upload("/atmosphere/contents/0100000000001000/exefs.nsp", b"x").await.unwrap_err();
+    assert!(err.to_string().contains("Forbidden"), "{err}");
+}
+
+#[tokio::test]
 async fn rules_enforced_by_daemon() {
     let (client, _root) = start("tok").await;
     let err = client.read("/prod.keys", 0, 10).await.unwrap_err().to_string();

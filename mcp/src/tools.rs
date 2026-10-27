@@ -64,6 +64,35 @@ pub struct DeleteArgs {
     pub recursive: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SysmoduleAction {
+    /// Whether it's installed, starts at boot, and is running.
+    Status,
+    /// Upload a built sys-kickstand.nsp (local_path) and the token. Doesn't enable start-at-boot.
+    Install,
+    /// Start it (it keeps running until reboot or stop).
+    Start,
+    /// Stop it (only from the NRO daemon).
+    Stop,
+    /// Start it, end the NRO daemon, and wait until the sysmodule answers.
+    Handover,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SysmoduleArgs {
+    pub action: SysmoduleAction,
+    /// For install: the sys-kickstand.nsp to upload.
+    pub local_path: Option<String>,
+}
+
+fn describe(s: &proto::SysmoduleStatus) -> String {
+    let running = s.pid.map_or("not running".to_string(), |pid| format!("running (pid {pid})"));
+    let boot = if s.boot2 { "starts at boot" } else { "does not start at boot" };
+    let installed = if s.installed { "installed" } else { "not installed" };
+    format!("sysmodule: {installed}, {boot}, {running}")
+}
+
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
@@ -170,6 +199,26 @@ impl Tools {
                 stats.size,
                 stats.size as f64 / 1e6 / secs.max(1e-6)
             ))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Manage the kickstand sysmodule, the always-on daemon: status, install (upload a built .nsp), start, stop, or handover (start it and end the hbmenu NRO daemon). Never enables start-at-boot; that needs the user's go-ahead.")]
+    async fn sysmodule(&self, Parameters(args): Parameters<SysmoduleArgs>) -> CallToolResult {
+        let result = async {
+            let status = match args.action {
+                SysmoduleAction::Status => self.client.sysmodule(proto::Request::SysmoduleStatus).await?,
+                SysmoduleAction::Start => self.client.sysmodule(proto::Request::SysmoduleStart).await?,
+                SysmoduleAction::Stop => self.client.sysmodule(proto::Request::SysmoduleStop).await?,
+                SysmoduleAction::Handover => self.client.handover().await?,
+                SysmoduleAction::Install => {
+                    let local = args.local_path.ok_or_else(|| anyhow::anyhow!("install needs local_path"))?;
+                    let nsp = tokio::fs::read(&local).await?;
+                    self.client.install_sysmodule(&nsp).await?;
+                    self.client.sysmodule(proto::Request::SysmoduleStatus).await?
+                }
+            };
+            anyhow::Ok(describe(&status))
         };
         result.await.map_or_else(fail, ok)
     }

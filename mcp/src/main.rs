@@ -52,9 +52,24 @@ enum Command {
         #[arg(short, long)]
         recursive: bool,
     },
+    /// Manage the sysmodule: status, install <nsp>, start, stop, handover (start it and end the NRO).
+    Sysmodule {
+        #[command(subcommand)]
+        action: SysmoduleCmd,
+    },
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
+}
+
+#[derive(Subcommand)]
+enum SysmoduleCmd {
+    Status,
+    /// Upload sys-kickstand.nsp and the token (doesn't enable start-at-boot).
+    Install { nsp: PathBuf },
+    Start,
+    Stop,
+    Handover,
 }
 
 #[tokio::main]
@@ -128,6 +143,20 @@ async fn main() -> Result<()> {
             let path = check_path(&path, true)?;
             let was_dir = client.delete(&path, recursive).await?;
             println!("deleted {path}{}", if was_dir { "/" } else { "" });
+        }
+        Command::Sysmodule { action } => {
+            let status = match action {
+                SysmoduleCmd::Status => client.sysmodule(proto::Request::SysmoduleStatus).await?,
+                SysmoduleCmd::Start => client.sysmodule(proto::Request::SysmoduleStart).await?,
+                SysmoduleCmd::Stop => client.sysmodule(proto::Request::SysmoduleStop).await?,
+                SysmoduleCmd::Handover => client.handover().await?,
+                SysmoduleCmd::Install { nsp } => {
+                    let data = std::fs::read(&nsp).with_context(|| format!("reading {}", nsp.display()))?;
+                    client.install_sysmodule(&data).await?;
+                    client.sysmodule(proto::Request::SysmoduleStatus).await?
+                }
+            };
+            println!("{status:?}");
         }
         Command::Token | Command::Mock { .. } => unreachable!(),
     }

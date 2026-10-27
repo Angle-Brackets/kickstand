@@ -7,14 +7,22 @@
 use alloc::string::String;
 
 /// The directories uploads may write into. Everything else on the card is read-only to the daemon.
-/// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet.
-pub const WRITE_ROOTS: &[&str] = &["/switch/paperboat/", "/switch/ttydrecomp/", "/kickstand/"];
+/// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet. The last one is
+/// the daemon's own sysmodule, so it can be installed and updated over the network.
+pub const WRITE_ROOTS: &[&str] =
+    &["/switch/paperboat/", "/switch/ttydrecomp/", "/kickstand/", "/atmosphere/contents/42000000004D4350/"];
+
+/// The sysmodule's program id (ends in ASCII "MCP"), and where Atmosphère loads it from.
+pub const SYSMODULE_PROGRAM_ID: u64 = 0x4200_0000_004D_4350;
+pub const SYSMODULE_NSP: &str = "/atmosphere/contents/42000000004D4350/exefs.nsp";
+/// Present means Atmosphère starts the sysmodule at boot. Creating it needs the user's go-ahead.
+pub const SYSMODULE_BOOT2_FLAG: &str = "/atmosphere/contents/42000000004D4350/flags/boot2.flag";
 
 /// Where uploads are staged before being moved into place.
 pub const STAGING_DIR: &str = "/kickstand/staging";
 
 /// Where the daemon reads its shared token from.
-pub const TOKEN_PATH: &str = "/config/kickstand/token.txt";
+pub const TOKEN_PATH: &str = "/kickstand/token.txt";
 
 /// Top-level directories that are never read: NAND images and backups, and Nintendo's own content.
 const DENIED_ROOTS: &[&str] = &["/emummc", "/backup", "/nintendo", "/atmosphere/automatic_backups"];
@@ -42,7 +50,8 @@ impl PathError {
             PathError::BadComponent => "path contains '..', ':', '\\' or a control character",
             PathError::ReadDenied => "reading keys, NAND backups or /Nintendo is not allowed",
             PathError::WriteDenied => {
-                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/"
+                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/, /kickstand/ \
+                 and the daemon's own /atmosphere/contents/42000000004D4350/"
             }
         }
     }
@@ -155,6 +164,8 @@ mod tests {
         assert_eq!(check_write("/switch/paperboat"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/switch/paperboat2/x"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/atmosphere/contents/x"), Err(PathError::WriteDenied));
+        assert!(check_write(SYSMODULE_NSP).is_ok());
+        assert_eq!(check_write("/atmosphere/contents/0100000000000000/exefs.nsp"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/kickstand/prod.keys"), Err(PathError::WriteDenied));
     }
 

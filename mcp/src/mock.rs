@@ -94,6 +94,16 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 upload = None;
                 Response::Ok
             }
+            Request::SysmoduleStatus | Request::SysmoduleStart | Request::SysmoduleStop => {
+                // No processes to manage: report what's on the "SD card", never running.
+                let installed = root.join(&path::SYSMODULE_NSP[1..]).exists();
+                let boot2 = root.join(&path::SYSMODULE_BOOT2_FLAG[1..]).exists();
+                Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
+            }
+            Request::Exit => {
+                stream.write_all(&proto::encode(&Response::Ok)?).await?;
+                return Ok(());
+            }
             Request::Delete { .. } if upload.is_some() => Response::error(ErrorKind::UploadState, "uploading"),
             Request::Delete { path, recursive } => match path::check_write(&path) {
                 Ok(p) => delete(&root.join(&p[1..]), p, recursive),

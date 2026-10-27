@@ -31,9 +31,10 @@ impl service::IService for ShellService { /* get_name() = "pm:shell", as_domain(
 | Own buttons (NRO build) | `input` (hid) |
 
 ## Missing: wrappers we need, by build step
+`daemon/services/src/pm.rs` has `pm:shell` LaunchProgram/TerminateProgram and `pm:dmnt` GetProcessId.
 | Step | Service | Commands (libnx name) | Notes |
 | - | - | - | - |
-| 3 | `pm:shell` | `pmshellLaunchProgram` (0), `TerminateProcess` (1), `TerminateProgram` (2), `GetApplicationProcessIdForShell` (6 on 5.0+) | Force-close a hung game; start our own sysmodule by hand while boot2 is off |
+| 3 (done: `daemon/services`) | `pm:shell` | `pmshellLaunchProgram` (0), `TerminateProcess` (1), `TerminateProgram` (2), `GetApplicationProcessIdForShell` (6 on 5.0+) | Force-close a hung game; start our own sysmodule by hand while boot2 is off |
 | 3 | `pgl` (10.0+) | `pglLaunchProgram`, `pglTerminateProcess`, `pglGetApplicationProcessId` | Newer front end over pm; pm:shell still works on Atmosphère |
 | 3 | `ns:dev` | `nsdevLaunchApplicationForDevelop`, `nsdevTerminateApplication`, `nsdevGetRunningApplicationProcessIdForDevelop` | Launch a game title, which Atmosphère's hbl override turns into hbmenu/our NRO with full memory. The least proven piece |
 | 3 | `bpc` | `bpcRebootSystem`, `bpcShutdownSystem` | Atmosphère's bpc mitm sends reboots to `reboot_payload.bin` (usually hekate) unless configured otherwise: check the user's setup before relying on it |

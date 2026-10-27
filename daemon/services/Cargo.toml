@@ -1,0 +1,10 @@
+[package]
+name = "services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wrappers for the Horizon services nx doesn't cover (see context/NX_SERVICES.md)"
+
+[dependencies]
+nx = { workspace = true, features = ["services"] }
+nx-derive = { path = "../../third_party/nx/nx-derive" }

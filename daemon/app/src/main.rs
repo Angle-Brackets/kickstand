@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The daemon as an NRO. Start it with nxlink, passing the token as an argument:
 //! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`. Press + on the console to exit.
-//! Without `--token` it uses `/config/kickstand/token.txt` like the sysmodule does.
+//! Without `--token` it uses `/kickstand/token.txt` like the sysmodule does. A client's `Exit` request
+//! also ends it.
 
 #![no_std]
 #![no_main]
@@ -78,6 +79,9 @@ fn wait_for_plus() {
     let ctx = input::Context::new(styles, 1).unwrap();
     let mut players = [ctx.get_player(hid::NpadIdType::No1), ctx.get_player(hid::NpadIdType::Handheld)];
     loop {
+        if STOP.load(Ordering::Relaxed) {
+            return;
+        }
         if players.iter_mut().any(|p| p.get_buttons_down().contains(hid::NpadButton::Plus())) {
             return;
         }

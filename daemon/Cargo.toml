@@ -1,7 +1,7 @@
 # Console-side workspace: build with `cargo nx build --release -p <crate>` from this directory.
 [workspace]
 resolver = "3"
-members = ["nxlink", "hello", "core", "app", "sysmodule"]
+members = ["nxlink", "hello", "services", "core", "app", "sysmodule"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ nx = { path = "../third_party/nx" }
 proto = { package = "kickstand-proto", path = "../proto" }
 nxlink = { path = "nxlink" }
 daemon-core = { path = "core" }
+services = { path = "services" }
 
 [profile.dev]
 panic = "unwind"

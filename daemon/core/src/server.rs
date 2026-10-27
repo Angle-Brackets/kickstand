@@ -22,8 +22,8 @@ pub struct Config<'a> {
     pub token: Option<&'a str>,
     /// Drop a client that sends nothing for this long, so a vanished PC can't hold the only slot.
     pub idle_timeout_ms: i32,
-    /// When set, the server returns soon after this becomes true (the NRO build's exit button).
-    /// Without it, waits block with no timeout.
+    /// When set, the server returns soon after this becomes true (the NRO build's exit button), and sets
+    /// it when a client sends `Exit`. Without it, waits block with no timeout.
     pub stop: Option<&'a AtomicBool>,
 }
 
@@ -131,6 +131,13 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
             }
         };
         if send(stream, &resp).is_err() {
+            return;
+        }
+        if session.exit_requested() {
+            if let Some(stop) = config.stop {
+                log!("exit requested by the client");
+                stop.store(true, Ordering::Relaxed);
+            }
             return;
         }
     }

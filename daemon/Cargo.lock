@@ -52,6 +52,7 @@ dependencies = [
  "kickstand-proto",
  "nx",
  "nxlink",
+ "services",
 ]
 
 [[package]]
@@ -269,6 +270,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "services"
+version = "0.1.0"
+dependencies = [
+ "nx",
+ "nx-derive",
 ]
 
 [[package]]

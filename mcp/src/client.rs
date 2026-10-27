@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use proto::{DaemonKind, DirEntry, PROTOCOL_VERSION, Request, Response};
+use proto::{DaemonKind, DirEntry, PROTOCOL_VERSION, Request, Response, SysmoduleStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
@@ -161,6 +161,50 @@ impl Client {
         match self.request(Request::Delete { path: path.into(), recursive }).await? {
             Response::Deleted { was_dir, .. } => Ok(was_dir),
             other => Err(unexpected(other)),
+        }
+    }
+
+    /// Installs the sysmodule (`exefs.nsp`) and this client's token, which the sysmodule reads at start.
+    /// Doesn't create `boot2.flag`, so it won't start at boot.
+    pub async fn install_sysmodule(&self, nsp: &[u8]) -> Result<UploadStats> {
+        self.upload(proto::path::TOKEN_PATH, format!("{}\n", self.token).as_bytes()).await?;
+        self.upload(proto::path::SYSMODULE_NSP, nsp).await
+    }
+
+    /// Sends a [`Request::SysmoduleStatus`], `SysmoduleStart` or `SysmoduleStop`.
+    pub async fn sysmodule(&self, req: Request) -> Result<SysmoduleStatus> {
+        match self.request(req).await? {
+            Response::Sysmodule(status) => Ok(status),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Asks the NRO daemon to exit. The connection is dropped afterwards.
+    pub async fn exit(&self) -> Result<()> {
+        let resp = self.request(Request::Exit).await;
+        *self.conn.lock().await = None;
+        expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
+    /// Starts the sysmodule and, if the NRO daemon is the one answering, ends it so the sysmodule can
+    /// take over the port. Waits until the sysmodule answers. Returns its status.
+    pub async fn handover(&self) -> Result<SysmoduleStatus> {
+        let status = self.sysmodule(Request::SysmoduleStart).await?;
+        if self.hello().await?.1 == DaemonKind::Nro {
+            self.exit().await?;
+        }
+        // The sysmodule retries its bind every few seconds.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match self.hello().await {
+                Ok((_, DaemonKind::Sysmodule)) => return Ok(status),
+                Ok((_, DaemonKind::Nro)) => *self.conn.lock().await = None,
+                Err(_) => {}
+            }
+            if Instant::now() > deadline {
+                return Err(anyhow!("the sysmodule didn't answer within 30s; see /kickstand/logs/daemon.log"));
+            }
         }
     }
 

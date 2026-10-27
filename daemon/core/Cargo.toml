@@ -9,3 +9,4 @@ description = "kickstand daemon: command server shared by the sysmodule and the 
 nx = { workspace = true, features = ["socket", "fs"] }
 proto.workspace = true
 nxlink.workspace = true
+services.workspace = true
