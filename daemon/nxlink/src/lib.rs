@@ -24,15 +24,34 @@ static STDOUT: Mutex<Option<TcpStream>> = Mutex::new(None);
 
 /// The arguments the NRO was launched with, minus the program path and nxlink's host marker.
 pub fn args() -> impl Iterator<Item = &'static str> {
-    let argv = nx::hbl::get_argv().unwrap_or("");
-    let mut parts = argv.split_ascii_whitespace();
+    let mut parts = split_argv(nx::hbl::get_argv().unwrap_or(""));
     let _program = parts.next();
     parts.filter(|part| parse_host(part).is_none())
 }
 
 /// The PC that sent this NRO, if it came through nxlink.
 pub fn host() -> Option<Ipv4Addr> {
-    nx::hbl::get_argv()?.split_ascii_whitespace().last().and_then(parse_host)
+    split_argv(nx::hbl::get_argv()?).last().and_then(parse_host)
+}
+
+/// Splits HBL's argv string the way libnx does: on spaces, except inside double or single quotes. hbmenu
+/// quotes every argument (`"sdmc:/switch/x.nro" "one" "6056a8c0_NXLINK_"`).
+fn split_argv(argv: &str) -> impl Iterator<Item = &str> {
+    let mut rest = argv;
+    core::iter::from_fn(move || {
+        rest = rest.trim_start_matches([' ', '\t']);
+        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let (arg, tail) = match quote {
+            Some(q) => {
+                let body = &rest[1..];
+                body.split_once(q).unwrap_or((body, ""))
+            }
+            None if rest.is_empty() => return None,
+            None => rest.split_once([' ', '\t']).unwrap_or((rest, "")),
+        };
+        rest = tail;
+        Some(arg)
+    })
 }
 
 /// Parses nxlink's argv marker: 8 hex digits of the address as libnx's `in_addr.s_addr`, then `_NXLINK_`.
@@ -48,8 +67,11 @@ fn parse_host(arg: &str) -> Option<Ipv4Addr> {
 
 /// Connects stdout to the nxlink host. Returns `Ok(false)` when the NRO wasn't started by nxlink.
 /// Sockets must already be initialized (`nx::socket::initialize`).
+/// `KICKSTAND_DEBUG_HOST` (an IPv4 address, set at build time) is used when argv has no host, to debug
+/// argv itself.
 pub fn connect() -> Result<bool> {
-    let Some(host) = host() else {
+    let fallback = option_env!("KICKSTAND_DEBUG_HOST").and_then(|h| h.parse().ok());
+    let Some(host) = host().or(fallback) else {
         return Ok(false);
     };
     let stream = TcpStream::connect(host, CLIENT_PORT)?;
@@ -87,3 +109,4 @@ macro_rules! println {
     () => { $crate::print!("\n") };
     ($($arg:tt)*) => { $crate::_print(format_args!("{}\n", format_args!($($arg)*))) };
 }
+

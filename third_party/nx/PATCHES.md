@@ -7,3 +7,6 @@ Upstream: https://github.com/aarch64-switch-rs/nx (MIT, see LICENSE), commit
 Local changes (worth upstreaming):
 1. `hbl::get_argv()`: rrt0 now stores the HBL `Argv` ABI entry instead of ignoring it (it was a `todo!`).
    nxlink passes the PC's address through argv, so stdout over nxlink needs this.
+2. `bsd` `poll` (command 6): the request now sends the fd count before the timeout, as libnx's `bsdPoll` does
+   (`{ nfds, timeout }`). Without it the service read the timeout as the count and never reported a ready
+   fd, so a listener polled for readability never saw incoming connections. Found on hardware (fw 23.0.1).

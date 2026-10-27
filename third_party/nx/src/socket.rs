@@ -781,9 +781,11 @@ pub mod net {
             .as_ref()
             .ok_or(rc::ResultNotInitialized::make())?;
 
+        // The request carries the fd count before the timeout (libnx `bsdPoll`: `{ nfds, timeout }`).
+        let fd_count = fds.len() as u32;
         if let BsdResult::Err(errno) = socket_server
             .get_service()
-            .poll(Buffer::from_mut_array(fds.as_mut_slice()), timeout)?
+            .poll(Buffer::from_mut_array(fds.as_mut_slice()), fd_count, timeout)?
         {
             return ResultCode::new_err(nx::result::pack_value(
                 rc::RESULT_MODULE,

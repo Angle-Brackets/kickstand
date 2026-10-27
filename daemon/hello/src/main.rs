@@ -30,6 +30,7 @@ fn main() {
     println!("Hello from Rust on the Switch!");
     println!("firmware {}", version::get_version());
     println!("loader: {}", nx::hbl::get_loader_info());
+    println!("argv: {:?}, nxlink host: {:?}", nx::hbl::get_argv(), nxlink::host());
     for (i, arg) in nxlink::args().enumerate() {
         println!("arg {i}: {arg}");
     }

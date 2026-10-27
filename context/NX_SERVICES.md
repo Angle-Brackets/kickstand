@@ -47,6 +47,9 @@ impl service::IService for ShellService { /* get_name() = "pm:shell", as_domain(
 
 ## nx quirks found so far
 - **argv**: rrt0 ignored the HBL `Argv` entry. Patched (`hbl::get_argv`, see `third_party/nx/PATCHES.md`); worth upstreaming.
+- **poll**: nx's `bsd` poll request lacked the fd count, so poll never reported ready fds. Patched
+  (`PATCHES.md` #2); worth upstreaming. Check other bsd commands against libnx before relying on them.
+- **hbmenu argv** is quoted per argument; split it like libnx (`nxlink::split_argv`).
 - **`SocketCommon::try_clone`** copies the fd, and both copies close it on drop. Don't use it.
 - **Sysmodule heap**: the default `configure_heap` takes all free memory. Sysmodules must set
   `alloc_set_default_heap_size!` (ours: 4 MiB).

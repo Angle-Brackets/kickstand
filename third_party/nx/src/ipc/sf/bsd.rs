@@ -843,7 +843,7 @@ pub trait Bsd {
     ) -> BsdResult<()>;
 
     #[ipc_rid(6)]
-    fn poll(&self, fds: InOutAutoSelectBuffer<PollFd>, timeout: i32) -> BsdResult<()>;
+    fn poll(&self, fds: InOutAutoSelectBuffer<PollFd>, fd_count: u32, timeout: i32) -> BsdResult<()>;
 
     #[ipc_rid(7)]
     fn sysctl(
