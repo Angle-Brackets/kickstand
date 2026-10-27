@@ -23,6 +23,10 @@ pub const REBOOT_PAYLOAD: &str = "/atmosphere/reboot_payload.bin";
 /// hekate's boot entries, read to turn an entry name into the index hekate wants.
 pub const HEKATE_INI: &str = "/bootloader/hekate_ipl.ini";
 
+/// Single files outside the write roots that are also ours: where hbmenu's NetLoader saved our NROs
+/// before `/switch/kickstand/` existed. Writable so they can be cleaned up.
+const OWN_FILES: &[&str] = &["/switch/kickstand.nro", "/switch/kickstand-hello.nro"];
+
 /// Where the NRO daemon is installed for launching from hbmenu.
 pub const NRO_PATH: &str = "/switch/kickstand/kickstand.nro";
 
@@ -113,7 +117,8 @@ pub fn check_write(path: &str) -> Result<String, PathError> {
     let path = normalize(path)?;
     let inside_root = WRITE_ROOTS
         .iter()
-        .any(|root| path.len() > root.len() && starts_with_ignore_case(&path, root));
+        .any(|root| path.len() > root.len() && starts_with_ignore_case(&path, root))
+        || OWN_FILES.iter().any(|f| path.eq_ignore_ascii_case(f));
     if !inside_root || is_key_file(&path) {
         return Err(PathError::WriteDenied);
     }
@@ -179,6 +184,9 @@ mod tests {
         assert_eq!(check_write("/switch/paperboat2/x"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/atmosphere/contents/x"), Err(PathError::WriteDenied));
         assert!(check_write(SYSMODULE_NSP).is_ok());
+        assert!(check_write("/switch/kickstand.nro").is_ok());
+        assert_eq!(check_write("/switch/kickstand.nro2"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/switch/hbmenu.nro"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/atmosphere/contents/0100000000000000/exefs.nsp"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/kickstand/prod.keys"), Err(PathError::WriteDenied));
     }
