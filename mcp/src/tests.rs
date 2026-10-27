@@ -93,6 +93,9 @@ async fn sysmodule_install_and_status() {
     assert_eq!(std::fs::read_to_string(root.join(&proto::path::TOKEN_PATH[1..])).unwrap(), "tok\n");
     let status = client.sysmodule(proto::Request::SysmoduleStatus).await.unwrap();
     assert!(status.installed && !status.boot2);
+    assert!(client.set_boot2(true).await.unwrap().boot2);
+    assert_eq!(std::fs::read(root.join(&proto::path::SYSMODULE_BOOT2_FLAG[1..])).unwrap(), b"");
+    assert!(!client.set_boot2(false).await.unwrap().boot2);
     // Other programs' contents stay read-only.
     let err = client.upload("/atmosphere/contents/0100000000001000/exefs.nsp", b"x").await.unwrap_err();
     assert!(err.to_string().contains("Forbidden"), "{err}");

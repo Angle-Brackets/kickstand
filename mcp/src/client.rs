@@ -171,6 +171,21 @@ impl Client {
         self.upload(proto::path::SYSMODULE_NSP, nsp).await
     }
 
+    /// Turns start-at-boot on or off by creating or deleting the sysmodule's `boot2.flag`. Takes effect at
+    /// the next boot; returns the new status.
+    pub async fn set_boot2(&self, on: bool) -> Result<SysmoduleStatus> {
+        let status = self.sysmodule(Request::SysmoduleStatus).await?;
+        if on && !status.installed {
+            anyhow::bail!("install the sysmodule before enabling start-at-boot");
+        }
+        if on && !status.boot2 {
+            self.upload(proto::path::SYSMODULE_BOOT2_FLAG, &[]).await?;
+        } else if !on && status.boot2 {
+            self.delete(proto::path::SYSMODULE_BOOT2_FLAG, false).await?;
+        }
+        self.sysmodule(Request::SysmoduleStatus).await
+    }
+
     /// Sends a [`Request::SysmoduleStatus`], `SysmoduleStart` or `SysmoduleStop`.
     pub async fn sysmodule(&self, req: Request) -> Result<SysmoduleStatus> {
         match self.request(req).await? {

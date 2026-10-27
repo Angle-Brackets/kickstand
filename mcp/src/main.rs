@@ -52,7 +52,7 @@ enum Command {
         #[arg(short, long)]
         recursive: bool,
     },
-    /// Manage the sysmodule: status, install <nsp>, start, stop, handover (start it and end the NRO).
+    /// Manage the sysmodule: status, install <nsp>, start, stop, handover (start it and end the NRO), enable/disable (start at boot).
     Sysmodule {
         #[command(subcommand)]
         action: SysmoduleCmd,
@@ -79,6 +79,10 @@ enum SysmoduleCmd {
     Start,
     Stop,
     Handover,
+    /// Start it at every boot (creates boot2.flag).
+    Enable,
+    /// Stop starting it at boot (deletes boot2.flag).
+    Disable,
 }
 
 #[tokio::main]
@@ -159,6 +163,8 @@ async fn main() -> Result<()> {
                 SysmoduleCmd::Start => client.sysmodule(proto::Request::SysmoduleStart).await?,
                 SysmoduleCmd::Stop => client.sysmodule(proto::Request::SysmoduleStop).await?,
                 SysmoduleCmd::Handover => client.handover().await?,
+                SysmoduleCmd::Enable => client.set_boot2(true).await?,
+                SysmoduleCmd::Disable => client.set_boot2(false).await?,
                 SysmoduleCmd::Install { nsp } => {
                     let data = std::fs::read(&nsp).with_context(|| format!("reading {}", nsp.display()))?;
                     client.install_sysmodule(&data).await?;

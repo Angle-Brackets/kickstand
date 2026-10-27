@@ -77,6 +77,10 @@ pub enum SysmoduleAction {
     Stop,
     /// Start it, end the NRO daemon, and wait until the sysmodule answers.
     Handover,
+    /// Start it at every boot (creates boot2.flag; only with the user's go-ahead).
+    Enable,
+    /// Stop starting it at boot (deletes boot2.flag).
+    Disable,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -230,6 +234,8 @@ impl Tools {
                 SysmoduleAction::Start => self.client.sysmodule(proto::Request::SysmoduleStart).await?,
                 SysmoduleAction::Stop => self.client.sysmodule(proto::Request::SysmoduleStop).await?,
                 SysmoduleAction::Handover => self.client.handover().await?,
+                SysmoduleAction::Enable => self.client.set_boot2(true).await?,
+                SysmoduleAction::Disable => self.client.set_boot2(false).await?,
                 SysmoduleAction::Install => {
                     let local = args.local_path.ok_or_else(|| anyhow::anyhow!("install needs local_path"))?;
                     let nsp = tokio::fs::read(&local).await?;
