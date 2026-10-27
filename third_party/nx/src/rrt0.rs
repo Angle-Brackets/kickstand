@@ -192,7 +192,10 @@ unsafe fn set_main_thread_tlr(handle: svc::Handle) {
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn normal_entry(loader_mode: LoaderMode, exit_config: Option<ExitFn>) -> ! {
     let mut main_thread_handle: svc::Handle = 0;
-    let mut heap = util::PointerAndSize::new(ptr::null_mut(), crate::mem::alloc::DEFAULT_HEAP_SIZE);
+    // A volatile read: the static is weak, and a plain read gets folded to its default of 0 at compile
+    // time, which ignores `alloc_set_default_heap_size!` and takes all free memory (local patch 4).
+    let default_heap_size = ptr::read_volatile(&raw const crate::mem::alloc::DEFAULT_HEAP_SIZE);
+    let mut heap = util::PointerAndSize::new(ptr::null_mut(), default_heap_size);
     let mut hos_version_opt: Option<hbl::Version> = None;
     match loader_mode {
         LoaderMode::Nso(thread_handle) => {

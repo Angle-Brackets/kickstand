@@ -13,3 +13,7 @@ Local changes (worth upstreaming):
 3. `TcpListener::bind` and `TcpStream::connect` close their socket when a later step (setsockopt, bind,
    listen, connect) fails; they used to leak it. Seen on hardware: a sysmodule retrying `bind` while the
    port was taken got EADDRINUSE once, then only EAFNOSUPPORT (2017-1097) on every retry.
+4. rrt0 reads `DEFAULT_HEAP_SIZE` with a volatile read. The weak static's default (0) was folded into the
+   startup code, so `alloc_set_default_heap_size!` had no effect and a sysmodule's heap took all free memory
+   minus 2 MiB. Found on hardware: started at boot, our sysmodule took the System pool's slack and am
+   fataled with 2001-0132 (LimitReached); started later it held 16 MiB with a 4 MiB setting.
