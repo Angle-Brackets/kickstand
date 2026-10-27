@@ -24,10 +24,10 @@ cd daemon && cargo nx build --release -p kickstand-nro   # console side (needs c
 target/release/kickstand token                  # create the shared token (~/.config/kickstand/token)
 echo 192.168.x.y > ~/.config/kickstand/host     # or pass --host / set SWITCH_IP
 scripts/run-daemon-nro.sh                        # start the daemon NRO through hbmenu's NetLoader (press Y first)
-target/release/kickstand ping                   # also: ls, cat, get, put
+target/release/kickstand ping                   # also: ls, cat, get, put, rm
 claude mcp add kickstand -- "$PWD/target/release/kickstand" serve
 ```
-MCP tools: `ping`, `list_dir`, `stat`, `read_file`, `download`, `upload`. Writes are limited to `/switch/paperboat/`, `/switch/ttydrecomp/` and `/kickstand/`; keys,
+MCP tools: `ping`, `list_dir`, `stat`, `read_file`, `download`, `upload`, `delete`. Writes and deletes are limited to `/switch/paperboat/`, `/switch/ttydrecomp/` and `/kickstand/`; keys,
 NAND backups and `/Nintendo` are never read.
 
 ## License

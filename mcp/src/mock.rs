@@ -94,6 +94,11 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 upload = None;
                 Response::Ok
             }
+            Request::Delete { .. } if upload.is_some() => Response::error(ErrorKind::UploadState, "uploading"),
+            Request::Delete { path, recursive } => match path::check_write(&path) {
+                Ok(p) => delete(&root.join(&p[1..]), p, recursive),
+                Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
+            },
         };
         stream.write_all(&proto::encode(&resp)?).await?;
     }
@@ -133,6 +138,19 @@ fn stat(p: &Path) -> Response {
             is_dir: m.is_dir(),
             size: if m.is_dir() { 0 } else { m.len() },
         }),
+        Err(e) => io_err(e),
+    }
+}
+
+fn delete(p: &Path, path: String, recursive: bool) -> Response {
+    let was_dir = p.is_dir();
+    let result = match (was_dir, recursive) {
+        (false, _) => std::fs::remove_file(p),
+        (true, false) => std::fs::remove_dir(p),
+        (true, true) => std::fs::remove_dir_all(p),
+    };
+    match result {
+        Ok(()) => Response::Deleted { path, was_dir },
         Err(e) => io_err(e),
     }
 }

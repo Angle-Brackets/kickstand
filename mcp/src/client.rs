@@ -8,12 +8,15 @@ use anyhow::{Context, Result, anyhow};
 use proto::{DaemonKind, DirEntry, PROTOCOL_VERSION, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::timeout;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// SD writes of a 64 KiB chunk are quick, but the first write after creating a large file can stall.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Chunks in flight during uploads and reads. One round trip per 64 KiB chunk capped transfers at
+/// ~1.5 MB/s over Wi-Fi; keeping several queued overlaps the network with the console's SD access.
+const PIPELINE_DEPTH: usize = 4;
 
 pub struct DaemonInfo {
     pub version: String,
@@ -82,25 +85,44 @@ impl Client {
     /// Reads up to `len` bytes from `offset`, in as many chunks as needed. Returns the data and the
     /// file's total size.
     pub async fn read(&self, path: &str, offset: u64, len: u64) -> Result<(Vec<u8>, u64)> {
-        let mut out = Vec::new();
-        let mut file_size;
-        loop {
-            let at = offset + out.len() as u64;
-            let want = (len - out.len() as u64).min(proto::MAX_CHUNK as u64) as u32;
-            let req = Request::ReadFile { path: path.into(), offset: at, len: want };
-            match self.request(req).await? {
-                Response::Data { data, file_size: size } => {
-                    file_size = size;
-                    let done = data.is_empty();
-                    out.extend_from_slice(&data);
-                    if done || out.len() as u64 >= len || at + data.len() as u64 >= size {
-                        break;
-                    }
+        let read_at = |at: u64, want: u64| Request::ReadFile {
+            path: path.into(),
+            offset: at,
+            len: want.min(proto::MAX_CHUNK as u64) as u32,
+        };
+        let mut guard = self.conn.lock().await;
+        // The first chunk tells us the file's size; the rest are pipelined.
+        let (mut out, file_size) = match self.request_locked(&mut guard, read_at(offset, len)).await? {
+            Response::Data { data, file_size } => (data, file_size),
+            other => return Err(unexpected(other)),
+        };
+        let end = offset.saturating_add(len).min(file_size);
+        let result = async {
+            let conn = self.connected(&mut guard).await?;
+            let mut next = offset + out.len() as u64;
+            let mut in_flight = std::collections::VecDeque::new();
+            while next < end || !in_flight.is_empty() {
+                while next < end && in_flight.len() < PIPELINE_DEPTH {
+                    let want = (end - next).min(proto::MAX_CHUNK as u64);
+                    send(conn, &read_at(next, want)).await?;
+                    in_flight.push_back(want);
+                    next += want;
                 }
-                other => return Err(unexpected(other)),
+                let want = in_flight.pop_front().unwrap();
+                match recv(conn).await? {
+                    Response::Data { data, .. } if data.len() as u64 == want => out.extend_from_slice(&data),
+                    Response::Data { .. } => return Err(anyhow!("{path} changed size while being read")),
+                    other => return Err(unexpected(other)),
+                }
             }
+            anyhow::Ok(())
         }
-        Ok((out, file_size))
+        .await;
+        if result.is_err() {
+            // Unread replies may still be queued on the connection.
+            *guard = None;
+        }
+        result.map(|()| (out, file_size))
     }
 
     /// Uploads `data` to `path`, verified with CRC-32 before it replaces the old file.
@@ -108,15 +130,21 @@ impl Client {
         let start = Instant::now();
         let mut guard = self.conn.lock().await;
         // The whole upload runs on one connection: the daemon's staging state is per connection.
+        let begin = Request::UploadBegin { path: path.into(), size: data.len() as u64 };
+        expect(self.request_locked(&mut guard, begin).await?, |r| matches!(r, Response::UploadReady { .. }))?;
         let result = async {
             let conn = self.connected(&mut guard).await?;
-            let begin = Request::UploadBegin { path: path.into(), size: data.len() as u64 };
-            expect(round_trip(conn, &begin).await?, |r| matches!(r, Response::UploadReady { .. }))?;
-            let mut offset = 0u64;
-            for chunk in data.chunks(proto::MAX_CHUNK) {
-                let req = Request::UploadChunk { offset, data: chunk.to_vec() };
-                offset += chunk.len() as u64;
-                expect(round_trip(conn, &req).await?, |r| matches!(r, Response::ChunkOk { received } if *received == offset))?;
+            let chunks: Vec<&[u8]> = data.chunks(proto::MAX_CHUNK).collect();
+            let (mut sent, mut acked, mut offset) = (0, 0, 0u64);
+            while acked < chunks.len() {
+                while sent < chunks.len() && sent - acked < PIPELINE_DEPTH {
+                    send(conn, &Request::UploadChunk { offset, data: chunks[sent].to_vec() }).await?;
+                    offset += chunks[sent].len() as u64;
+                    sent += 1;
+                }
+                let received = ((acked + 1) * proto::MAX_CHUNK).min(data.len()) as u64;
+                expect(recv(conn).await?, |r| matches!(r, Response::ChunkOk { received: n } if *n == received))?;
+                acked += 1;
             }
             let finish = Request::UploadFinish { crc32: proto::crc32::checksum(data) };
             expect(round_trip(conn, &finish).await?, |r| matches!(r, Response::UploadDone { .. }))
@@ -128,27 +156,40 @@ impl Client {
         result.map(|_| UploadStats { size: data.len() as u64, elapsed: start.elapsed() })
     }
 
+    /// Deletes a file or directory; returns whether it was a directory.
+    pub async fn delete(&self, path: &str, recursive: bool) -> Result<bool> {
+        match self.request(Request::Delete { path: path.into(), recursive }).await? {
+            Response::Deleted { was_dir, .. } => Ok(was_dir),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Sends one request, reconnecting and retrying once if the connection had gone stale.
     async fn request(&self, req: Request) -> Result<Response> {
         let mut guard = self.conn.lock().await;
+        self.request_locked(&mut guard, req).await
+    }
+
+    /// [`Client::request`] with the connection already locked, for multi-request operations.
+    async fn request_locked(&self, guard: &mut MutexGuard<'_, Option<Conn>>, req: Request) -> Result<Response> {
         let had_conn = guard.is_some();
-        let first = match self.connected(&mut guard).await {
+        let first = match self.connected(guard).await {
             Ok(conn) => round_trip(conn, &req).await,
             Err(e) => return Err(e),
         };
         match first {
             Ok(resp) => Ok(resp),
             Err(e) if had_conn => {
-                *guard = None;
-                let conn = self.connected(&mut guard).await.context(format!("after: {e:#}"))?;
+                **guard = None;
+                let conn = self.connected(guard).await.context(format!("after: {e:#}"))?;
                 let resp = round_trip(conn, &req).await;
                 if resp.is_err() {
-                    *guard = None;
+                    **guard = None;
                 }
                 resp
             }
             Err(e) => {
-                *guard = None;
+                **guard = None;
                 Err(e)
             }
         }
@@ -180,9 +221,20 @@ impl Client {
 }
 
 async fn round_trip(conn: &mut Conn, req: &Request) -> Result<Response> {
+    send(conn, req).await?;
+    recv(conn).await
+}
+
+async fn send(conn: &mut Conn, req: &Request) -> Result<()> {
     let frame = proto::encode(req)?;
+    let io = conn.stream.write_all(&frame);
+    timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon stopped reading for {REPLY_TIMEOUT:?}"))??;
+    Ok(())
+}
+
+/// Reads the next response. Responses arrive in request order.
+async fn recv(conn: &mut Conn) -> Result<Response> {
     let io = async {
-        conn.stream.write_all(&frame).await?;
         let mut prefix = [0u8; 4];
         conn.stream.read_exact(&mut prefix).await?;
         let len = proto::frame_len(prefix).ok_or_else(|| anyhow!("daemon sent an oversized frame"))?;

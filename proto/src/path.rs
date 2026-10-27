@@ -42,7 +42,7 @@ impl PathError {
             PathError::BadComponent => "path contains '..', ':', '\\' or a control character",
             PathError::ReadDenied => "reading keys, NAND backups or /Nintendo is not allowed",
             PathError::WriteDenied => {
-                "writes are limited to /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/"
+                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/"
             }
         }
     }
@@ -84,8 +84,8 @@ pub fn check_read(path: &str) -> Result<String, PathError> {
     Ok(path)
 }
 
-/// Normalizes `path` and checks that a file may be written there. The path must name a file inside a
-/// write root, not the root itself.
+/// Normalizes `path` and checks that it may be written or deleted. The path must be inside a write
+/// root, not the root itself.
 pub fn check_write(path: &str) -> Result<String, PathError> {
     let path = normalize(path)?;
     let inside_root = WRITE_ROOTS

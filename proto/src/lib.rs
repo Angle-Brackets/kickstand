@@ -2,8 +2,9 @@
 //! Wire protocol between the kickstand daemon (on the console) and the MCP server (on the PC).
 //!
 //! Framing: every message is a little-endian `u32` length followed by that many bytes of postcard.
-//! The client sends one [`Request`] and waits for one [`Response`]; the first request on a connection
-//! must be [`Request::Hello`] with the shared token.
+//! Each [`Request`] gets exactly one [`Response`], in request order, so a client may send several
+//! requests before reading their responses (uploads and reads pipeline chunks this way). The first
+//! request on a connection must be [`Request::Hello`] with the shared token.
 
 #![no_std]
 
@@ -17,7 +18,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -47,6 +48,9 @@ pub enum Request {
     UploadChunk { offset: u64, data: Vec<u8> },
     UploadFinish { crc32: u32 },
     UploadAbort,
+    /// Deletes a file, or a directory (which must be empty unless `recursive`). Only inside the write
+    /// roots, like uploads ([`path::check_write`]).
+    Delete { path: String, recursive: bool },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -61,6 +65,7 @@ pub enum Response {
     UploadReady { staging_path: String },
     ChunkOk { received: u64 },
     UploadDone { path: String, size: u64 },
+    Deleted { path: String, was_dir: bool },
     Error(Error),
 }
 
@@ -95,7 +100,8 @@ pub enum ErrorKind {
     Forbidden,
     NotFound,
     Io,
-    /// An upload request arrived with no upload in progress, or out of order.
+    /// An upload request arrived with no upload in progress, or out of order, or a delete arrived
+    /// during an upload.
     UploadState,
     ChecksumMismatch,
 }

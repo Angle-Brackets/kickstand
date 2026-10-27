@@ -30,13 +30,14 @@ pub struct Config<'a> {
 /// How often blocking waits wake to check [`Config::stop`].
 const STOP_CHECK_MS: i32 = 250;
 
-/// Socket buffers sized for a sysmodule: well under 1 MiB of transfer memory, enough for 64 KiB chunks.
+/// Socket buffers sized for a sysmodule: under 1 MiB of transfer memory (~872 KiB). The 256 KiB receive
+/// buffer holds the client's four pipelined upload chunks; at 64 KiB uploads ran at ~2 MB/s.
 pub fn socket_config() -> BsdServiceConfig {
     BsdServiceConfig {
         tcp_tx_buf_size: 0x8000,
-        tcp_rx_buf_size: 0x10000,
+        tcp_rx_buf_size: 0x40000,
         tcp_tx_buf_max_size: 0x20000,
-        tcp_rx_buf_max_size: 0x20000,
+        tcp_rx_buf_max_size: 0x40000,
         udp_tx_buf_size: 0x2400,
         udp_rx_buf_size: 0xA500,
         sb_efficiency: 2,

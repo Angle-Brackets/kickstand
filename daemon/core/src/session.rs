@@ -52,6 +52,7 @@ impl<'a> Session<'a> {
                 self.abort_upload();
                 Response::Ok
             }
+            Request::Delete { path, recursive } => self.delete(&path, recursive),
         }
     }
 
@@ -158,6 +159,24 @@ impl<'a> Session<'a> {
             Ok(()) => {
                 crate::log!("upload {path}: done");
                 Response::UploadDone { path, size }
+            }
+            Err(e) => Response::Error(e),
+        }
+    }
+
+    fn delete(&mut self, path: &str, recursive: bool) -> Response {
+        // The staging file lives in a deletable directory; don't pull it out from under an upload.
+        if self.upload.is_some() {
+            return Response::error(ErrorKind::UploadState, "finish or abort the upload before deleting");
+        }
+        let path = match path::check_write(path) {
+            Ok(p) => p,
+            Err(e) => return forbidden(e),
+        };
+        match sd::delete(&path, recursive) {
+            Ok(was_dir) => {
+                crate::log!("deleted {path}");
+                Response::Deleted { path, was_dir }
             }
             Err(e) => Response::Error(e),
         }

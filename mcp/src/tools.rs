@@ -56,6 +56,14 @@ pub struct UploadArgs {
     pub remote_path: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DeleteArgs {
+    /// File or directory on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/ or /kickstand/.
+    pub path: String,
+    /// Delete a directory and everything in it (default false: only files and empty directories).
+    pub recursive: Option<bool>,
+}
+
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
@@ -162,6 +170,16 @@ impl Tools {
                 stats.size,
                 stats.size as f64 / 1e6 / secs.max(1e-6)
             ))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Delete a file or directory on the Switch's SD card, e.g. old builds or test output. Only inside /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/; directories must be empty unless recursive is true.")]
+    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> CallToolResult {
+        let result = async {
+            let path = check_path(&args.path, true)?;
+            let was_dir = self.client.delete(&path, args.recursive.unwrap_or(false)).await?;
+            anyhow::Ok(format!("deleted {path}{}", if was_dir { " (directory)" } else { "" }))
         };
         result.await.map_or_else(fail, ok)
     }

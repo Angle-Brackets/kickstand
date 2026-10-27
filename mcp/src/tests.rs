@@ -46,6 +46,41 @@ async fn upload_round_trip_multi_chunk() {
 }
 
 #[tokio::test]
+async fn pipelined_read_from_offset() {
+    let (client, root) = start("tok").await;
+    let data: Vec<u8> = (0..proto::MAX_CHUNK * 9 + 5).map(|i| (i * 13 % 241) as u8).collect();
+    std::fs::create_dir_all(root.join("kickstand")).unwrap();
+    std::fs::write(root.join("kickstand/big.bin"), &data).unwrap();
+    let (back, size) = client.read("/kickstand/big.bin", 0, u64::MAX).await.unwrap();
+    assert_eq!((back.len(), size), (data.len(), data.len() as u64));
+    assert_eq!(back, data);
+    // Starts mid-chunk and stops short of the end.
+    let (part, _) = client.read("/kickstand/big.bin", 1000, proto::MAX_CHUNK as u64 * 5).await.unwrap();
+    assert_eq!(part, &data[1000..1000 + proto::MAX_CHUNK * 5]);
+    // The connection is still in step afterwards.
+    client.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_files_and_dirs() {
+    let (client, root) = start("tok").await;
+    client.upload("/kickstand/test/a.bin", b"a").await.unwrap();
+    client.upload("/kickstand/test/sub/b.bin", b"b").await.unwrap();
+    assert!(!client.delete("/kickstand/test/a.bin", false).await.unwrap());
+    assert!(!root.join("kickstand/test/a.bin").exists());
+    // Not empty, so a plain delete fails and a recursive one succeeds.
+    assert!(client.delete("/kickstand/test", false).await.is_err());
+    assert!(client.delete("/kickstand/test", true).await.unwrap());
+    assert!(!root.join("kickstand/test").exists());
+    // Only inside the write roots, and never a root itself.
+    for path in ["/kickstand", "/switch/paperboat", "/atmosphere/crash_reports/01.log", "/prod.keys"] {
+        let err = client.delete(path, true).await.unwrap_err().to_string();
+        assert!(err.contains("Forbidden"), "{path}: {err}");
+    }
+    assert!(root.join("atmosphere/crash_reports/01.log").exists());
+}
+
+#[tokio::test]
 async fn rules_enforced_by_daemon() {
     let (client, _root) = start("tok").await;
     let err = client.read("/prod.keys", 0, 10).await.unwrap_err().to_string();

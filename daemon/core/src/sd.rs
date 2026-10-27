@@ -106,6 +106,26 @@ pub fn remove_if_exists(path: &str) -> Result<(), Error> {
     }
 }
 
+/// Deletes a file, or a directory (only an empty one unless `recursive`). Returns whether it was a
+/// directory.
+pub fn delete(path: &str, recursive: bool) -> Result<bool, Error> {
+    let kind = fs::get_entry_type(&full(path)).map_err(|rc| io_error("stat", path, rc))?;
+    let is_dir = kind == DirectoryEntryType::Directory;
+    let result = match (is_dir, recursive) {
+        (false, _) => fs::remove_file(&full(path)),
+        (true, false) => fs::remove_dir(&full(path)),
+        (true, true) => fs::remove_dir_all(&full(path)),
+    };
+    result.map(|()| is_dir).map_err(|rc| {
+        // 2002-0008: the directory isn't empty.
+        if rc.get_module() == 2 && rc.get_description() == 8 {
+            let message = format!("{path} is not empty; delete it recursively to remove its contents too");
+            return Error { kind: ErrorKind::Io, message, result: Some(rc.get_value()) };
+        }
+        io_error("delete", path, rc)
+    })
+}
+
 pub fn rename(from: &str, to: &str) -> Result<(), Error> {
     fs::rename_file(&full(from), &full(to)).map_err(|rc| io_error("rename", from, rc))
 }

@@ -45,6 +45,13 @@ enum Command {
     Get { path: String, local: PathBuf },
     /// Upload a file to the SD card.
     Put { local: PathBuf, path: String },
+    /// Delete a file or directory on the SD card (inside the writable folders only).
+    Rm {
+        path: String,
+        /// Delete a directory and everything in it.
+        #[arg(short, long)]
+        recursive: bool,
+    },
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
@@ -104,9 +111,11 @@ async fn main() -> Result<()> {
         Command::Get { path, local } => {
             let path = check_path(&path, false)?;
             let size = client.stat(&path).await?.size;
+            let start = std::time::Instant::now();
             let (data, _) = client.read(&path, 0, size).await?;
+            let secs = start.elapsed().as_secs_f64();
             std::fs::write(&local, &data).with_context(|| format!("writing {}", local.display()))?;
-            println!("{} bytes -> {}", data.len(), local.display());
+            println!("{} bytes in {secs:.1}s ({:.2} MB/s) -> {}", data.len(), data.len() as f64 / 1e6 / secs.max(1e-6), local.display());
         }
         Command::Put { local, path } => {
             let path = check_path(&path, true)?;
@@ -114,6 +123,11 @@ async fn main() -> Result<()> {
             let stats = client.upload(&path, &data).await?;
             let secs = stats.elapsed.as_secs_f64();
             println!("{} bytes in {secs:.1}s ({:.2} MB/s)", stats.size, stats.size as f64 / 1e6 / secs.max(1e-6));
+        }
+        Command::Rm { path, recursive } => {
+            let path = check_path(&path, true)?;
+            let was_dir = client.delete(&path, recursive).await?;
+            println!("deleted {path}{}", if was_dir { "/" } else { "" });
         }
         Command::Token | Command::Mock { .. } => unreachable!(),
     }
