@@ -9,7 +9,7 @@ extern crate alloc;
 pub mod log;
 mod sd;
 pub mod server;
-mod session;
+pub mod session;
 
 pub use proto::DaemonKind;
 

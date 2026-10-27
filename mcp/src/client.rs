@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use proto::{DaemonKind, DirEntry, PROTOCOL_VERSION, Request, Response, SysmoduleStatus};
+use proto::{DaemonKind, DirEntry, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
@@ -208,6 +208,20 @@ impl Client {
         }
     }
 
+    /// The console's hekate boot entries (see [`proto::hekate::entries`]).
+    pub async fn hekate_entries(&self) -> Result<Vec<String>> {
+        let (data, _) = self.read(proto::path::HEKATE_INI, 0, 64 * 1024).await?;
+        let ini = String::from_utf8_lossy(&data);
+        Ok(proto::hekate::entries(&ini).into_iter().map(String::from).collect())
+    }
+
+    /// Warm-reboots into hekate. Returns once the daemon has accepted; the console then goes away.
+    pub async fn reboot_to_hekate(&self, target: HekateTarget) -> Result<()> {
+        let resp = self.request(Request::RebootToHekate { target }).await;
+        *self.conn.lock().await = None;
+        expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
     /// Sends one request, reconnecting and retrying once if the connection had gone stale.
     async fn request(&self, req: Request) -> Result<Response> {
         let mut guard = self.conn.lock().await;
@@ -321,6 +335,28 @@ fn unexpected(resp: Response) -> anyhow::Error {
         },
         other => anyhow!("unexpected reply from daemon: {other:?}"),
     }
+}
+
+/// Turns "menu", "ums", an entry number or an entry name (case-insensitive) into a hekate target.
+pub fn parse_hekate_target(spec: &str, entries: &[String]) -> Result<HekateTarget> {
+    let spec = spec.trim();
+    if spec.eq_ignore_ascii_case("menu") {
+        return Ok(HekateTarget::Menu);
+    }
+    if spec.eq_ignore_ascii_case("ums") {
+        return Ok(HekateTarget::Ums);
+    }
+    let index = match spec.parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => 1 + entries
+            .iter()
+            .position(|e| e.eq_ignore_ascii_case(spec))
+            .ok_or_else(|| anyhow!("no hekate entry named {spec:?}; entries: {entries:?}"))?,
+    };
+    if index == 0 || index > entries.len() || index > u8::MAX as usize {
+        return Err(anyhow!("hekate entry {index} doesn't exist; entries (from 1): {entries:?}"));
+    }
+    Ok(HekateTarget::Entry(index as u8))
 }
 
 /// Rejects a path the daemon would refuse, before any network round trip.

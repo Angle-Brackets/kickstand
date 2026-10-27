@@ -98,6 +98,20 @@ async fn sysmodule_install_and_status() {
     assert!(err.to_string().contains("Forbidden"), "{err}");
 }
 
+#[test]
+fn hekate_targets() {
+    use crate::client::parse_hekate_target;
+    use proto::HekateTarget;
+    let entries = vec!["Atmosphere PKG3 emuMMC".to_string(), "Stock sysMMC".to_string()];
+    assert_eq!(parse_hekate_target("ums", &entries).unwrap(), HekateTarget::Ums);
+    assert_eq!(parse_hekate_target("Menu", &entries).unwrap(), HekateTarget::Menu);
+    assert_eq!(parse_hekate_target("2", &entries).unwrap(), HekateTarget::Entry(2));
+    assert_eq!(parse_hekate_target("atmosphere pkg3 emummc", &entries).unwrap(), HekateTarget::Entry(1));
+    assert!(parse_hekate_target("3", &entries).is_err());
+    assert!(parse_hekate_target("0", &entries).is_err());
+    assert!(parse_hekate_target("Linux", &entries).is_err());
+}
+
 #[tokio::test]
 async fn rules_enforced_by_daemon() {
     let (client, _root) = start("tok").await;

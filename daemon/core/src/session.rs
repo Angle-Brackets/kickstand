@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! One client connection's state and request handling.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
-use proto::{DaemonKind, ErrorKind, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
+use proto::{DaemonKind, ErrorKind, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
+use services::power::MAX_PAYLOAD_SIZE;
 
 use crate::sd;
 
@@ -26,18 +29,26 @@ pub struct Session<'a> {
     kind: DaemonKind,
     authed: bool,
     upload: Option<Upload>,
-    exit_requested: bool,
+    after_reply: Option<AfterReply>,
+}
+
+/// Something to do once the current reply has been sent.
+pub enum AfterReply {
+    /// End the NRO daemon.
+    Exit,
+    /// Reboot to the payload that was just installed.
+    Reboot,
 }
 
 impl<'a> Session<'a> {
     /// `token` is the shared secret clients must present; with `None` every Hello is refused.
     pub fn new(token: Option<&'a str>, kind: DaemonKind) -> Self {
-        Session { token, kind, authed: false, upload: None, exit_requested: false }
+        Session { token, kind, authed: false, upload: None, after_reply: None }
     }
 
-    /// Whether the client asked the NRO daemon to exit (checked after the reply is sent).
-    pub fn exit_requested(&self) -> bool {
-        self.exit_requested
+    /// What the last request asked for after its reply (exit or reboot), if anything.
+    pub fn take_after_reply(&mut self) -> Option<AfterReply> {
+        self.after_reply.take()
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
@@ -63,9 +74,10 @@ impl<'a> Session<'a> {
             Request::SysmoduleStart => sysmodule_start(),
             Request::SysmoduleStop => self.sysmodule_stop(),
             Request::Exit if self.kind == DaemonKind::Nro => {
-                self.exit_requested = true;
+                self.after_reply = Some(AfterReply::Exit);
                 Response::Ok
             }
+            Request::RebootToHekate { target } => self.reboot_to_hekate(target),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
         }
@@ -225,7 +237,18 @@ impl<'a> Session<'a> {
             return system_error("stopping the running sysmodule", rc);
         }
         crate::HANDOVER_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
-        self.exit_requested = true;
+        self.after_reply = Some(AfterReply::Exit);
+        Response::Ok
+    }
+
+    /// Installs hekate with a boot config for `target` as the reboot payload; the reboot itself happens
+    /// after the reply. Everything that can fail short of the reboot call is checked here.
+    fn reboot_to_hekate(&mut self, target: HekateTarget) -> Response {
+        if let Err(resp) = install_hekate(target) {
+            return resp;
+        }
+        crate::log!("rebooting to hekate: {target:?}");
+        self.after_reply = Some(AfterReply::Reboot);
         Response::Ok
     }
 
@@ -265,6 +288,34 @@ fn sysmodule_start() -> Response {
         }
         Err(rc) => system_error("launching the sysmodule", rc),
     }
+}
+
+/// Reads hekate from [`path::REBOOT_PAYLOAD`], writes the boot config for `target` into it and hands it to
+/// Atmosphère as the reboot payload. [`HekateTarget::Menu`] leaves the boot config empty, which restores
+/// the file as it is on the card.
+pub fn install_hekate(target: HekateTarget) -> Result<(), Response> {
+    let file_size = sd::stat(path::REBOOT_PAYLOAD).map_err(Response::Error)?.size as usize;
+    if file_size > MAX_PAYLOAD_SIZE {
+        let msg = format!("{} is {file_size} bytes; Atmosphère takes at most {MAX_PAYLOAD_SIZE}", path::REBOOT_PAYLOAD);
+        return Err(Response::error(ErrorKind::BadRequest, msg));
+    }
+    let mut payload: Box<[u8; MAX_PAYLOAD_SIZE]> = vec![0u8; MAX_PAYLOAD_SIZE].into_boxed_slice().try_into().unwrap();
+    let mut done = 0;
+    while done < file_size {
+        let (data, _) = sd::read(path::REBOOT_PAYLOAD, done as u64, (file_size - done).min(proto::MAX_CHUNK))
+            .map_err(Response::Error)?;
+        if data.is_empty() {
+            break;
+        }
+        payload[done..done + data.len()].copy_from_slice(&data);
+        done += data.len();
+    }
+    if !proto::hekate::is_hekate(&payload[..done]) {
+        let msg = format!("{} isn't hekate (no ICTC magic), refusing to reboot into it", path::REBOOT_PAYLOAD);
+        return Err(Response::error(ErrorKind::BadRequest, msg));
+    }
+    payload[proto::hekate::BOOT_CFG_OFFSET..proto::hekate::MAGIC_OFFSET].copy_from_slice(&proto::hekate::boot_cfg(target));
+    services::power::set_reboot_payload(&payload).map_err(|rc| system_error("setting the reboot payload (bpc:ams)", rc))
 }
 
 fn system_error(what: &str, rc: nx::result::ResultCode) -> Response {

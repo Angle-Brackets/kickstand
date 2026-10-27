@@ -7,13 +7,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use nx::result::Result;
 use nx::socket::net::traits::SocketCommon;
-use nx::socket::net::{TcpListener, TcpStream, poll};
+use nx::socket::net::{TcpListener, TcpStream, UdpSocket, poll};
 use nx::socket::{BsdServiceConfig, BsdSrvkind, Paralellism, PollFlags};
 use nx::svc;
 use proto::{DaemonKind, ErrorKind, Request, Response};
 
 use crate::log;
-use crate::session::Session;
+use crate::session::{AfterReply, Session};
 
 pub struct Config<'a> {
     pub kind: DaemonKind,
@@ -54,6 +54,14 @@ pub fn init_sockets(kind: DaemonKind) -> Result<()> {
     nx::socket::initialize(srv, socket_config(), None, Paralellism::One)
 }
 
+/// The console's own IPv4 address. Connecting a UDP socket sends nothing but makes the stack pick the
+/// outgoing interface, whose address `getsockname` then reports.
+pub fn console_ip() -> Option<Ipv4Addr> {
+    let probe = UdpSocket::connect(Ipv4Addr::new(192, 0, 2, 1), 9).ok()?;
+    let ip = Ipv4Addr::from(probe.local_addr().ok()?.addr);
+    (!ip.is_unspecified()).then_some(ip)
+}
+
 fn stopped(config: &Config) -> bool {
     config.stop.is_some_and(|s| s.load(Ordering::Relaxed))
 }
@@ -71,7 +79,10 @@ pub fn run(config: &Config) {
                 continue;
             }
         };
-        log!("listening on port {}", config.port);
+        match console_ip() {
+            Some(ip) => log!("listening on {ip}:{}", config.port),
+            None => log!("listening on port {} (no network address yet)", config.port),
+        }
         loop {
             match wait_readable(&listener, None, config) {
                 Ok(true) => {}
@@ -88,7 +99,7 @@ pub fn run(config: &Config) {
                     break;
                 }
             };
-            log!("client {:?} connected", addr);
+            log!("client {}:{} connected", Ipv4Addr::from(addr.addr), u16::from_be(addr.port));
             let _ = stream.set_nodelay(true);
             serve(&stream, config, &mut frame);
             log!("client disconnected");
@@ -133,12 +144,25 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
         if send(stream, &resp).is_err() {
             return;
         }
-        if session.exit_requested() {
-            if let Some(stop) = config.stop {
-                log!("exit requested by the client");
-                stop.store(true, Ordering::Relaxed);
+        match session.take_after_reply() {
+            None => {}
+            Some(AfterReply::Exit) => {
+                if let Some(stop) = config.stop {
+                    log!("exit requested by the client");
+                    stop.store(true, Ordering::Relaxed);
+                }
+                return;
             }
-            return;
+            Some(AfterReply::Reboot) => {
+                // Let the reply reach the client before the console goes away.
+                let _ = svc::sleep_thread(500_000_000);
+                if let Err(rc) = services::power::reboot_to_payload() {
+                    log!("reboot to payload failed: {rc}");
+                    // Don't leave the power menu's Restart pointed at our boot config.
+                    let _ = crate::session::install_hekate(proto::HekateTarget::Menu);
+                }
+                return;
+            }
         }
     }
 }

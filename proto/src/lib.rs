@@ -17,8 +17,62 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+/// hekate's payload layout (hekate `bdk/utils/types.h`, `bootloader/main.c`; facts only, hekate is
+/// GPL-2.0): the boot config block, which hekate reads at start to decide what to do, and the version
+/// block after it.
+pub mod hekate {
+    pub const BOOT_CFG_OFFSET: usize = 0x94;
+    pub const BOOT_CFG_SIZE: usize = 0x84;
+    pub const MAGIC_OFFSET: usize = BOOT_CFG_OFFSET + BOOT_CFG_SIZE;
+    pub const MAGIC: &[u8; 4] = b"ICTC";
+
+    const BOOT_CFG_AUTOBOOT_EN: u8 = 1 << 0;
+    /// Launched by another program: skips the boot logo wait and the VOL- check.
+    const BOOT_CFG_FROM_LAUNCH: u8 = 1 << 1;
+    const EXTRA_CFG_NYX_UMS: u8 = 1 << 5;
+    const NYX_UMS_SD_CARD: u8 = 0;
+
+    /// The boot entries of a `hekate_ipl.ini`, in the order hekate numbers them for autoboot: the
+    /// `[sections]` after `[config]`, the first being 1. Captions (`{...}`) and comments don't count.
+    pub fn entries(ini: &str) -> alloc::vec::Vec<&str> {
+        let mut after_config = false;
+        let mut out = alloc::vec::Vec::new();
+        for line in ini.lines().map(str::trim) {
+            let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else { continue };
+            if !after_config {
+                after_config = name == "config";
+            } else {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// Whether `payload` looks like hekate (its magic after the boot config).
+    pub fn is_hekate(payload: &[u8]) -> bool {
+        payload.get(MAGIC_OFFSET..MAGIC_OFFSET + 4) == Some(&MAGIC[..])
+    }
+
+    /// The boot config block for `target`: `{ u8 boot_cfg, autoboot, autoboot_list, extra_cfg; u8 xt[0x80] }`.
+    pub fn boot_cfg(target: super::HekateTarget) -> [u8; BOOT_CFG_SIZE] {
+        let mut cfg = [0u8; BOOT_CFG_SIZE];
+        match target {
+            super::HekateTarget::Menu => {}
+            super::HekateTarget::Entry(index) => {
+                cfg[0] = BOOT_CFG_AUTOBOOT_EN | BOOT_CFG_FROM_LAUNCH;
+                cfg[1] = index;
+            }
+            super::HekateTarget::Ums => {
+                cfg[3] = EXTRA_CFG_NYX_UMS;
+                cfg[4] = NYX_UMS_SD_CARD;
+            }
+        }
+        cfg
+    }
+}
+
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -63,6 +117,20 @@ pub enum Request {
     /// NRO only: replies, stops any running sysmodule, closes its listener, then starts the installed
     /// sysmodule and exits, so the sysmodule's first bind finds the port free.
     Handover,
+    /// Warm reboot into hekate (Atmosphère's `reboot_payload.bin`), never a cold reboot. The daemon replies
+    /// first, then reboots; it doesn't come back unless the sysmodule starts at boot.
+    RebootToHekate { target: HekateTarget },
+}
+
+/// What hekate does after a [`Request::RebootToHekate`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HekateTarget {
+    /// Show hekate's menu (someone has to pick an entry on the touchscreen).
+    Menu,
+    /// Boot this `hekate_ipl.ini` entry, counting from 1 and skipping `[config]`.
+    Entry(u8),
+    /// Start USB mass storage of the SD card in Nyx, so a PC can mount it.
+    Ums,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -162,6 +230,22 @@ pub fn frame_len(prefix: [u8; 4]) -> Option<usize> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn hekate_boot_cfg() {
+        assert_eq!(hekate::boot_cfg(HekateTarget::Menu), [0; 0x84]);
+        let entry = hekate::boot_cfg(HekateTarget::Entry(2));
+        assert_eq!(entry[..4], [0b11, 2, 0, 0]);
+        let ums = hekate::boot_cfg(HekateTarget::Ums);
+        assert_eq!(ums[..5], [0, 0, 0, 0x20, 0]);
+        let mut payload = vec![0u8; 0x200];
+        payload[0x118..0x11C].copy_from_slice(b"ICTC");
+        assert!(hekate::is_hekate(&payload));
+        assert!(!hekate::is_hekate(&payload[..0x100]));
+        let ini = "[config]\nupdater2p=1\n\n[Atmosphere emuMMC]\npkg3=x\n{caption}\n#[comment]\n[Stock]\nstock=1\n";
+        assert_eq!(hekate::entries(ini), ["Atmosphere emuMMC", "Stock"]);
+        assert!(hekate::entries("[a]\n[b]").is_empty());
+    }
 
     #[test]
     fn round_trip() {

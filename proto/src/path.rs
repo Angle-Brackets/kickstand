@@ -7,10 +7,24 @@
 use alloc::string::String;
 
 /// The directories uploads may write into. Everything else on the card is read-only to the daemon.
-/// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet. The last one is
-/// the daemon's own sysmodule, so it can be installed and updated over the network.
-pub const WRITE_ROOTS: &[&str] =
-    &["/switch/paperboat/", "/switch/ttydrecomp/", "/kickstand/", "/atmosphere/contents/42000000004D4350/"];
+/// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet. The last two are
+/// the daemon's own NRO folder (listed in hbmenu) and its sysmodule, so both can be updated over the
+/// network.
+pub const WRITE_ROOTS: &[&str] = &[
+    "/switch/paperboat/",
+    "/switch/ttydrecomp/",
+    "/kickstand/",
+    "/switch/kickstand/",
+    "/atmosphere/contents/42000000004D4350/",
+];
+
+/// The payload Atmosphère reboots into; on this setup, hekate.
+pub const REBOOT_PAYLOAD: &str = "/atmosphere/reboot_payload.bin";
+/// hekate's boot entries, read to turn an entry name into the index hekate wants.
+pub const HEKATE_INI: &str = "/bootloader/hekate_ipl.ini";
+
+/// Where the NRO daemon is installed for launching from hbmenu.
+pub const NRO_PATH: &str = "/switch/kickstand/kickstand.nro";
 
 /// The sysmodule's program id (ends in ASCII "MCP"), and where Atmosphère loads it from.
 pub const SYSMODULE_PROGRAM_ID: u64 = 0x4200_0000_004D_4350;
@@ -50,8 +64,8 @@ impl PathError {
             PathError::BadComponent => "path contains '..', ':', '\\' or a control character",
             PathError::ReadDenied => "reading keys, NAND backups or /Nintendo is not allowed",
             PathError::WriteDenied => {
-                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/, /kickstand/ \
-                 and the daemon's own /atmosphere/contents/42000000004D4350/"
+                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/, and the daemon's \
+                 own /kickstand/, /switch/kickstand/ and /atmosphere/contents/42000000004D4350/"
             }
         }
     }

@@ -11,9 +11,10 @@ name = "kickstand"
 path = "src/main.rs"
 
 [dependencies]
-nx = { workspace = true, features = ["socket", "fs", "input"] }
+nx = { workspace = true, features = ["socket", "fs", "input", "console"] }
 daemon-core.workspace = true
 nxlink.workspace = true
+services.workspace = true
 proto.workspace = true
 
 [package.metadata.nx.nro]

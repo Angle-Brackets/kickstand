@@ -100,6 +100,10 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 let boot2 = root.join(&path::SYSMODULE_BOOT2_FLAG[1..]).exists();
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
+            Request::RebootToHekate { .. } => {
+                stream.write_all(&proto::encode(&Response::Ok)?).await?;
+                return Ok(());
+            }
             Request::Exit | Request::Handover => {
                 stream.write_all(&proto::encode(&Response::Ok)?).await?;
                 return Ok(());

@@ -59,6 +59,13 @@ enum Command {
     },
     /// End the NRO daemon (back to hbmenu), as if + were pressed.
     Exit,
+    /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
+    /// --yes, only lists the entries and says what would happen.
+    Reboot {
+        target: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
@@ -159,6 +166,22 @@ async fn main() -> Result<()> {
                 }
             };
             println!("{status:?}");
+        }
+        Command::Reboot { target, yes } => {
+            let entries = client.hekate_entries().await?;
+            println!("hekate entries:");
+            for (i, e) in entries.iter().enumerate() {
+                println!("  {}. {e}", i + 1);
+            }
+            let Some(target) = target else { return Ok(()) };
+            let target = client::parse_hekate_target(&target, &entries)?;
+            let what = tools::describe_target(target, &entries);
+            if !yes {
+                println!("would reboot into hekate: {what} (add --yes to do it)");
+                return Ok(());
+            }
+            client.reboot_to_hekate(target).await?;
+            println!("rebooting into hekate: {what}");
         }
         Command::Exit => {
             client.exit().await?;

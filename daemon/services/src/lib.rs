@@ -5,3 +5,4 @@
 #![no_std]
 
 pub mod pm;
+pub mod power;

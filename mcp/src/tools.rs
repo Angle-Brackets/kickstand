@@ -52,13 +52,13 @@ pub struct DownloadArgs {
 pub struct UploadArgs {
     /// File on this PC to send.
     pub local_path: String,
-    /// Destination on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/ or /kickstand/.
+    /// Destination on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ or the sysmodule's /atmosphere/contents/42000000004D4350/.
     pub remote_path: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct DeleteArgs {
-    /// File or directory on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/ or /kickstand/.
+    /// File or directory on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ or the sysmodule's /atmosphere/contents/42000000004D4350/.
     pub path: String,
     /// Delete a directory and everything in it (default false: only files and empty directories).
     pub recursive: Option<bool>,
@@ -86,11 +86,30 @@ pub struct SysmoduleArgs {
     pub local_path: Option<String>,
 }
 
+pub fn describe_target(target: proto::HekateTarget, entries: &[String]) -> String {
+    match target {
+        proto::HekateTarget::Menu => "hekate menu".into(),
+        proto::HekateTarget::Ums => "USB mass storage of the SD card".into(),
+        proto::HekateTarget::Entry(i) => {
+            format!("entry {i} ({})", entries.get(i as usize - 1).map_or("?", String::as_str))
+        }
+    }
+}
+
 fn describe(s: &proto::SysmoduleStatus) -> String {
     let running = s.pid.map_or("not running".to_string(), |pid| format!("running (pid {pid})"));
     let boot = if s.boot2 { "starts at boot" } else { "does not start at boot" };
     let installed = if s.installed { "installed" } else { "not installed" };
     format!("sysmodule: {installed}, {boot}, {running}")
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RebootArgs {
+    /// "menu" (hekate's menu; someone must tap an entry), "ums" (USB mass storage of the SD card), or a
+    /// hekate_ipl.ini entry by name or number (from 1), e.g. the Atmosphère entry to come straight back.
+    pub target: String,
+    /// Must be true, and only after the user agreed to this reboot.
+    pub confirm: bool,
 }
 
 fn ok(text: String) -> CallToolResult {
@@ -186,7 +205,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Only /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/ are writable.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Only /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ and the sysmodule's /atmosphere/contents/42000000004D4350/ are writable.")]
     async fn upload(&self, Parameters(args): Parameters<UploadArgs>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
@@ -223,7 +242,34 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Delete a file or directory on the Switch's SD card, e.g. old builds or test output. Only inside /switch/paperboat/, /switch/ttydrecomp/ and /kickstand/; directories must be empty unless recursive is true.")]
+    #[tool(description = "List hekate's boot entries (hekate_ipl.ini), numbered as reboot expects.")]
+    async fn hekate_entries(&self) -> CallToolResult {
+        let result = async {
+            let entries = self.client.hekate_entries().await?;
+            let mut out = String::from("hekate entries:\n");
+            for (i, e) in entries.iter().enumerate() {
+                let _ = writeln!(out, "  {}. {e}", i + 1);
+            }
+            anyhow::Ok(out)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Warm-reboot the Switch into hekate (Atmosphère reboot-to-payload; never a cold reboot, which would lose an RCM-injected hekate). target picks what hekate does: an entry (boots straight back, e.g. into Atmosphère), \"ums\" (SD card over USB) or \"menu\". Only with the user's go-ahead (confirm: true). The daemon comes back only if the sysmodule starts at boot.")]
+    async fn reboot(&self, Parameters(args): Parameters<RebootArgs>) -> CallToolResult {
+        let result = async {
+            if !args.confirm {
+                anyhow::bail!("not rebooting: set confirm to true once the user has agreed");
+            }
+            let entries = self.client.hekate_entries().await?;
+            let target = crate::client::parse_hekate_target(&args.target, &entries)?;
+            self.client.reboot_to_hekate(target).await?;
+            anyhow::Ok(format!("rebooting into hekate: {}", describe_target(target, &entries)))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Delete a file or directory on the Switch's SD card, e.g. old builds or test output. Only inside the writable folders (see upload); directories must be empty unless recursive is true.")]
     async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, true)?;
