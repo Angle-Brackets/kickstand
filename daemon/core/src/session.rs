@@ -244,6 +244,11 @@ impl<'a> Session<'a> {
     /// Installs hekate with a boot config for `target` as the reboot payload; the reboot itself happens
     /// after the reply. Everything that can fail short of the reboot call is checked here.
     fn reboot_to_hekate(&mut self, target: HekateTarget) -> Response {
+        // Only reboots from homebrew under hbl go through ams_mitm; from the sysmodule it'd be cold.
+        if self.kind != DaemonKind::Nro {
+            let msg = "rebooting needs the NRO daemon (launch kickstand from hbmenu); from the sysmodule it would be a cold reboot";
+            return Response::error(ErrorKind::Unsupported, msg);
+        }
         if let Err(resp) = install_hekate(target) {
             return resp;
         }
