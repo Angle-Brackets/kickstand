@@ -1,6 +1,13 @@
-<img src="assets/logo/kickstand-icon.jpg" alt="Kickstand logo: a K whose lower leg is the Switch kickstand" width="96" align="right">
-
-# Kickstand
+<p align="center">
+  <img src="assets/logo/kickstand-swing.svg" width="112" alt="Kickstand logo: a K whose red lower leg is the Switch kickstand, kicking open">
+</p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/kickstand-wordmark-dark.svg">
+    <img src="assets/logo/kickstand-wordmark-light.svg" width="360" alt="kickstand">
+  </picture>
+</p>
+<p align="center"><b>Deploy, run, and debug homebrew with AI</b></p>
 
 Lets an AI agent develop and test on a real Nintendo Switch (Atmosphère) without anyone holding it:
 deploy builds, launch and force-close them, reboot, take screenshots, press buttons, read memory and
