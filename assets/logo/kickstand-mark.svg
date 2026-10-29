@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <!-- SPDX-License-Identifier: GPL-3.0-only -->
+  <!-- Kickstand mark: an off-white K whose lower leg is the Switch kickstand, in red. Transparent background. -->
+  <rect x="50" y="28" width="30" height="144" rx="7" fill="#F2F0EA"/>
+  <g transform="translate(80 104)">
+    <rect x="-15" y="-100" width="30" height="100" rx="7" fill="#F2F0EA" transform="rotate(42)"/>
+    <g transform="rotate(-42)">
+      <rect x="-15" y="0" width="30" height="96" rx="7" fill="#FF4554"/>
+      <rect x="-15" y="84" width="30" height="12" rx="5" fill="#000000" fill-opacity="0.28"/>
+      <circle cx="0" cy="11" r="4.5" fill="#15171C"/>
+    </g>
+  </g>
+</svg>

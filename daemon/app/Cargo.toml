@@ -18,4 +18,5 @@ services.workspace = true
 proto.workspace = true
 
 [package.metadata.nx.nro]
+icon = "../../assets/logo/kickstand-icon.jpg"
 nacp = { default_name = "kickstand daemon", default_author = "Angle-Brackets", version = "0.1.0" }

@@ -1,3 +1,5 @@
+<img src="assets/logo/kickstand-icon.jpg" alt="Kickstand logo: a K whose lower leg is the Switch kickstand" width="96" align="right">
+
 # Kickstand
 
 Lets an AI agent develop and test on a real Nintendo Switch (Atmosphère) without anyone holding it:
