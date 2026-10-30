@@ -129,9 +129,13 @@ pub struct PressArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct KeepAwakeArgs {
-    /// Keep the screen on for this many minutes from now (max 480); 0 ends it now; leave out to just ask.
+    /// Keep the console awake for this many minutes from now (max 480; default 30, the same as any tool
+    /// call); 0 lets it sleep now.
     pub minutes: Option<u32>,
 }
+
+/// What `keep_awake` renews with no arguments: the daemon's per-request lease.
+const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
@@ -179,10 +183,10 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Keep the Switch's screen on (no dimming or auto-sleep) for a stretch with no other tool calls, e.g. while watching a game run. Every tool call already keeps it on for 5 minutes, after which the console's own timers apply again to save battery; call with minutes: 0 when done with a long stretch. Not kept across reboots; after a reboot to an entry, the sysmodule gets past the lock screen itself. Changes no system settings. It can't wake a console that is already asleep.")]
+    #[tool(description = "Keep the Switch awake (no dimming or auto-sleep), shown by a Kickstand icon next to its clock. Every tool call keeps it awake for 30 minutes, after which the console's own timers apply again to save battery. Call this with no arguments to renew those 30 minutes before a long stretch without tool calls (a big build, a long think), or with more minutes (up to 480) to watch a game run; minutes: 0 lets it sleep when you're done. A console that falls asleep can't be woken remotely, so renew rather than risk it. Not kept across reboots; after a reboot to an entry, the sysmodule gets past the lock screen itself. Changes no system settings.")]
     async fn keep_awake(&self, Parameters(args): Parameters<KeepAwakeArgs>) -> CallToolResult {
         let result = async {
-            let s = self.client.keep_awake(args.minutes).await?;
+            let s = self.client.keep_awake(Some(args.minutes.unwrap_or(DEFAULT_KEEP_AWAKE_MINUTES))).await?;
             anyhow::Ok(if s == 0 { "keep awake is off".to_string() } else { format!("screen stays on for {}m {}s", s / 60, s % 60) })
         };
         result.await.map_or_else(fail, ok)
@@ -332,6 +336,6 @@ impl Tools {
 #[tool_handler(
     router = self.tool_router,
     name = "kickstand",
-    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping."
+    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished."
 )]
 impl ServerHandler for Tools {}

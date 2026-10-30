@@ -135,7 +135,7 @@ pub enum Request {
     Press { buttons: Vec<Button>, times: u8, hold_ms: u32 },
     /// Keeps the screen from dimming and the console from auto-sleeping (reporting user activity to
     /// `idle:sys` every 20 s) for `minutes` from now, at most 8 hours. Every request already keeps it awake
-    /// for 5 minutes, so this is for long stretches without requests (watching a game run). `Some(0)` ends
+    /// for 30 minutes, so this is for longer stretches without requests (watching a game run). `Some(0)` ends
     /// the lease; `None` only asks. Not saved: a reboot ends it. Answers [`Response::KeepAwake`].
     KeepAwake { minutes: Option<u32> },
     /// Debug, sysmodule: moves the "agent working" indicator's top-left corner (vi's 1920x1080 layer space) until

@@ -19,8 +19,10 @@ use crate::{log, sd, uptime_ms};
 /// Uptime (ms) until which the console is kept awake.
 static UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 
-/// How long one client request keeps the console awake.
-pub const ACTIVITY_LEASE_MS: u64 = 5 * 60_000;
+/// How long one client request keeps the console awake. Erring long: a console that sleeps between an
+/// agent's tool calls (a long build) can't be woken remotely, while a lease that runs on costs a little
+/// battery and is visible as the indicator.
+pub const ACTIVITY_LEASE_MS: u64 = 30 * 60_000;
 /// Longest lease [`proto::Request::KeepAwake`] may ask for.
 pub const MAX_LEASE_MS: u64 = 8 * 3600_000;
 

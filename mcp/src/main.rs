@@ -80,7 +80,7 @@ enum Command {
         hold_ms: u32,
     },
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
-    /// reports what's left. Every request already keeps it on for 5 minutes.
+    /// reports what's left. Every request already keeps it on for 30 minutes.
     KeepAwake { minutes: Option<u32> },
     /// Debug: move the "agent working" indicator to X, Y (1920x1080 layer space), until the next boot.
     #[command(hide = true)]
