@@ -17,3 +17,6 @@ Local changes (worth upstreaming):
    startup code, so `alloc_set_default_heap_size!` had no effect and a sysmodule's heap took all free memory
    minus 2 MiB. Found on hardware: started at boot, our sysmodule took the System pool's slack and am
    fataled with 2001-0132 (LimitReached); started later it held 16 MiB with a 4 MiB setting.
+5. `ApplicationProxy::get_application_functions` (cmd 20) and an `ApplicationFunctions` interface with
+   `create_application_and_request_to_start` (cmd 12, 4.0+), from libnx `applet.c`. The kickstand NRO uses it to
+   launch an installed title from inside the hbl app session.

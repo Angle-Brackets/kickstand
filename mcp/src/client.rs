@@ -238,6 +238,35 @@ impl Client {
         expect(self.request(Request::Press { buttons, times, hold_ms }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
+    /// Plays timed button steps on one virtual controller ([`Request::Input`]).
+    pub async fn input(&self, steps: Vec<proto::InputStep>) -> Result<()> {
+        expect(self.request(Request::Input { steps }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
+    /// The running application, if any.
+    pub async fn app_status(&self) -> Result<Option<proto::App>> {
+        match self.request(Request::AppStatus).await? {
+            Response::App(app) => Ok(app),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Terminates the running application; returns what was closed (`None`: nothing was running).
+    pub async fn close_app(&self) -> Result<Option<proto::App>> {
+        match self.request(Request::CloseApp).await? {
+            Response::App(app) => Ok(app),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Installed applications, most recently used first (the home menu's order).
+    pub async fn list_apps(&self, max: u16) -> Result<Vec<proto::AppEntry>> {
+        match self.request(Request::ListApps { max }).await? {
+            Response::Apps(apps) => Ok(apps),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Moves the sysmodule's indicator (debug; see [`Request::IndicatorPosition`]).
     pub async fn indicator_position(&self, x: u16, y: u16) -> Result<()> {
         expect(self.request(Request::IndicatorPosition { x, y }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
@@ -454,6 +483,19 @@ pub fn describe_resources(r: &proto::Resources) -> String {
 }
 
 /// Parses buttons written like "a", "zl+zr" or "l,r" (case-insensitive).
+/// Parses input steps like `"r:300 r+a:150 r:6000 -:500"`: buttons held together (`-` for none, a pause)
+/// and for how many milliseconds.
+pub fn parse_steps(spec: &str) -> Result<Vec<proto::InputStep>> {
+    spec.split_whitespace()
+        .map(|step| {
+            let (buttons, ms) = step.split_once(':').ok_or_else(|| anyhow!("step {step:?} isn't BUTTONS:MS"))?;
+            let ms = ms.parse().with_context(|| format!("step {step:?}: bad milliseconds"))?;
+            let buttons = if buttons == "-" { Vec::new() } else { parse_buttons(buttons)? };
+            Ok(proto::InputStep { buttons, ms })
+        })
+        .collect()
+}
+
 pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
     let buttons = spec
         .split(['+', ',', ' '])
@@ -469,4 +511,13 @@ pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
         anyhow::bail!("no buttons given");
     }
     Ok(buttons)
+}
+
+pub fn describe_app(app: &proto::App) -> String {
+    let what = match app.hbl {
+        Some(true) => "hbloader (hbmenu or an NRO) in place of",
+        Some(false) => "title",
+        None => "title (unknown whether hbloader is in its place)",
+    };
+    format!("{what} {:016x}, pid {}", app.program_id, app.pid)
 }

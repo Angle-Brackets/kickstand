@@ -9,5 +9,6 @@ extern crate alloc;
 pub mod caps;
 pub mod hid;
 pub mod idle;
+pub mod ns;
 pub mod pm;
 pub mod power;

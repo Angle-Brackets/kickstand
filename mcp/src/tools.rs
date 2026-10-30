@@ -128,6 +128,20 @@ pub struct PressArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct InputArgs {
+    /// Space-separated steps, each BUTTONS:MS: the buttons held together for that many milliseconds ("-"
+    /// for none, a pause). A button in consecutive steps stays held, e.g. "r:300 r+a:150 r:6000". At most
+    /// 64 steps and 20 s in all.
+    pub steps: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ListAppsArgs {
+    /// How many to list (default 12, the home menu's row; at most 64).
+    pub max: Option<u16>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct KeepAwakeArgs {
     /// Keep the console awake for this many minutes from now (max 480; default 30, the same as any tool
     /// call); 0 lets it sleep now.
@@ -200,13 +214,70 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen (b three times; after an agent reboot to an entry the sysmodule does this itself; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. You can't see the screen yet, so say what you pressed.")]
+    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen (b three times; after an agent reboot to an entry the sysmodule does this itself; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. Check the result with screenshot.")]
     async fn press(&self, Parameters(args): Parameters<PressArgs>) -> CallToolResult {
         let result = async {
             let buttons = crate::client::parse_buttons(&args.buttons)?;
             let times = args.times.unwrap_or(1);
             self.client.press(buttons, times, args.hold_ms.unwrap_or(100)).await?;
             anyhow::Ok(format!("pressed {} x{times}", args.buttons))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Play timed input on one virtual controller, for what press can't do: holding a button through other presses or a load, long holds, quick sequences. Each step holds exactly its buttons for its time; everything is released at the end.")]
+    async fn input(&self, Parameters(args): Parameters<InputArgs>) -> CallToolResult {
+        let result = async {
+            let steps = crate::client::parse_steps(&args.steps)?;
+            let n = steps.len();
+            self.client.input(steps).await?;
+            anyhow::Ok(format!("played {n} steps"))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "What application (game, or hbloader running hbmenu or an NRO in a game's place) is running, if any. Cheaper and surer than a screenshot for knowing whether something launched, crashed or closed.")]
+    async fn app_status(&self) -> CallToolResult {
+        let result = async {
+            anyhow::Ok(match self.client.app_status().await? {
+                Some(app) => crate::client::describe_app(&app),
+                None => "no application is running (the home menu, or the lock screen)".to_string(),
+            })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Terminate the running application immediately (hbmenu, an NRO, or a game). The application can't save first, so only close a game the user isn't playing.")]
+    async fn close_app(&self) -> CallToolResult {
+        let result = async {
+            anyhow::Ok(match self.client.close_app().await? {
+                Some(app) => format!("closed {}", crate::client::describe_app(&app)),
+                None => "no application was running".to_string(),
+            })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Installed titles with their ids, most recently played first: the order of the home menu's row (12 tiles, then All Software).")]
+    async fn list_apps(&self, Parameters(args): Parameters<ListAppsArgs>) -> CallToolResult {
+        let result = async {
+            let apps = self.client.list_apps(args.max.unwrap_or(proto::HOME_MENU_TILES as u16)).await?;
+            let mut text = String::new();
+            for (i, app) in apps.iter().enumerate() {
+                writeln!(text, "{i}. {:016x} {}", app.id, if app.name.is_empty() { "(name unavailable)" } else { &app.name })?;
+            }
+            anyhow::Ok(if text.is_empty() { "no titles installed".to_string() } else { text })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Open hbmenu with full memory, the way to run homebrew. Starts a title from the home menu with R held so Atmosphère runs hbloader in its place: the host title that worked before, or else each title on the home menu's row in turn (closing any that start as the game) until one works, then remembers it. Closes whatever application is running first, so ask before using it while the user plays. Takes 20 s or more per title tried. If no title works, relay the error to the user: they may need to launch a title holding R themselves.")]
+    async fn open_hbmenu(&self) -> CallToolResult {
+        let result = async {
+            let opened = crate::launch::open_hbmenu(&self.client).await?;
+            let mut text = opened.notes.join("\n");
+            write!(text, "\nhbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name)?;
+            anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
     }

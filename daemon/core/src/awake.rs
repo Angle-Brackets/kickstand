@@ -24,7 +24,7 @@ static UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 /// battery and is visible as the indicator.
 pub const ACTIVITY_LEASE_MS: u64 = 30 * 60_000;
 /// Longest lease [`proto::Request::KeepAwake`] may ask for.
-pub const MAX_LEASE_MS: u64 = 8 * 3600_000;
+pub const MAX_LEASE_MS: u64 = 8 * 3_600_000;
 
 /// Well inside the shortest dim and sleep timers (one minute).
 const INTERVAL_NS: i64 = 20_000_000_000;

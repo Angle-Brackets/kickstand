@@ -3,12 +3,15 @@
 //! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`. Press + on the console to exit.
 //! Without `--token` it uses `/kickstand/token.txt` like the sysmodule does. A client's `Exit` request
 //! also ends it. The screen shows the daemon's log (address, clients, requests).
+//!
+//! With `--open <nro> [args]` or `--title <id>` it is a launcher instead (see `launcher.rs`).
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod launcher;
 mod screen;
 
 use alloc::string::String;
@@ -28,6 +31,10 @@ static STOP: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
 fn main() {
+    if let Some(request) = launcher::requested() {
+        launch(request);
+        return;
+    }
     daemon_core::log::enable_recent();
     server::init_sockets(DaemonKind::Nro).unwrap();
     let _ = nxlink::connect();
@@ -78,6 +85,19 @@ fn main() {
     }
     log!("exiting");
     nxlink::disconnect();
+}
+
+/// Launcher mode: no sockets, screen or sysmodule handling, just the launch (logged to the SD card).
+fn launch(request: Result<launcher::Launch, String>) {
+    if daemon_core::sd_mount().is_ok() {
+        daemon_core::log::enable_file();
+    }
+    let result = request.map_err(|e| alloc::format!("bad request: {e}")).and_then(|launch| {
+        launcher::run(launch).map_err(|rc| alloc::format!("{rc}"))
+    });
+    if let Err(e) = result {
+        log!("launcher: {e}");
+    }
 }
 
 fn token_arg() -> Option<String> {

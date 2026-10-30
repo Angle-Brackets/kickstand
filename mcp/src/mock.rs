@@ -101,7 +101,9 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
             Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
-            Request::Press { .. } => Response::Ok,
+            Request::Press { .. } | Request::Input { .. } => Response::Ok,
+            Request::AppStatus | Request::CloseApp => Response::App(None),
+            Request::ListApps { .. } => Response::Apps(Vec::new()),
             Request::IndicatorPosition { .. } => Response::Ok,
             Request::Screenshot | Request::ScreenshotRead { .. } => {
                 Response::error(ErrorKind::Unsupported, "the mock has no screen")

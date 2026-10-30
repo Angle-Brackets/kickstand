@@ -270,6 +270,16 @@ pub trait LibraryAppletProxy {
     fn get_library_applet_creator(&self) -> LibraryAppletCreator;
 }
 
+/// `IApplicationFunctions` (only the commands kickstand uses; ids from libnx `applet.c`).
+#[nx_derive::ipc_trait]
+#[default_client]
+pub trait ApplicationFunctions {
+    /// `CreateApplicationAndRequestToStart` [4.0.0+]: asks am to close this application and start
+    /// `application_id` (0 relaunches this one). libnx `appletRequestLaunchApplication` with no storage.
+    #[ipc_rid(12)]
+    fn create_application_and_request_to_start(&self, application_id: u64);
+}
+
 #[nx_derive::ipc_trait]
 #[default_client]
 pub trait ApplicationProxy {
@@ -294,6 +304,9 @@ pub trait ApplicationProxy {
     #[ipc_rid(11)]
     #[return_session]
     fn get_library_applet_creator(&self) -> LibraryAppletCreator;
+    #[ipc_rid(20)]
+    #[return_session]
+    fn get_application_functions(&self) -> ApplicationFunctions;
 }
 
 #[nx_derive::ipc_trait]

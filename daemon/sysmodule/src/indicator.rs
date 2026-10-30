@@ -39,7 +39,7 @@ pub fn start() {
 }
 
 fn run() {
-    let icon: Vec<RGBA8> = ICON.chunks_exact(4).map(|p| RGBA8::new_scaled(p[0], p[1], p[2], p[3])).collect();
+    let icon: Vec<RGBA8> = ICON.as_chunks::<4>().0.iter().map(|p| RGBA8::new_scaled(p[0], p[1], p[2], p[3])).collect();
     let blank = alloc::vec![RGBA8::new_scaled(0, 0, 0, 0); icon.len()];
     let mut layer: Option<(Canvas, (u16, u16))> = None;
     // What the layer shows now; a new layer starts blank.

@@ -5,6 +5,7 @@
 mod capture;
 mod client;
 mod config;
+mod launch;
 mod mock;
 mod tools;
 
@@ -80,6 +81,21 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         hold_ms: u32,
     },
+    /// Play timed input on one virtual controller: STEPS like "r:300 r+a:150 r:6000 -:500", each the
+    /// buttons held together ("-" for none) and for how many milliseconds; 20 s at most in all.
+    Input { steps: String },
+    /// The running application, if any, and whether it's hbloader (hbmenu or an NRO).
+    App,
+    /// Terminate the running application without letting it save.
+    CloseApp,
+    /// Installed titles, most recently used first (the home menu's order).
+    Apps {
+        #[arg(long, default_value_t = proto::HOME_MENU_TILES as u16)]
+        max: u16,
+    },
+    /// Open hbmenu with full memory by starting a title with R held: the saved host title, or the first
+    /// one on the home menu's row that works. Closes any running title first.
+    Hbmenu,
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 30 minutes.
     KeepAwake { minutes: Option<u32> },
@@ -257,6 +273,30 @@ async fn main() -> Result<()> {
             };
             client.press(buttons, times, hold_ms).await?;
             println!("pressed");
+        }
+        Command::Input { steps } => {
+            client.input(client::parse_steps(&steps)?).await?;
+            println!("played");
+        }
+        Command::App => match client.app_status().await? {
+            Some(app) => println!("{}", client::describe_app(&app)),
+            None => println!("no application is running"),
+        },
+        Command::CloseApp => match client.close_app().await? {
+            Some(app) => println!("closed {}", client::describe_app(&app)),
+            None => println!("no application was running"),
+        },
+        Command::Apps { max } => {
+            for (i, app) in client.list_apps(max).await?.iter().enumerate() {
+                println!("{i:>3}  {:016x}  {}", app.id, app.name);
+            }
+        }
+        Command::Hbmenu => {
+            let opened = launch::open_hbmenu(&client).await?;
+            for note in &opened.notes {
+                println!("{note}");
+            }
+            println!("hbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name);
         }
         Command::Screenshot { local } => {
             let jpeg = client.screenshot().await?;

@@ -3,6 +3,8 @@
 //!
 //! - host: `--host`, then `$SWITCH_IP`, then `~/.config/kickstand/host`
 //! - token: `$KICKSTAND_TOKEN`, then `~/.config/kickstand/token` (created by `kickstand token`)
+//! - host title (the title that opens hbmenu when launched with R held): `~/.config/kickstand/host-title`,
+//!   written by `kickstand hbmenu` as `<hex id> <name>`
 
 use std::path::PathBuf;
 
@@ -58,4 +60,17 @@ pub fn ensure_token() -> Result<(String, PathBuf)> {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok((token, path))
+}
+
+/// The title that opened hbmenu last time, if one did.
+pub fn host_title() -> Option<u64> {
+    let text = std::fs::read_to_string(config_dir().ok()?.join("host-title")).ok()?;
+    u64::from_str_radix(text.split_whitespace().next()?, 16).ok()
+}
+
+pub fn save_host_title(id: u64, name: &str) -> Result<()> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("host-title"), format!("{id:016x} {name}\n"))?;
+    Ok(())
 }

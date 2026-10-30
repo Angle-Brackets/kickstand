@@ -154,6 +154,22 @@ const GAP_NS: i64 = 150_000_000;
 /// attached.
 static PRESSING: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
 
+/// Attaches a virtual controller, then for each `(buttons, ms)` step holds exactly `buttons` for `ms`
+/// (an empty step is a pause), and releases everything before detaching. A button in consecutive steps
+/// stays held across them, e.g. R through a press of A and the loading that follows.
+pub fn play(steps: &[(u64, u32)]) -> Result<()> {
+    let _one_at_a_time = PRESSING.lock();
+    let mut pad = VirtualController::attach()?;
+    let _ = svc::sleep_thread(SETTLE_NS);
+    for &(buttons, ms) in steps {
+        pad.set_buttons(buttons)?;
+        let _ = svc::sleep_thread(i64::from(ms) * 1_000_000);
+    }
+    pad.set_buttons(0)?;
+    let _ = svc::sleep_thread(GAP_NS);
+    Ok(())
+}
+
 /// Attaches a virtual controller, presses `buttons` together `times` times (holding each `hold_ms`), and
 /// detaches it again.
 pub fn press(buttons: u64, times: u32, hold_ms: u32) -> Result<()> {

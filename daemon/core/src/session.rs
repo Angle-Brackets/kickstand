@@ -5,10 +5,14 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
-use proto::{Button, DaemonKind, ErrorKind, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
+use proto::{
+    App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_INPUT_MS, MAX_INPUT_STEPS, PROTOCOL_VERSION, Request,
+    Response, SysmoduleStatus, crc32,
+};
 use services::power::MAX_PAYLOAD_SIZE;
 
 use crate::sd;
@@ -101,6 +105,10 @@ impl<'a> Session<'a> {
             Request::RebootToHekate { target } => self.reboot_to_hekate(target),
             Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
+            Request::Input { steps } => input(&steps),
+            Request::AppStatus => app_status(),
+            Request::CloseApp => close_app(),
+            Request::ListApps { max } => list_apps(usize::from(max)),
             Request::KeepAwake { minutes } => keep_awake(minutes),
             Request::Screenshot => self.screenshot(),
             Request::ScreenshotRead { offset, len } => match &self.screenshot {
@@ -381,6 +389,57 @@ fn press(buttons: &[Button], times: u8, hold_ms: u32) -> Response {
         Ok(()) => Response::Ok,
         Err(rc) => system_error("pressing buttons (hid:dbg)", rc),
     }
+}
+
+fn input(steps: &[InputStep]) -> Response {
+    let total: u64 = steps.iter().map(|s| u64::from(s.ms)).sum();
+    if steps.is_empty() || steps.len() > MAX_INPUT_STEPS || total > u64::from(MAX_INPUT_MS) {
+        let msg = format!("need 1-{MAX_INPUT_STEPS} steps lasting at most {MAX_INPUT_MS} ms in all");
+        return Response::error(ErrorKind::BadRequest, msg);
+    }
+    let steps: Vec<(u64, u32)> = steps.iter().map(|s| (s.buttons.iter().fold(0, |bits, b| bits | b.bit()), s.ms)).collect();
+    crate::log!("input: {} steps, {total} ms", steps.len());
+    match services::hid::play(&steps) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error("pressing buttons (hid:dbg)", rc),
+    }
+}
+
+fn app_status() -> Response {
+    match services::pm::application() {
+        Ok(app) => Response::App(app.map(|a| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl })),
+        Err(rc) => system_error("finding the application (pm)", rc),
+    }
+}
+
+fn close_app() -> Response {
+    let app = match services::pm::application() {
+        Ok(Some(app)) => app,
+        Ok(None) => return Response::App(None),
+        Err(rc) => return system_error("finding the application (pm)", rc),
+    };
+    crate::log!("closing application {:016x} (pid {})", app.program_id, app.pid);
+    match services::pm::terminate_process(app.pid) {
+        Ok(()) => Response::App(Some(App { pid: app.pid, program_id: app.program_id, hbl: app.hbl })),
+        Err(rc) => system_error("terminating the application (pm:shell)", rc),
+    }
+}
+
+/// Most applications [`Request::ListApps`] returns: each name costs a 144 KiB control data read.
+const MAX_LIST_APPS: usize = 64;
+
+fn list_apps(max: usize) -> Response {
+    let ids = match services::ns::application_ids(max.clamp(1, MAX_LIST_APPS)) {
+        Ok(ids) => ids,
+        Err(rc) => return system_error("listing applications (ns)", rc),
+    };
+    // The names' buffer is big for a sysmodule: without it, still list the ids.
+    let mut names = services::ns::Names::new().ok();
+    let apps = ids
+        .into_iter()
+        .map(|id| AppEntry { id, name: names.as_mut().and_then(|n| n.get(id).ok()).unwrap_or_default() })
+        .collect();
+    Response::Apps(apps)
 }
 
 fn sysmodule_status() -> SysmoduleStatus {

@@ -29,6 +29,12 @@ pub fn args() -> impl Iterator<Item = &'static str> {
     parts.filter(|part| parse_host(part).is_none())
 }
 
+/// The raw `<hex addr>_NXLINK_` argument nxlink added, to pass on to an NRO this one chain-loads so its
+/// output reaches the same PC.
+pub fn host_arg() -> Option<&'static str> {
+    split_argv(nx::hbl::get_argv()?).last().filter(|part| parse_host(part).is_some())
+}
+
 /// The PC that sent this NRO, if it came through nxlink.
 pub fn host() -> Option<Ipv4Addr> {
     split_argv(nx::hbl::get_argv()?).last().and_then(parse_host)

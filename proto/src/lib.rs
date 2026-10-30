@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -147,7 +147,33 @@ pub enum Request {
     Screenshot,
     /// Reads up to `len` bytes (capped at [`MAX_CHUNK`]) at `offset` of the last [`Request::Screenshot`].
     ScreenshotRead { offset: u64, len: u32 },
+    /// Plays `steps` in order on one virtual controller (attached for the call, about a second to
+    /// settle), each holding exactly its buttons for its time, then releases everything. A button in
+    /// consecutive steps stays held: hold R through pressing A and the load to open hbmenu in a title.
+    /// At most [`MAX_INPUT_STEPS`] steps and [`MAX_INPUT_MS`] in all.
+    Input { steps: Vec<InputStep> },
+    /// What application is running, if any. Answers [`Response::App`].
+    AppStatus,
+    /// Terminates the running application (pm:shell), whatever state it's in. Unlike closing it from the
+    /// home menu, the application isn't asked to save. Answers [`Response::App`] with what was closed.
+    CloseApp,
+    /// The installed applications, most recently used first (the order of the home menu's row, which
+    /// shows the first [`HOME_MENU_TILES`]). Answers [`Response::Apps`].
+    ListApps { max: u16 },
 }
+
+/// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause) for `ms`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InputStep {
+    pub buttons: Vec<Button>,
+    pub ms: u32,
+}
+
+pub const MAX_INPUT_STEPS: usize = 64;
+/// Keeps an [`Request::Input`] call under the client's 30 s reply timeout.
+pub const MAX_INPUT_MS: u32 = 20_000;
+/// Titles on the home menu's row before "All Software" (which can't open hbmenu).
+pub const HOME_MENU_TILES: usize = 12;
 
 /// A controller button, for [`Request::Press`].
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +286,26 @@ pub enum Response {
     Resources(Resources),
     /// Seconds left on the keep-awake lease, 0 if none.
     KeepAwake { remaining_s: u64 },
+    App(Option<App>),
+    Apps(Vec<AppEntry>),
     Error(Error),
+}
+
+/// The running application.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct App {
+    pub pid: u64,
+    /// The title it was launched as (for hbmenu, the title it took over).
+    pub program_id: u64,
+    /// Running as hbloader (hbmenu or an NRO) rather than the title itself; `None` if Atmosphère didn't say.
+    pub hbl: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AppEntry {
+    pub id: u64,
+    /// Empty if ns couldn't read it (e.g. a game card that isn't inserted).
+    pub name: String,
 }
 
 /// Answer to [`Request::Resources`].
