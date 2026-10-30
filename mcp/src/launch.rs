@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Opening hbmenu with nobody at the console, in one of two places ([`Mode`]):
-//! - **Applet mode** (the default, the user's choice: it's the consistent one): the home menu's Album
-//!   button, which Atmosphère runs hbloader in place of. No game is involved and a running game stays
-//!   suspended, but homebrew gets a few hundred MB of memory, not the console's full ~3 GB.
-//! - **Full memory**: launch a title from the home menu while holding R, which Atmosphère turns into
+//! - **Applet mode**: the home menu's Album button, which Atmosphère runs hbloader in place of. Quick and
+//!   consistent (no game involved; a running game stays suspended), but homebrew gets a few hundred MB of
+//!   memory. For starting the Kickstand NRO and small tools only: games (PaperBoat, TTYDRecomp) never run
+//!   here (the user's rule), and [`run_nro`] refuses them.
+//! - **Full memory** (what [`run_nro`] uses by default): launch a title from the home menu while holding R, which Atmosphère turns into
 //!   hbloader with the title's memory. Not every title works (ones that check online rights, game cards that
 //!   aren't inserted), and only the home menu's row can do it, not "All Software". So the first time, try
 //!   each tile of the row in order; remember the one that worked (the host title, in
@@ -52,8 +53,10 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn parse(name: Option<&str>) -> Result<Self> {
-        match name.unwrap_or("applet") {
+    /// `name`, or `default` if none was given.
+    pub fn parse(name: Option<&str>, default: Mode) -> Result<Self> {
+        let Some(name) = name else { return Ok(default) };
+        match name {
             "applet" => Ok(Mode::Applet),
             "full" => Ok(Mode::Full),
             other => bail!("mode is \"applet\" or \"full\", not {other:?}"),
@@ -312,6 +315,13 @@ pub struct Started {
 /// Starts an NRO with `args` from a fresh hbmenu in `mode`: an NRO already running there is closed first
 /// (and in full-memory mode, any game).
 pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode) -> Result<Started> {
+    let target = match &program {
+        Program::Local { dest, .. } => dest,
+        Program::Sd(path) => path,
+    };
+    if mode == Mode::Applet && is_game(target) {
+        bail!("{target} is a game: it runs with full memory only (mode \"full\"), never in applet mode");
+    }
     let (nro, dest, args) = match program {
         Program::Local { nro, dest } => {
             let dest = check_path(&dest, true)?;
@@ -372,6 +382,13 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
     }
     Ok(Started { notes, pid, output })
+}
+
+/// The user's games, which need full memory: anything in their folders, or named after them.
+pub(crate) fn is_game(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    ["/switch/paperboat/", "/switch/ttydrecomp/"].iter().any(|dir| path.starts_with(dir))
+        || ["paperboat", "ttyd"].iter().any(|name| path.rsplit('/').next().is_some_and(|file| file.contains(name)))
 }
 
 /// Notes that the NRO in process `pid` exited (its stdout closed), so that process shows hbmenu again.

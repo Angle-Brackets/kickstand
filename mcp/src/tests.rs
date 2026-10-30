@@ -321,3 +321,20 @@ async fn newer_requests_are_refused_politely() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Games never run in applet mode (the user's rule): refused before anything touches the console.
+#[tokio::test]
+async fn games_refuse_applet_mode() {
+    use crate::launch::{Mode, Program, is_game, run_nro};
+    for game in ["/switch/paperboat/paperboat.nro", "/switch/kickstand/PaperBoat-debug.nro", "/switch/ttydrecomp/x.nro", "/switch/TTYDRecomp.nro"] {
+        assert!(is_game(game), "{game}");
+    }
+    for tool in ["/switch/kickstand/kickstand.nro", "/switch/kickstand/hello.nro", "/switch/NX-Shell/NX-Shell.nro"] {
+        assert!(!is_game(tool), "{tool}");
+    }
+    let (client, _root) = start("tok").await;
+    let err = run_nro(&client, Program::Sd("/switch/paperboat/paperboat.nro".into()), Vec::new(), Mode::Applet).await.err().expect("refused");
+    assert!(err.to_string().contains("full memory only"), "{err}");
+    let local = Program::Local { nro: vec![0; 16], dest: "/switch/kickstand/paperboat.nro".into() };
+    assert!(run_nro(&client, local, Vec::new(), Mode::Applet).await.is_err());
+}

@@ -165,8 +165,8 @@ pub struct RunNroArgs {
     pub elf: Option<String>,
     /// The module name its backtraces use (default: the ELF's file name without .elf).
     pub module: Option<String>,
-    /// "applet" (default: hbmenu in the Album, a few hundred MB of memory) or "full" (in a game's place,
-    /// full memory, for homebrew that needs it).
+    /// "full" (default: in a game's place with the console's full memory; games need it) or "applet" (hbmenu
+    /// in the Album, a few hundred MB: small tools only, refused for games).
     pub mode: Option<String>,
 }
 
@@ -480,10 +480,10 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Open hbmenu, where homebrew runs. mode \"applet\" (default): the home menu's Album button, which Atmosphère runs hbmenu in: quick, no game involved (a running game stays suspended), but homebrew gets a few hundred MB of memory. mode \"full\": a title started with R held, so hbloader runs in its place with the console's full memory, for homebrew that needs it (hbmenu shows \"Applet Mode\" in red otherwise); closes whatever application runs (ask before closing a game the user is playing), tries the host title that worked before or else each title on the home menu's row, 20 s or more each. If no title works, relay the error: the user may need to launch a title holding R themselves.")]
+    #[tool(description = "Open hbmenu, where homebrew runs. mode \"applet\" (default): the home menu's Album button, which Atmosphère runs hbmenu in: quick, no game involved (a running game stays suspended), but only a few hundred MB of memory, so it's for starting the Kickstand NRO or small tools, never games. mode \"full\": a title started with R held, so hbloader runs in its place with the console's full memory, which games need; closes whatever application runs (ask before closing a game the user is playing), tries the host title that worked before or else each title on the home menu's row, 20 s or more each. If no title works, relay the error: the user may need to launch a title holding R themselves.")]
     async fn open_hbmenu(&self, Parameters(args): Parameters<OpenHbmenuArgs>) -> CallToolResult {
         let result = async {
-            let mode = crate::launch::Mode::parse(args.mode.as_deref())?;
+            let mode = crate::launch::Mode::parse(args.mode.as_deref(), crate::launch::Mode::Applet)?;
             let opened = crate::launch::open_hbmenu(&self.client, mode).await?;
             let mut text = opened.notes.join("\n");
             match opened.host {
@@ -495,7 +495,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"applet\" (default) runs it in applet mode (see open_hbmenu); \"full\" with the console's full memory, closing whatever application runs (ask before closing a game the user is playing). An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
+    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"full\" (default) runs it with the console's full memory in a game's place (see open_hbmenu), closing whatever application runs (ask before closing a game the user is playing); games like PaperBoat and TTYDRecomp always need this. mode \"applet\" runs small tools quickly from the Album, and is refused for games. An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
     async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>) -> CallToolResult {
         let result = async {
             let program = match (args.local_path, args.sd_path) {
@@ -515,7 +515,7 @@ impl Tools {
             if let Some(elf) = &args.elf {
                 *self.elf.lock().unwrap() = Some((elf.clone(), args.module.clone()));
             }
-            let mode = crate::launch::Mode::parse(args.mode.as_deref())?;
+            let mode = crate::launch::Mode::parse(args.mode.as_deref(), crate::launch::Mode::Full)?;
             let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default(), mode).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {

@@ -117,12 +117,12 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// Run an NRO from hbmenu (applet mode, or --full for full memory) and stream its stdout until it
-    /// exits. NRO is a file on this PC, or sdmc:/path for one on the SD card.
+    /// Run an NRO from hbmenu with full memory (or --applet for small tools; refused for games) and stream
+    /// its stdout until it exits. NRO is a file on this PC, or sdmc:/path for one on the SD card.
     Run {
         nro: String,
         #[arg(long)]
-        full: bool,
+        applet: bool,
         /// Where a local NRO goes on the SD card (default /switch/kickstand/<file name>).
         #[arg(long)]
         dest: Option<String>,
@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
             let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
             println!("{}", memory::poke(&client, &elf, &address, &value, memory::Format::parse(&format)?).await?);
         }
-        Command::Run { nro, full, dest, elf, module, args } => {
+        Command::Run { nro, applet, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
                 Some(path) => launch::Program::Sd(path.to_string()),
                 None => {
@@ -496,7 +496,7 @@ async fn main() -> Result<()> {
                 }
             };
             let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref()).map(symbolize::Symbolizer::shared)).transpose()?;
-            let mode = if full { launch::Mode::Full } else { launch::Mode::Applet };
+            let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
             let started = launch::run_nro(&client, program, args, mode).await?;
             for note in &started.notes {
                 eprintln!("{note}");
