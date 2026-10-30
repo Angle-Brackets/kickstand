@@ -503,16 +503,16 @@ fn status() -> Response {
     })
 }
 
+/// Refused: terminating the Album behind the home menu's back crashes the home menu (2144-0001 in its
+/// `LibraryAppletThread`, twice). HOME closes it properly.
 fn close_applet() -> Response {
-    let app = match services::pm::album() {
-        Ok(Some(app)) => app,
-        Ok(None) => return Response::App(None),
-        Err(rc) => return system_error("finding the Album's process (pm)", rc),
-    };
-    crate::log!("closing the Album (pid {})", app.pid);
-    match services::pm::terminate_process(app.pid) {
-        Ok(()) => Response::App(Some(App { pid: app.pid, program_id: app.program_id, hbl: app.hbl })),
-        Err(rc) => system_error("terminating the Album (pm:shell)", rc),
+    match services::pm::album() {
+        Ok(Some(_)) => Response::error(
+            ErrorKind::Unsupported,
+            "terminating the Album crashes the home menu; press HOME to close it (update the MCP server)",
+        ),
+        Ok(None) => Response::App(None),
+        Err(rc) => system_error("finding the Album's process (pm)", rc),
     }
 }
 

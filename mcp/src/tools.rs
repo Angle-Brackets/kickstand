@@ -444,7 +444,7 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Terminate homebrew or a game immediately. By default the hbmenu applet (hbmenu or an NRO in applet mode) if it's open, otherwise the application (hbmenu or an NRO with full memory, or a game); target picks one. What's closed can't save first, so only close a game the user isn't playing.")]
+    #[tool(description = "Close homebrew or a game. By default the hbmenu applet (hbmenu or an NRO in applet mode) if it's open, otherwise the application (hbmenu or an NRO with full memory, or a game); target picks one. The applet is closed with HOME (it's never terminated: that crashes the home menu); the application (a game, or an NRO with full memory) is terminated immediately and can't save first, so only close a game the user isn't playing.")]
     async fn close_app(&self, Parameters(args): Parameters<CloseAppArgs>) -> CallToolResult {
         let result = async {
             let applet = match args.target.as_deref() {
@@ -453,11 +453,11 @@ impl Tools {
                 Some(other) => anyhow::bail!("target is \"applet\" or \"application\", not {other:?}"),
                 None => self.client.applet_status().await?.is_some_and(|a| a.hbl == Some(true)),
             };
-            anyhow::Ok(match (applet, if applet { self.client.close_applet().await? } else { self.client.close_app().await? }) {
-                (true, Some(a)) => format!("closed the Album's hbloader (applet mode), pid {}", a.pid),
-                (true, None) => "the Album wasn't open".to_string(),
-                (false, Some(app)) => format!("closed {}", crate::client::describe_app(&app)),
-                (false, None) => "no application was running".to_string(),
+            let mode = if applet { crate::launch::Mode::Applet } else { crate::launch::Mode::Full };
+            anyhow::Ok(match crate::launch::close_running(&self.client, mode).await? {
+                Some((app, how)) => format!("closed {} ({})", crate::client::describe_app(&app), crate::launch::describe_closed(how)),
+                None if applet => "the Album wasn't open".to_string(),
+                None => "no application was running".to_string(),
             })
         };
         result.await.map_or_else(fail, ok)

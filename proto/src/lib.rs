@@ -198,8 +198,8 @@ pub enum Request {
     /// (18) hbmenu's applet: the Album, which Atmosphère runs hbloader in place of (applet mode: no game
     /// needed, less memory). Answers [`Response::App`] with its process, if the Album is open.
     AppletStatus,
-    /// (18) Terminates the Album's process (hbmenu or an NRO in applet mode). Answers [`Response::App`] with
-    /// what was closed.
+    /// (18) Terminated the Album's process. Since 20 refused with [`ErrorKind::Unsupported`] while the Album
+    /// runs (terminating it crashes the home menu; HOME closes it); [`Response::App`] `None` if it isn't open.
     CloseApplet,
     /// (18) Which process this connection's memory requests act on: the applet (the Album) or, by default,
     /// the application. Answers [`Response::Ok`].

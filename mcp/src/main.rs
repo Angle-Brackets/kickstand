@@ -93,7 +93,7 @@ enum Command {
     App,
     /// Where the console is: uptime, unlock presses after a reboot, keep-awake, application, applet.
     Status,
-    /// Terminate the running application (or with --applet, the Album) without letting it save.
+    /// Close the running application (terminated without saving), or with --applet, the Album (with HOME).
     CloseApp {
         #[arg(long)]
         applet: bool,
@@ -421,14 +421,14 @@ async fn main() -> Result<()> {
                 None => println!("applet: the Album isn't open"),
             }
         }
-        Command::CloseApp { applet: true } => match client.close_applet().await? {
-            Some(a) => println!("closed the Album, pid {}", a.pid),
-            None => println!("the Album wasn't open"),
-        },
-        Command::CloseApp { applet: false } => match client.close_app().await? {
-            Some(app) => println!("closed {}", client::describe_app(&app)),
-            None => println!("no application was running"),
-        },
+        Command::CloseApp { applet } => {
+            let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
+            match launch::close_running(&client, mode).await? {
+                Some((app, how)) => println!("closed {} ({})", client::describe_app(&app), launch::describe_closed(how)),
+                None if applet => println!("the Album wasn't open"),
+                None => println!("no application was running"),
+            }
+        }
         Command::Apps { max } => {
             for (i, app) in client.list_apps(max).await?.iter().enumerate() {
                 println!("{i:>3}  {:016x}  {}", app.id, app.name);

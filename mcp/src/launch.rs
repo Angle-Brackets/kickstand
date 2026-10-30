@@ -35,6 +35,8 @@ static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
 /// How long to look for a new application process after the last input.
 const PROCESS_WAIT: Duration = Duration::from_secs(5);
+/// How long the Album gets to exit after HOME.
+const EXIT_WAIT: Duration = Duration::from_secs(4);
 
 pub struct Opened {
     /// The title hbmenu runs in place of, in full-memory mode.
@@ -300,21 +302,64 @@ async fn wait_for_app(client: &Client) -> Result<Option<App>> {
     }
 }
 
-/// Terminates `app` and waits for the home menu to take over again.
-async fn close(client: &Client, mode: Mode, app: &App) -> Result<()> {
-    match mode {
-        Mode::Applet => client.close_applet().await?,
-        Mode::Full => client.close_app().await?,
-    };
+/// How a process was closed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Closed {
+    /// It exited when HOME was pressed (the Album).
+    Exited,
+    /// It was terminated (an application).
+    Terminated,
+}
+
+/// Closes `app` and waits for the home menu to take over again. The Album is closed with HOME, which makes
+/// the system ask it to exit: terminating it behind the home menu's back crashes the home menu (2144-0001,
+/// twice; see `context/AGENT_LOG.md`), and hbmenu has no exit button. An application (a game, or hbloader
+/// with full memory) is terminated.
+pub async fn close(client: &Client, mode: Mode, app: &App) -> Result<Closed> {
+    if mode == Mode::Applet {
+        client.input(vec![step(&[Button::Home], 100)]).await?;
+        if !gone(client, mode, app, EXIT_WAIT).await? {
+            bail!(
+                "the Album (pid {}) didn't exit after HOME; it's left running, since terminating it crashes the home menu",
+                app.pid
+            );
+        }
+        HBMENU_PID.store(0, Ordering::Relaxed);
+        tokio::time::sleep(AFTER_CLOSE).await;
+        return Ok(Closed::Exited);
+    }
+    client.close_app().await?;
+    if !gone(client, mode, app, PROCESS_WAIT).await? {
+        bail!("application {:016x} didn't close", app.program_id);
+    }
+    tokio::time::sleep(AFTER_CLOSE).await;
+    Ok(Closed::Terminated)
+}
+
+/// Closes whatever runs in `mode`'s place (the Album, or the application), if anything, as [`close`] does.
+pub async fn close_running(client: &Client, mode: Mode) -> Result<Option<(App, Closed)>> {
+    let Some(app) = status(client, mode).await? else { return Ok(None) };
+    let closed = close(client, mode, &app).await?;
+    Ok(Some((app, closed)))
+}
+
+pub fn describe_closed(how: Closed) -> &'static str {
+    match how {
+        Closed::Exited => "it exited on HOME",
+        Closed::Terminated => "terminated",
+    }
+}
+
+/// Waits up to `wait` for `app`'s process to end; whether it did.
+async fn gone(client: &Client, mode: Mode, app: &App, wait: Duration) -> Result<bool> {
     let start = tokio::time::Instant::now();
     while status(client, mode).await?.is_some_and(|now| now.pid == app.pid) {
-        if start.elapsed() > PROCESS_WAIT {
-            bail!("application {:016x} didn't close", app.program_id);
+        if start.elapsed() > wait {
+            return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    tokio::time::sleep(AFTER_CLOSE).await;
-    Ok(())
+    Ok(true)
 }
 
 /// The Kickstand NRO, whose launcher mode opens an NRO already on the SD card.

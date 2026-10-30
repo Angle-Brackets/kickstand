@@ -306,14 +306,6 @@ impl Client {
         }
     }
 
-    /// Terminates the Album's process; returns what was closed (`None`: it wasn't open).
-    pub async fn close_applet(&self) -> Result<Option<proto::App>> {
-        match self.request(Request::CloseApplet).await? {
-            Response::App(app) => Ok(app),
-            other => Err(unexpected(other)),
-        }
-    }
-
     /// What the console's fatal error screen is about, if it's on one: the newest Atmosphère fatal report
     /// since the daemon started, with what to do. `None` too from a daemon older than protocol 20.
     pub async fn fatal(&self) -> Result<Option<String>> {
