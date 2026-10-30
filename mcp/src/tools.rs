@@ -176,6 +176,19 @@ pub struct RunNroArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct SuperviseArgs {
+    /// Stop watching after this many seconds if nothing happens (default 60, at most 300).
+    pub seconds: Option<u64>,
+    /// Seconds without output before the screen is checked for a hang (default 20).
+    pub quiet_seconds: Option<u64>,
+    /// The NRO's ELF, for symbolized crash reports and backtraces (default: the last ELF given).
+    pub elf: Option<String>,
+    /// On a fatal error, reboot into hekate entry 1 right away (default true; the console can't recover
+    /// any other way).
+    pub reboot_on_fatal: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct StatusArgs {
     /// Include a small screenshot (default true).
     pub screenshot: Option<bool>,
@@ -587,6 +600,26 @@ impl Tools {
             anyhow::Ok(CallToolResult::success(content))
         };
         result.await.unwrap_or_else(fail)
+    }
+
+    #[tool(description = "Watch the running homebrew (after run_nro) until something happens, and say what: EXITED (with its last output), CRASHED (a new crash report for it, symbolized, with Atmosphère's screenshot), FATAL (the console stopped; rebooted into hekate entry 1 unless reboot_on_fatal is false), LOOKS HUNG (no output for quiet_seconds and a screen frozen for 5 s more: every thread's backtrace and a screenshot), or STILL RUNNING when seconds run out. Use it after starting a build to test, instead of polling status.")]
+    async fn supervise(&self, Parameters(args): Parameters<SuperviseArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, None)?;
+            let settings = crate::watchdog::Settings {
+                max: std::time::Duration::from_secs(args.seconds.unwrap_or(60).min(300)),
+                quiet: std::time::Duration::from_secs(args.quiet_seconds.unwrap_or(20).max(1)),
+                reboot_on_fatal: args.reboot_on_fatal.unwrap_or(true),
+            };
+            let output = self.output.lock().unwrap().is_open().then_some(&self.output);
+            let report = crate::watchdog::supervise(&self.client, output, &elf, &settings).await?;
+            let mut content = vec![ContentBlock::text(report.text)];
+            if let Some(jpeg) = report.screenshot {
+                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+            }
+            anyhow::Ok(content)
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
     #[tool(description = "Every thread's backtrace in the running homebrew: the daemon pauses it for a moment, reads each thread's registers and follows its frame pointers; addresses are named from the NRO's ELF, with source lines when it has DWARF. Use it when the homebrew hangs or stalls (a thread blocked in a wait, a lock, a GPU fence, or spinning), or to see what it's doing. The ELF must be the build that's running (a warning says when it isn't).")]

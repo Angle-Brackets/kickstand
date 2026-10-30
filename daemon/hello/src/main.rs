@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Prints a few lines over nxlink and exits back to hbmenu. Run with
+//! Prints a few lines over nxlink and exits back to hbmenu (or with `--hang`/`--crash`, tests the watchdog). Run with
 //! `nxlink -s -a <switch-ip> hello.nro`; it proves the toolchain, the nx runtime and sockets work.
 
 #![no_std]
@@ -33,6 +33,19 @@ fn main() {
     println!("argv: {:?}, nxlink host: {:?}", nx::hbl::get_argv(), nxlink::host());
     for (i, arg) in nxlink::args().enumerate() {
         println!("arg {i}: {arg}");
+    }
+    // For testing the watchdog: a hang (main thread asleep behind a still screen) or a crash (a data abort,
+    // which gets a crash report; a panic here would be a console fatal).
+    if nxlink::args().any(|a| a == "--hang") {
+        println!("hanging: sleeping forever");
+        loop {
+            let _ = svc::sleep_thread(1_000_000_000);
+        }
+    }
+    if nxlink::args().any(|a| a == "--crash") {
+        println!("crashing: writing through a null pointer");
+        let _ = svc::sleep_thread(200_000_000);
+        unsafe { core::ptr::null_mut::<u32>().write_volatile(0xDEAD) };
     }
     let ticks = nx::arm::get_system_tick();
     println!("uptime {} s", ticks / nx::arm::get_system_tick_frequency());

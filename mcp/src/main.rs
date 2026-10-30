@@ -13,6 +13,7 @@ mod nxlink;
 mod symbolize;
 mod tools;
 mod watch;
+mod watchdog;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,6 +180,22 @@ enum Command {
         elf: Option<PathBuf>,
         #[arg(long)]
         module: Option<String>,
+    },
+    /// Watch the running homebrew until it exits, crashes, takes the console down (fatal: reboots into hekate
+    /// entry 1 unless --no-reboot) or hangs (an unchanged screen for --quiet s + 5 s: thread backtraces), or
+    /// --seconds pass.
+    Supervise {
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+        #[arg(long, default_value_t = 20)]
+        quiet: u64,
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        no_reboot: bool,
+        /// Save the screenshot (crash or hang) here.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// The running application's memory map, and where the homebrew's NRO is in it.
     Memory {
@@ -502,6 +519,19 @@ async fn main() -> Result<()> {
             println!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures);
             if let Some(out) = out {
                 std::fs::write(&out, &waited.jpeg)?;
+            }
+        }
+        Command::Supervise { seconds, quiet, elf, no_reboot, out } => {
+            let settings = watchdog::Settings {
+                max: std::time::Duration::from_secs(seconds),
+                quiet: std::time::Duration::from_secs(quiet.max(1)),
+                reboot_on_fatal: !no_reboot,
+            };
+            let report = watchdog::supervise(&client, None, &memory::Elf::load(elf.as_deref(), None)?, &settings).await?;
+            println!("{}", report.text);
+            if let (Some(out), Some(jpeg)) = (out, report.screenshot) {
+                std::fs::write(&out, jpeg)?;
+                println!("screenshot: {}", out.display());
             }
         }
         Command::Threads { elf, module } => {

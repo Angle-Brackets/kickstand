@@ -224,6 +224,14 @@ pub async fn list(client: &Client, limit: usize) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
+/// The crash reports for program `program_id` (`<time>_<program id>.log`), by path: cheap enough to poll
+/// for a new one.
+pub async fn report_paths(client: &Client, program_id: u64) -> Result<std::collections::HashSet<String>> {
+    let suffix = format!("_{program_id:016x}.log");
+    let Ok((entries, _)) = client.list_dir(CRASH_DIR).await else { return Ok(Default::default()) };
+    Ok(entries.into_iter().filter(|e| e.name.ends_with(&suffix)).map(|e| format!("{CRASH_DIR}/{}", e.name)).collect())
+}
+
 /// A crash report or fatal record as read from the SD card.
 pub struct Fetched {
     path: String,

@@ -540,6 +540,8 @@ pub struct OutputLog {
     read: usize,
     dropped: usize,
     open: bool,
+    /// When the NRO last wrote anything.
+    last_output: Option<std::time::Instant>,
 }
 
 impl OutputLog {
@@ -564,6 +566,7 @@ impl OutputLog {
     }
 
     fn push(&mut self, s: &str) {
+        self.last_output = Some(std::time::Instant::now());
         self.text.push_str(s);
         if self.text.len() > OUTPUT_KEEP {
             let mut cut = self.text.len() - OUTPUT_KEEP;
@@ -589,6 +592,16 @@ impl OutputLog {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn last_output(&self) -> Option<std::time::Instant> {
+        self.last_output
+    }
+
+    /// The last `n` lines, without marking anything read.
+    pub fn tail(&self, n: usize) -> String {
+        let start = self.text.rmatch_indices('\n').nth(n).map_or(0, |(i, _)| i + 1);
+        self.text[start..].to_string()
     }
 }
 
