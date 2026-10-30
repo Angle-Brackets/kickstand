@@ -8,6 +8,7 @@ description = "The daemon as an Atmosphère sysmodule"
 [dependencies]
 nx = { workspace = true, features = ["socket", "fs", "canvas"] }
 daemon-core.workspace = true
+services.workspace = true
 proto.workspace = true
 
 # Program id 0x42000000004D4350 ends in "MCP". The SD card holds it at atmosphere/contents/42000000004D4350/.

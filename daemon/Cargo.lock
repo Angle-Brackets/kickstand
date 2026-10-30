@@ -382,6 +382,7 @@ dependencies = [
  "daemon-core",
  "kickstand-proto",
  "nx",
+ "services",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The "an agent is working" indicator: a 40x40 Kickstand icon on a vi:m managed layer above everything,
-//! next to the home menu's clock, shown while the keep-awake lease runs. It's only on the Default and LCD
+//! next to the home menu's clock, shown while the keep-awake lease runs and no software is open (a game,
+//! hbloader, or the Album), so it never sits over a game. It's only on the Default and LCD
 //! layer stacks, so screenshots and recordings don't include it. The GPU context and layer are made the
 //! first time a lease starts, then kept. Hiding draws a transparent frame: SetLayerVisibility succeeds on
 //! 23.0.1 but leaves a managed layer on screen.
@@ -24,6 +25,8 @@ const SIZE: u32 = 40;
 /// The swing icon at 40x40, premultiplied RGBA as the compositor blends it (`assets/logo/gen_tray.py`).
 const ICON: &[u8; (SIZE * SIZE * 4) as usize] = include_bytes!("tray-icon.rgba");
 const POLL_NS: i64 = 500_000_000;
+/// Polls between checks for open software (each check opens two pm sessions).
+const SOFTWARE_EVERY: u32 = 4;
 /// vi isn't ready for layers early in boot (2114-0006 at 10 s), so don't try before this uptime.
 const EARLIEST_MS: u64 = 45_000;
 /// After a failure to set up the layer, wait this long before trying again.
@@ -44,8 +47,14 @@ fn run() {
     let mut layer: Option<(Canvas, (u16, u16))> = None;
     // What the layer shows now; a new layer starts blank.
     let mut shown = false;
+    let mut software = false;
+    let mut polls = 0u32;
     loop {
-        let want = awake::remaining_ms() > 0;
+        if polls.is_multiple_of(SOFTWARE_EVERY) {
+            software = software_open();
+        }
+        polls = polls.wrapping_add(1);
+        let want = awake::remaining_ms() > 0 && !software;
         let pos = tray::position();
         // Moved (debug): make the layer again at the new spot.
         if layer.as_ref().is_some_and(|(_, at)| *at != pos) {
@@ -72,6 +81,13 @@ fn run() {
         }
         let _ = svc::sleep_thread(POLL_NS);
     }
+}
+
+/// Whether a game, hbloader or the Album is running. pm can't say whether it's in front, so a game
+/// suspended behind the home menu counts too.
+fn software_open() -> bool {
+    let open = |found: Result<Option<services::pm::Application>>| found.is_ok_and(|app| app.is_some());
+    open(services::pm::application()) || open(services::pm::album())
 }
 
 // The context stays on this thread; nx's canvas takes it as `Arc<RwLock<_>>`.
