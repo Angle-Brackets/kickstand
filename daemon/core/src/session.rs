@@ -97,6 +97,10 @@ impl<'a> Session<'a> {
             Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
             Request::KeepAwake { minutes } => keep_awake(minutes),
+            Request::IndicatorPosition { x, y } => {
+                crate::tray::set_position((x, y));
+                Response::Ok
+            }
             Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),

@@ -82,6 +82,9 @@ enum Command {
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 5 minutes.
     KeepAwake { minutes: Option<u32> },
+    /// Debug: move the "agent working" indicator to X, Y (1920x1080 layer space), until the next boot.
+    #[command(hide = true)]
+    IndicatorAt { x: u16, y: u16 },
     /// Resource limit usage of the daemon's group (for the sysmodule: all system processes)
     Resources,
     /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
@@ -240,6 +243,7 @@ async fn main() -> Result<()> {
             client.press(buttons, times, hold_ms).await?;
             println!("pressed");
         }
+        Command::IndicatorAt { x, y } => client.indicator_position(x, y).await?,
         Command::KeepAwake { minutes } => println!("{}", describe_keep_awake(client.keep_awake(minutes).await?)),
         Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
         Command::Exit => {

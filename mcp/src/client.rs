@@ -215,6 +215,11 @@ impl Client {
         expect(self.request(Request::Press { buttons, times, hold_ms }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
+    /// Moves the sysmodule's indicator (debug; see [`Request::IndicatorPosition`]).
+    pub async fn indicator_position(&self, x: u16, y: u16) -> Result<()> {
+        expect(self.request(Request::IndicatorPosition { x, y }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
     /// Keeps the console awake for `minutes` (0 ends it; `None` just asks); returns the seconds left.
     pub async fn keep_awake(&self, minutes: Option<u32>) -> Result<u64> {
         match self.request(Request::KeepAwake { minutes }).await? {

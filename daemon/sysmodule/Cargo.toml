@@ -6,7 +6,7 @@ license.workspace = true
 description = "The daemon as an Atmosphère sysmodule"
 
 [dependencies]
-nx = { workspace = true, features = ["socket", "fs"] }
+nx = { workspace = true, features = ["socket", "fs", "canvas"] }
 daemon-core.workspace = true
 proto.workspace = true
 

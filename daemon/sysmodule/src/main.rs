@@ -5,6 +5,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+mod indicator;
+
 use daemon_core::server::{self, Config};
 use daemon_core::{DaemonKind, log};
 use nx::diag::abort;
@@ -28,6 +32,7 @@ fn main() {
 
     daemon_core::awake::start();
     daemon_core::awake::unlock_after_agent_reboot();
+    indicator::start();
     let token = daemon_core::read_token_file();
     if token.is_none() {
         log!("no token in {}: every client will be refused", proto::path::TOKEN_PATH);

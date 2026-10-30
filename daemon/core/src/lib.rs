@@ -11,6 +11,7 @@ pub mod log;
 mod sd;
 pub mod server;
 pub mod session;
+pub mod tray;
 
 pub use proto::DaemonKind;
 

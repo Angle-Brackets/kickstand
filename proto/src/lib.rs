@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -138,6 +138,9 @@ pub enum Request {
     /// for 5 minutes, so this is for long stretches without requests (watching a game run). `Some(0)` ends
     /// the lease; `None` only asks. Not saved: a reboot ends it. Answers [`Response::KeepAwake`].
     KeepAwake { minutes: Option<u32> },
+    /// Debug, sysmodule: moves the "agent working" indicator's top-left corner (vi's 1920x1080 layer space) until
+    /// the next boot, to line it up with the home menu's status bar.
+    IndicatorPosition { x: u16, y: u16 },
 }
 
 /// A controller button, for [`Request::Press`].
