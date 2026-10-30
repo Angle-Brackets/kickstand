@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -331,6 +331,10 @@ pub enum ErrorKind {
     System,
     /// The request doesn't apply to this kind of daemon (e.g. `Exit` sent to the sysmodule).
     Unsupported,
+    /// The daemon is already serving as many clients as it can; sent once, then the connection closes.
+    Busy,
+    /// The console didn't have the memory for this (e.g. a screenshot while others hold theirs).
+    OutOfMemory,
 }
 
 impl Response {

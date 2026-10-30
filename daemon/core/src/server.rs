@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! TCP command server: one client at a time, one request then one response.
+//! TCP command server: up to [`MAX_CLIENTS`] clients at once, each on its own thread, one request then one
+//! response per client. So an agent can press buttons while another connection records a GIF.
 
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use nx::result::Result;
 use nx::socket::net::traits::SocketCommon;
 use nx::socket::net::{TcpListener, TcpStream, UdpSocket, poll};
 use nx::socket::{BsdServiceConfig, BsdSrvkind, Paralellism, PollFlags};
 use nx::svc;
+use nx::thread;
 use proto::{DaemonKind, ErrorKind, Request, Response};
 
 use crate::log;
@@ -30,8 +32,35 @@ pub struct Config<'a> {
 /// How often blocking waits wake to check [`Config::stop`].
 const STOP_CHECK_MS: i32 = 250;
 
-/// Socket buffers sized for a sysmodule: under 1 MiB of transfer memory (~872 KiB). The 256 KiB receive
-/// buffer holds the client's four pipelined upload chunks; at 64 KiB uploads ran at ~2 MB/s.
+/// Most clients served at once: the MCP server, a CLI and a spare. Each costs a thread with a
+/// [`CLIENT_STACK`] stack and, while it holds a screenshot, 512 KiB of heap.
+pub const MAX_CLIENTS: usize = 3;
+const CLIENT_STACK: usize = 0x10000;
+/// Bit n set: client slot n is taken.
+static SLOTS: AtomicU32 = AtomicU32::new(0);
+
+fn take_slot() -> Option<usize> {
+    let mut taken = SLOTS.load(Ordering::Acquire);
+    loop {
+        let slot = (!taken).trailing_zeros() as usize;
+        if slot >= MAX_CLIENTS {
+            return None;
+        }
+        match SLOTS.compare_exchange_weak(taken, taken | 1 << slot, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(slot),
+            Err(now) => taken = now,
+        }
+    }
+}
+
+fn free_slot(slot: usize) {
+    SLOTS.fetch_and(!(1 << slot), Ordering::AcqRel);
+}
+
+/// Socket buffers sized for a sysmodule. The 256 KiB receive buffer holds the client's four pipelined
+/// upload chunks; at 64 KiB uploads ran at ~2 MB/s. The transfer memory is `sb_efficiency` times one
+/// socket's maximum buffers (~434 KiB): at 2, a client streaming screenshots left no room to accept a
+/// second (its connection was reset), so 4 (~1.7 MiB) covers [`MAX_CLIENTS`] busy clients and the listener.
 pub fn socket_config() -> BsdServiceConfig {
     BsdServiceConfig {
         tcp_tx_buf_size: 0x8000,
@@ -40,7 +69,7 @@ pub fn socket_config() -> BsdServiceConfig {
         tcp_rx_buf_max_size: 0x40000,
         udp_tx_buf_size: 0x2400,
         udp_rx_buf_size: 0xA500,
-        sb_efficiency: 2,
+        sb_efficiency: 4,
         ..Default::default()
     }
 }
@@ -51,7 +80,9 @@ pub fn init_sockets(kind: DaemonKind) -> Result<()> {
         DaemonKind::Sysmodule => BsdSrvkind::System,
         DaemonKind::Nro => BsdSrvkind::User,
     };
-    nx::socket::initialize(srv, socket_config(), None, Paralellism::One)
+    // nx lends each blocking socket call one bsd session: the listener, every client's wait, and the NRO's
+    // nxlink output each need one, or they stall each other.
+    nx::socket::initialize(srv, socket_config(), None, Paralellism::Five)
 }
 
 /// The console's own IPv4 address. Connecting a UDP socket sends nothing but makes the stack pick the
@@ -66,10 +97,13 @@ fn stopped(config: &Config) -> bool {
     config.stop.is_some_and(|s| s.load(Ordering::Relaxed))
 }
 
-/// Serves clients until [`Config::stop`] is set (forever without it). Rebinds after network errors,
-/// which happen when Wi-Fi drops or the console sleeps.
-pub fn run(config: &Config) {
-    let mut frame = Vec::new();
+/// Serves clients until [`Config::stop`] is set (forever without it), then waits for their threads to
+/// finish. Rebinds after network errors, which happen when Wi-Fi drops or the console sleeps.
+pub fn run(config: &'static Config<'static>) {
+    // A stoppable server (the NRO) joins its client threads before returning: hbloader loads the next NRO
+    // into the same process, and a thread left running there executes unmapped code. The sysmodule never
+    // stops, so its client threads run detached.
+    let mut clients = Vec::new();
     while !stopped(config) {
         let listener = match TcpListener::bind(Ipv4Addr::UNSPECIFIED, config.port) {
             Ok(l) => l,
@@ -99,20 +133,43 @@ pub fn run(config: &Config) {
                     break;
                 }
             };
-            log!("client {}:{} connected", Ipv4Addr::from(addr.addr), u16::from_be(addr.port));
+            let who = (Ipv4Addr::from(addr.addr), u16::from_be(addr.port));
             let _ = stream.set_nodelay(true);
-            serve(&stream, config, &mut frame);
-            log!("client disconnected");
+            let Some(slot) = take_slot() else {
+                log!("client {}:{} refused: {MAX_CLIENTS} already connected", who.0, who.1);
+                let msg = alloc::format!("the daemon already has {MAX_CLIENTS} clients; try again when one disconnects");
+                let _ = send(&stream, &Response::error(ErrorKind::Busy, msg));
+                continue;
+            };
+            log!("client {}:{} connected (slot {slot})", who.0, who.1);
+            let spawned = thread::Builder::new().name("client").stack_size(CLIENT_STACK).spawn(move || {
+                serve(&stream, config, slot);
+                log!("client {}:{} disconnected", who.0, who.1);
+                free_slot(slot);
+            });
+            match spawned {
+                Ok(handle) if config.stop.is_some() => clients.push(handle),
+                Ok(_detached) => {}
+                Err(rc) => {
+                    log!("no thread for a client: {rc}");
+                    free_slot(slot);
+                }
+            }
         }
         drop(listener);
         if !stopped(config) {
             let _ = svc::sleep_thread(1_000_000_000);
         }
     }
+    // Clients see the stop within STOP_CHECK_MS and finish their request in flight (a press, a chunk).
+    for client in clients {
+        let _ = client.join();
+    }
 }
 
-fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
-    let mut session = Session::new(config.token, config.kind);
+fn serve(stream: &TcpStream, config: &Config, slot: usize) {
+    let mut session = Session::new(config.token, config.kind, slot);
+    let mut frame = Vec::new();
     loop {
         match wait_readable(stream, Some(config.idle_timeout_ms), config) {
             Ok(true) => {}
@@ -131,10 +188,10 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
             return;
         };
         frame.resize(len, 0);
-        if read_exact(stream, frame).is_err() {
+        if read_exact(stream, &mut frame).is_err() {
             return;
         }
-        let resp = match proto::decode::<Request>(frame) {
+        let resp = match proto::decode::<Request>(&frame) {
             Ok(req) => session.handle(req),
             Err(_) => {
                 let _ = send(stream, &Response::error(ErrorKind::BadRequest, "undecodable request"));

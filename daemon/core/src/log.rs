@@ -57,7 +57,11 @@ pub fn _log(args: core::fmt::Arguments) {
     }
 }
 
+/// Held while appending, so lines from different threads don't land at the same offset.
+static FILE_LOCK: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
+
 fn append_to_file(bytes: &[u8]) {
+    let _one_writer = FILE_LOCK.lock();
     let Ok(mut file) = fs::open_file(LOG_PATH, FileOpenOption::Create() | FileOpenOption::Write() | FileOpenOption::Append()) else {
         return;
     };

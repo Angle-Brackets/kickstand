@@ -35,7 +35,7 @@ fn main() {
         log!("mounting the SD card failed: {rc}");
         return;
     }
-    daemon_core::awake::start();
+    // No keep-awake thread here: it never ends, and hbloader would keep running it after this NRO exits.
 
     let token = token_arg().or_else(daemon_core::read_token_file);
     if token.is_none() {
@@ -54,13 +54,15 @@ fn main() {
         .name("server")
         .stack_size(0x10000)
         .spawn(move || {
-            server::run(&Config {
+            // Client threads borrow the config; it lives until the process exits.
+            let token = token.map(|t| &*alloc::boxed::Box::leak(t.into_boxed_str()));
+            server::run(alloc::boxed::Box::leak(alloc::boxed::Box::new(Config {
                 kind: DaemonKind::Nro,
                 port: proto::DEFAULT_PORT,
-                token: token.as_deref(),
+                token,
                 idle_timeout_ms: 120_000,
                 stop: Some(&STOP),
-            })
+            })))
         })
         .unwrap();
 

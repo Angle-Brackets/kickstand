@@ -99,6 +99,12 @@ pub fn unlock_after_agent_reboot() {
         log!("couldn't remove {AGENT_REBOOT_FLAG}: {}; not unlocking", e.message);
         return;
     }
+    // Started well after boot (the NRO handing over after a boot where the sysmodule didn't run): the flag
+    // is stale, and pressing now would land on whatever the user is doing.
+    if uptime_ms() > UNLOCK_AT_MS[0] {
+        log!("stale {AGENT_REBOOT_FLAG} (started at {}s): not unlocking", uptime_ms() / 1000);
+        return;
+    }
     extend(UNLOCK_AT_MS[UNLOCK_AT_MS.len() - 1] + ACTIVITY_LEASE_MS);
     let spawned = thread::Builder::new().name("unlock").stack_size(0x4000).spawn(|| {
         log!("booted by an agent reboot: unlocking");

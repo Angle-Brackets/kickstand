@@ -13,8 +13,6 @@ use services::power::MAX_PAYLOAD_SIZE;
 
 use crate::sd;
 
-/// Uploads are staged here, then renamed over the target once verified.
-const STAGING_FILE: &str = "/kickstand/staging/upload.part";
 
 struct Upload {
     path: String,
@@ -26,6 +24,9 @@ struct Upload {
 
 pub struct Session<'a> {
     token: Option<&'a str>,
+    /// Where this connection stages uploads before renaming them over the target, one file per client
+    /// slot so concurrent clients don't collide.
+    staging: String,
     kind: DaemonKind,
     authed: bool,
     upload: Option<Upload>,
@@ -45,9 +46,11 @@ pub enum AfterReply {
 }
 
 impl<'a> Session<'a> {
-    /// `token` is the shared secret clients must present; with `None` every Hello is refused.
-    pub fn new(token: Option<&'a str>, kind: DaemonKind) -> Self {
-        Session { token, kind, authed: false, upload: None, after_reply: None, screenshot: None }
+    /// `token` is the shared secret clients must present; with `None` every Hello is refused. `slot`
+    /// (below [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
+    pub fn new(token: Option<&'a str>, kind: DaemonKind, slot: usize) -> Self {
+        let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
+        Session { token, kind, staging, authed: false, upload: None, after_reply: None, screenshot: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -160,12 +163,12 @@ impl<'a> Session<'a> {
         };
         let file = sd::create_dirs(path::STAGING_DIR)
             .and_then(|()| sd::create_dirs(path::parent(&path)))
-            .and_then(|()| sd::create_for_write(STAGING_FILE, size));
+            .and_then(|()| sd::create_for_write(&self.staging, size));
         match file {
             Ok(file) => {
                 crate::log!("upload {path}: {size} bytes");
                 self.upload = Some(Upload { path, file, size, received: 0, crc: crc32::INIT });
-                Response::UploadReady { staging_path: String::from(STAGING_FILE) }
+                Response::UploadReady { staging_path: self.staging.clone() }
             }
             Err(e) => Response::Error(e),
         }
@@ -181,7 +184,7 @@ impl<'a> Session<'a> {
             return Response::error(ErrorKind::UploadState, msg);
         }
         if let Err(rc) = up.file.write_array::<u8, false>(data) {
-            let err = sd::io_error("write", STAGING_FILE, rc);
+            let err = sd::io_error("write", &self.staging, rc);
             self.abort_upload();
             return Response::Error(err);
         }
@@ -197,22 +200,22 @@ impl<'a> Session<'a> {
         if up.received != up.size {
             let msg = format!("finished after {} of {} bytes", up.received, up.size);
             drop(up);
-            let _ = sd::remove_if_exists(STAGING_FILE);
+            let _ = sd::remove_if_exists(&self.staging);
             return Response::error(ErrorKind::UploadState, msg);
         }
         let crc = crc32::finish(up.crc);
         if crc != expected_crc {
             drop(up);
-            let _ = sd::remove_if_exists(STAGING_FILE);
+            let _ = sd::remove_if_exists(&self.staging);
             let msg = format!("crc32 {crc:08x}, client expected {expected_crc:08x}");
             return Response::error(ErrorKind::ChecksumMismatch, msg);
         }
         let Upload { path, file, size, .. } = up;
         if let Err(rc) = file.flush() {
-            return Response::Error(sd::io_error("flush", STAGING_FILE, rc));
+            return Response::Error(sd::io_error("flush", &self.staging, rc));
         }
         drop(file);
-        let result = sd::remove_if_exists(&path).and_then(|()| sd::rename(STAGING_FILE, &path));
+        let result = sd::remove_if_exists(&path).and_then(|()| sd::rename(&self.staging, &path));
         match result {
             Ok(()) => {
                 crate::log!("upload {path}: done");
@@ -314,7 +317,11 @@ impl<'a> Session<'a> {
     fn screenshot(&mut self) -> Response {
         // Free the last one first: the heap has room for one capture buffer, not two.
         self.screenshot = None;
-        let mut buf = vec![0u8; services::caps::JPEG_BUFFER_SIZE];
+        let mut buf = alloc::vec::Vec::new();
+        if buf.try_reserve_exact(services::caps::JPEG_BUFFER_SIZE).is_err() {
+            return Response::error(ErrorKind::OutOfMemory, "no room for a 512 KiB capture buffer right now");
+        }
+        buf.resize(services::caps::JPEG_BUFFER_SIZE, 0);
         match services::caps::capture_jpeg(&mut buf) {
             Ok(size) if size <= buf.len() => {
                 buf.truncate(size);
@@ -330,7 +337,7 @@ impl<'a> Session<'a> {
 
     fn abort_upload(&mut self) {
         if self.upload.take().is_some() {
-            let _ = sd::remove_if_exists(STAGING_FILE);
+            let _ = sd::remove_if_exists(&self.staging);
         }
     }
 }
