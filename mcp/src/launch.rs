@@ -4,14 +4,18 @@
 //! online rights, game cards that aren't inserted), and only the home menu's row can do it, not "All
 //! Software". So the first time, try each tile of the row in order; remember the one that worked (the
 //! host title, in `~/.config/kickstand/host-title`) and go straight to it afterwards.
+//!
+//! Running an NRO then goes through hbmenu's NetLoader ([`run_nro`]): an NRO from this PC is sent as is;
+//! one already on the SD card is opened by sending the Kickstand NRO with `--open <path>`.
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use proto::{App, AppEntry, Button, HOME_MENU_TILES, InputStep};
+use tokio::net::TcpStream;
 
-use crate::client::Client;
-use crate::config;
+use crate::client::{Client, check_path};
+use crate::{config, nxlink};
 
 /// Shortest wait for the home menu to come back after an application closes.
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
@@ -131,4 +135,144 @@ async fn close(client: &Client, app: &App) -> Result<()> {
     }
     tokio::time::sleep(AFTER_CLOSE).await;
     Ok(())
+}
+
+/// The Kickstand NRO, whose launcher mode opens an NRO already on the SD card.
+const LAUNCHER: &str = "/switch/kickstand/kickstand.nro";
+/// How long NetLoader gets to start listening after Y.
+const NETLOADER_WAIT: Duration = Duration::from_secs(15);
+/// How long the NRO gets to connect its stdout after it's sent.
+const OUTPUT_WAIT: Duration = Duration::from_secs(10);
+
+pub enum Program {
+    /// An NRO on this PC, sent to `dest` on the SD card (inside the write roots, under `/switch/`).
+    Local { nro: Vec<u8>, dest: String },
+    /// An NRO already on the SD card.
+    Sd(String),
+}
+
+pub struct Started {
+    pub notes: Vec<String>,
+    /// The NRO's stdout, if it connected one (libnx's nxlink stdio, or the `nxlink` crate).
+    pub output: Option<TcpStream>,
+}
+
+/// Starts an NRO with `args` from a fresh hbmenu: whatever runs (hbmenu, an NRO, a game) is closed first.
+pub async fn run_nro(client: &Client, program: Program, args: Vec<String>) -> Result<Started> {
+    let (nro, dest, args) = match program {
+        Program::Local { nro, dest } => {
+            let dest = check_path(&dest, true)?;
+            let parent = &dest[..dest.rfind('/').unwrap_or(0)];
+            if !client.stat(parent).await.is_ok_and(|e| e.is_dir) {
+                bail!("{parent} doesn't exist; hbmenu won't create it (make it with upload first)");
+            }
+            let dest = dest.strip_prefix("/switch/").context("NetLoader can only write under /switch/")?.to_string();
+            (nro, dest, args)
+        }
+        Program::Sd(path) => {
+            let path = check_path(&path, false)?;
+            if !path.to_ascii_lowercase().ends_with(".nro") || client.stat(&path).await.is_err() {
+                bail!("{path} isn't an NRO on the SD card");
+            }
+            let (launcher, _) = client.read(LAUNCHER, 0, u64::MAX).await.context("reading the Kickstand NRO to launch it")?;
+            let dest = LAUNCHER.trim_start_matches("/switch/").to_string();
+            (launcher, dest, ["--open".to_string(), path].into_iter().chain(args).collect())
+        }
+    };
+
+    let mut notes = Vec::new();
+    // hbmenu can't be told apart from an NRO, so start from a fresh one.
+    if let Some(app) = client.app_status().await?
+        && app.hbl == Some(true)
+    {
+        close(client, &app).await?;
+        notes.push("closed the running hbloader (hbmenu or an NRO)".into());
+    }
+    notes.extend(open_hbmenu(client).await?.notes);
+
+    let output = nxlink::OutputListener::bind().await?;
+    let sock = start_netloader(client).await?;
+    nxlink::send(sock, &nro, &dest, &args).await?;
+    notes.push(format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()));
+    let output = output.accept(OUTPUT_WAIT).await?;
+    if output.is_none() {
+        notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
+    }
+    Ok(Started { notes, output })
+}
+
+/// Presses Y in hbmenu until NetLoader accepts a connection (hbmenu may still be loading at first).
+async fn start_netloader(client: &Client) -> Result<TcpStream> {
+    let start = tokio::time::Instant::now();
+    let mut pressed_at = None;
+    loop {
+        if pressed_at.is_none_or(|t: tokio::time::Instant| t.elapsed() > Duration::from_secs(4)) {
+            client.press(vec![Button::Y], 1, 100).await?;
+            pressed_at = Some(tokio::time::Instant::now());
+        }
+        match nxlink::connect(client.host()).await {
+            Ok(sock) => return Ok(sock),
+            Err(e) if start.elapsed() > NETLOADER_WAIT => {
+                return Err(e).context("hbmenu's NetLoader didn't start listening after Y");
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+}
+
+/// Most NRO output kept for the agent; older output is dropped first.
+const OUTPUT_KEEP: usize = 1 << 20;
+
+/// An NRO's stdout, collected in the background, for the agent to read in pieces.
+#[derive(Default)]
+pub struct OutputLog {
+    text: String,
+    /// Bytes of `text` already returned by [`OutputLog::take_new`].
+    read: usize,
+    dropped: usize,
+    open: bool,
+}
+
+impl OutputLog {
+    /// Collects `stream` into `log` until the NRO closes it (it exited) or a new run replaces it.
+    pub fn collect(log: &std::sync::Arc<std::sync::Mutex<OutputLog>>, mut stream: TcpStream) -> tokio::task::JoinHandle<()> {
+        *log.lock().unwrap() = OutputLog { open: true, ..Default::default() };
+        let log = log.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0; 4096];
+            while let Ok(n @ 1..) = stream.read(&mut buf).await {
+                log.lock().unwrap().push(&String::from_utf8_lossy(&buf[..n]));
+            }
+            log.lock().unwrap().open = false;
+        })
+    }
+
+    fn push(&mut self, s: &str) {
+        self.text.push_str(s);
+        if self.text.len() > OUTPUT_KEEP {
+            let mut cut = self.text.len() - OUTPUT_KEEP;
+            while !self.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.text.drain(..cut);
+            self.read = self.read.saturating_sub(cut);
+            self.dropped += cut;
+        }
+    }
+
+    /// Output not returned before, and whether the NRO still has its stdout open.
+    pub fn take_new(&mut self) -> (String, bool) {
+        let mut new = String::new();
+        if self.dropped > 0 && self.read == 0 {
+            new.push_str(&format!("[{} earlier bytes dropped]\n", self.dropped));
+        }
+        new.push_str(&self.text[self.read..]);
+        self.read = self.text.len();
+        (new, self.open)
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
 }

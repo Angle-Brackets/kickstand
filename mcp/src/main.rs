@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod launch;
 mod mock;
+mod nxlink;
 mod tools;
 
 use std::path::PathBuf;
@@ -96,6 +97,17 @@ enum Command {
     /// Open hbmenu with full memory by starting a title with R held: the saved host title, or the first
     /// one on the home menu's row that works. Closes any running title first.
     Hbmenu,
+    /// Run an NRO from a fresh hbmenu (closing whatever runs, opening hbmenu through the host title) and
+    /// stream its stdout until it exits. NRO is a file on this PC, or sdmc:/path for one on the SD card.
+    Run {
+        nro: String,
+        /// Where a local NRO goes on the SD card (default /switch/kickstand/<file name>).
+        #[arg(long)]
+        dest: Option<String>,
+        /// The NRO's arguments, after `--`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 30 minutes.
     KeepAwake { minutes: Option<u32> },
@@ -297,6 +309,24 @@ async fn main() -> Result<()> {
                 println!("{note}");
             }
             println!("hbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name);
+        }
+        Command::Run { nro, dest, args } => {
+            let program = match nro.strip_prefix("sdmc:") {
+                Some(path) => launch::Program::Sd(path.to_string()),
+                None => {
+                    let name = std::path::Path::new(&nro).file_name().context("NRO has no file name")?.to_string_lossy();
+                    let dest = dest.unwrap_or_else(|| format!("/switch/kickstand/{name}"));
+                    launch::Program::Local { nro: std::fs::read(&nro).with_context(|| format!("reading {nro}"))?, dest }
+                }
+            };
+            let started = launch::run_nro(&client, program, args).await?;
+            for note in &started.notes {
+                eprintln!("{note}");
+            }
+            if let Some(mut output) = started.output {
+                tokio::io::copy(&mut output, &mut tokio::io::stdout()).await?;
+                eprintln!("(the NRO closed its stdout)");
+            }
         }
         Command::Screenshot { local } => {
             let jpeg = client.screenshot().await?;

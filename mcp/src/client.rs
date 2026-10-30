@@ -49,6 +49,11 @@ impl Client {
         &self.addr
     }
 
+    /// The console's address without the port.
+    pub fn host(&self) -> &str {
+        self.addr.rsplit_once(':').map_or(&self.addr, |(host, _)| host)
+    }
+
     /// Connects (if needed) and returns what the daemon reported in its Hello.
     pub async fn hello(&self) -> Result<(String, DaemonKind)> {
         let mut guard = self.conn.lock().await;

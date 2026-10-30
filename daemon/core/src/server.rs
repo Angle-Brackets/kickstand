@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! TCP command server: up to [`MAX_CLIENTS`] clients at once, each on its own thread, one request then one
-//! response per client. So an agent can press buttons while another connection records a GIF.
+//! TCP command server: up to [`MAX_CLIENTS`] clients at once, one request then one response per client,
+//! so an agent can press buttons while another connection records a GIF. Each client slot has a worker
+//! thread, made once and reused: nx never frees a thread that exits (its kernel object and stack stay
+//! allocated), so a thread per connection exhausted the threads every system process shares after a few
+//! hundred connections, and Atmosphère's fatal service aborted.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -32,12 +36,44 @@ pub struct Config<'a> {
 /// How often blocking waits wake to check [`Config::stop`].
 const STOP_CHECK_MS: i32 = 250;
 
-/// Most clients served at once: the MCP server, a CLI and a spare. Each costs a thread with a
+/// Most clients served at once: the MCP server, a CLI and a spare. Each costs a worker thread with a
 /// [`CLIENT_STACK`] stack and, while it holds a screenshot, 512 KiB of heap.
 pub const MAX_CLIENTS: usize = 3;
 const CLIENT_STACK: usize = 0x10000;
-/// Bit n set: client slot n is taken.
+/// Bit n set: client slot n is taken (a client is connected, or its worker didn't start).
 static SLOTS: AtomicU32 = AtomicU32::new(0);
+
+/// Hands a connection from the accept loop to slot's worker.
+struct Mailbox {
+    client: nx::sync::Mutex<Option<(TcpStream, (Ipv4Addr, u16))>>,
+    /// 1 once a client is waiting; the worker sleeps on this address (svcWaitForAddress) while it's 0.
+    ready: AtomicU32,
+}
+
+impl Mailbox {
+    fn new() -> Self {
+        Mailbox { client: nx::sync::Mutex::new(None), ready: AtomicU32::new(0) }
+    }
+
+    fn post(&self, stream: TcpStream, who: (Ipv4Addr, u16)) {
+        *self.client.lock() = Some((stream, who));
+        self.ready.store(1, Ordering::Release);
+        // SAFETY: `ready` is a live, aligned u32 for as long as the mailbox (leaked, so forever).
+        let _ = unsafe { svc::signal_to_address((&raw const self.ready).cast(), svc::SignalType::Signal, 0, 1) };
+    }
+
+    /// The next client, or `None` after `timeout_ns` (-1: no timeout).
+    fn take(&self, timeout_ns: i64) -> Option<(TcpStream, (Ipv4Addr, u16))> {
+        if self.ready.load(Ordering::Acquire) == 0 {
+            // SAFETY: as in `post`. Returns at once if `post` already set it.
+            let _ = unsafe {
+                svc::wait_for_address((&raw const self.ready).cast(), svc::ArbitrationType::WaitIfEqual, 0, timeout_ns)
+            };
+        }
+        self.ready.store(0, Ordering::Release);
+        self.client.lock().take()
+    }
+}
 
 fn take_slot() -> Option<usize> {
     let mut taken = SLOTS.load(Ordering::Acquire);
@@ -100,10 +136,20 @@ fn stopped(config: &Config) -> bool {
 /// Serves clients until [`Config::stop`] is set (forever without it), then waits for their threads to
 /// finish. Rebinds after network errors, which happen when Wi-Fi drops or the console sleeps.
 pub fn run(config: &'static Config<'static>) {
-    // A stoppable server (the NRO) joins its client threads before returning: hbloader loads the next NRO
-    // into the same process, and a thread left running there executes unmapped code. The sysmodule never
-    // stops, so its client threads run detached.
-    let mut clients = Vec::new();
+    let mailboxes: &'static [Mailbox; MAX_CLIENTS] = Box::leak(Box::new(core::array::from_fn(|_| Mailbox::new())));
+    // A stoppable server (the NRO) joins its workers before returning: hbloader loads the next NRO into the
+    // same process, and a thread left running there executes unmapped code.
+    let mut workers = Vec::new();
+    for (slot, mailbox) in mailboxes.iter().enumerate() {
+        let spawned = thread::Builder::new().name("client").stack_size(CLIENT_STACK).spawn(move || worker(slot, mailbox, config));
+        match spawned {
+            Ok(handle) => workers.push(handle),
+            Err(rc) => {
+                log!("no thread for client slot {slot}: {rc}");
+                SLOTS.fetch_or(1 << slot, Ordering::AcqRel);
+            }
+        }
+    }
     while !stopped(config) {
         let listener = match TcpListener::bind(Ipv4Addr::UNSPECIFIED, config.port) {
             Ok(l) => l,
@@ -142,28 +188,28 @@ pub fn run(config: &'static Config<'static>) {
                 continue;
             };
             log!("client {}:{} connected (slot {slot})", who.0, who.1);
-            let spawned = thread::Builder::new().name("client").stack_size(CLIENT_STACK).spawn(move || {
-                serve(&stream, config, slot);
-                log!("client {}:{} disconnected", who.0, who.1);
-                free_slot(slot);
-            });
-            match spawned {
-                Ok(handle) if config.stop.is_some() => clients.push(handle),
-                Ok(_detached) => {}
-                Err(rc) => {
-                    log!("no thread for a client: {rc}");
-                    free_slot(slot);
-                }
-            }
+            mailboxes[slot].post(stream, who);
         }
         drop(listener);
         if !stopped(config) {
             let _ = svc::sleep_thread(1_000_000_000);
         }
     }
-    // Clients see the stop within STOP_CHECK_MS and finish their request in flight (a press, a chunk).
-    for client in clients {
-        let _ = client.join();
+    // Workers see the stop within STOP_CHECK_MS and finish their request in flight (a press, a chunk).
+    for worker in workers {
+        let _ = worker.join();
+    }
+}
+
+/// Serves slot's clients one after another, until the server stops.
+fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
+    let timeout_ns = if config.stop.is_some() { i64::from(STOP_CHECK_MS) * 1_000_000 } else { -1 };
+    while !stopped(config) {
+        let Some((stream, who)) = mailbox.take(timeout_ns) else { continue };
+        serve(&stream, config, slot);
+        drop(stream);
+        log!("client {}:{} disconnected", who.0, who.1);
+        free_slot(slot);
     }
 }
 

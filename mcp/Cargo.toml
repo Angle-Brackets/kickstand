@@ -17,3 +17,4 @@ clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.22"
 getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "gif"] }
+flate2 = "1"

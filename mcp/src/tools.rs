@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -21,6 +22,9 @@ const READ_MAX: u64 = 1024 * 1024;
 #[derive(Clone)]
 pub struct Tools {
     client: Arc<Client>,
+    /// The stdout of the last NRO run_nro started.
+    output: Arc<std::sync::Mutex<crate::launch::OutputLog>>,
+    collector: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -136,6 +140,28 @@ pub struct InputArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct RunNroArgs {
+    /// An NRO on this PC to send and run (e.g. a fresh build).
+    pub local_path: Option<String>,
+    /// Where to put local_path on the SD card (default /switch/kickstand/<file name>). Must be under
+    /// /switch/ inside the write roots, in a directory that exists.
+    pub dest: Option<String>,
+    /// Instead of local_path: an NRO already on the SD card, e.g. /switch/paperboat/paperboat.nro.
+    pub sd_path: Option<String>,
+    /// Arguments for the NRO (argv[1..]).
+    pub args: Option<Vec<String>>,
+    /// Seconds to collect output before returning, less if it exits (default 5, max 60); nro_output
+    /// reads the rest.
+    pub wait_seconds: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct NroOutputArgs {
+    /// First let it run this many seconds (default 0, max 60), less if it exits.
+    pub wait_seconds: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ListAppsArgs {
     /// How many to list (default 12, the home menu's row; at most 64).
     pub max: Option<u16>,
@@ -179,6 +205,19 @@ fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
 /// What `keep_awake` renews with no arguments: the daemon's per-request lease.
 const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
+impl Tools {
+    /// Waits up to `wait_s` for the NRO to exit, then returns its new output and status.
+    async fn read_output(&self, wait_s: u32) -> String {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait_s));
+        while self.output.lock().unwrap().is_open() && tokio::time::Instant::now() < until {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        let (new, open) = self.output.lock().unwrap().take_new();
+        let status = if open { "the NRO is running" } else { "the NRO's stdout is closed (it exited)" };
+        if new.is_empty() { format!("\n[no new output; {status}]") } else { format!("\n--- output ---\n{new}\n[{status}]") }
+    }
+}
+
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
@@ -190,7 +229,7 @@ fn fail(e: anyhow::Error) -> CallToolResult {
 #[tool_router]
 impl Tools {
     pub fn new(client: Arc<Client>) -> Self {
-        Tools { client, tool_router: Self::tool_router() }
+        Tools { client, output: Default::default(), collector: Default::default(), tool_router: Self::tool_router() }
     }
 
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
@@ -280,6 +319,40 @@ impl Tools {
             anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args, from a fresh hbmenu with full memory, and return its stdout so far. Closes whatever is running first (another NRO, hbmenu, or a game: ask before closing a game the user is playing), opens hbmenu through the host title (see open_hbmenu), starts NetLoader and sends it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
+    async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>) -> CallToolResult {
+        let result = async {
+            let program = match (args.local_path, args.sd_path) {
+                (Some(local), None) => {
+                    let nro = tokio::fs::read(&local).await.with_context(|| format!("reading {local}"))?;
+                    let name = std::path::Path::new(&local).file_name().context("local_path has no file name")?.to_string_lossy().into_owned();
+                    let dest = args.dest.unwrap_or_else(|| format!("/switch/kickstand/{name}"));
+                    crate::launch::Program::Local { nro, dest }
+                }
+                (None, Some(sd)) => crate::launch::Program::Sd(sd),
+                _ => anyhow::bail!("give exactly one of local_path and sd_path"),
+            };
+            let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default()).await?;
+            let mut text = started.notes.join("\n");
+            if let Some(stream) = started.output {
+                let handle = crate::launch::OutputLog::collect(&self.output, stream);
+                if let Some(old) = self.collector.lock().unwrap().replace(handle) {
+                    old.abort();
+                }
+                let wait = args.wait_seconds.unwrap_or(5).min(60);
+                text.push_str(&self.read_output(wait).await);
+            }
+            anyhow::Ok(text)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "More stdout from the NRO run_nro last started: what arrived since the last read, and whether it's still running (its stdout open).")]
+    async fn nro_output(&self, Parameters(args): Parameters<NroOutputArgs>) -> CallToolResult {
+        let wait = args.wait_seconds.unwrap_or(0).min(60);
+        ok(self.read_output(wait).await.trim_start().to_string())
     }
 
     #[tool(description = "Keep the Switch awake (no dimming or auto-sleep), shown by a Kickstand icon next to its clock. Every tool call keeps it awake for 30 minutes, after which the console's own timers apply again to save battery. Call this with no arguments to renew those 30 minutes before a long stretch without tool calls (a big build, a long think), or with more minutes (up to 480) to watch a game run; minutes: 0 lets it sleep when you're done. A console that falls asleep can't be woken remotely, so renew rather than risk it. Not kept across reboots; after a reboot to an entry, the sysmodule gets past the lock screen itself. Changes no system settings.")]
@@ -475,6 +548,6 @@ impl Tools {
 #[tool_handler(
     router = self.tool_router,
     name = "kickstand",
-    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished."
+    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished. To run homebrew, use run_nro (it opens hbmenu itself) and read its stdout with nro_output; app_status says what's running, screenshot shows it."
 )]
 impl ServerHandler for Tools {}
