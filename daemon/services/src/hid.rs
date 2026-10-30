@@ -105,8 +105,14 @@ impl service::IService for HidDbgService {
     }
 }
 
-/// `HidTouchAttribute_Start`.
+/// `HidTouchAttribute_Start` and `_End`: the first and last report of a touch. The autopilot repeats its
+/// state every sample, so each is shown for [`TOUCH_EDGE_NS`] and then replaced: a touch that said Start on
+/// every sample never becomes a held touch, and one that vanishes without End is never a tap, which is
+/// what the home menu wants (hbmenu only counts touches).
 const TOUCH_START: u32 = 1 << 0;
+const TOUCH_END: u32 = 1 << 1;
+/// A few samples (hid samples touch about every 4 ms; apps read once a frame).
+const TOUCH_EDGE_NS: i64 = 34_000_000;
 /// A fingertip, in touch screen pixels.
 const TOUCH_DIAMETER: u32 = 15;
 
@@ -136,6 +142,8 @@ pub struct VirtualController {
     tmem: svc::Handle,
     /// hid's work buffer, shared through `tmem`; freed only after the handle is closed.
     _work: Box<Page>,
+    /// Where the finger is, if it's down.
+    touch: Option<(u32, u32)>,
 }
 
 impl VirtualController {
@@ -144,7 +152,7 @@ impl VirtualController {
         let mut work = Box::new(Page([0; PAGE_SIZE]));
         let perm = svc::MemoryPermission::Read() | svc::MemoryPermission::Write();
         let tmem = svc::create_transfer_memory(work.0.as_mut_ptr(), PAGE_SIZE, perm)?;
-        let mut this = VirtualController { srv, session_id: None, handle: None, tmem, _work: work };
+        let mut this = VirtualController { srv, session_id: None, handle: None, tmem, _work: work, touch: None };
         // From here `Drop` undoes whatever succeeded.
         this.session_id = Some(this.srv.attach_hdls_work_buffer(PAGE_SIZE as u64, sf::CopyHandle::from(tmem))?);
         let info = DeviceInfo {
@@ -179,21 +187,34 @@ impl VirtualController {
         self.srv.set_hdls_state(SetStateArgs { handle, state })
     }
 
-    /// Puts one finger on the touch screen at (x, y), or lifts it. `first` marks the touch's start.
-    pub fn set_touch(&mut self, at: Option<(u32, u32)>, first: bool) -> Result<()> {
-        match at {
-            Some((x, y)) => {
-                let touch = TouchState {
-                    attributes: if first { TOUCH_START } else { 0 },
-                    x,
-                    y,
-                    diameter_x: TOUCH_DIAMETER,
-                    diameter_y: TOUCH_DIAMETER,
-                    ..Default::default()
-                };
-                self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[touch]))
+    /// Puts one finger on the touch screen at (x, y) (moving it, if it's down), or lifts it.
+    pub fn set_touch(&mut self, at: Option<(u32, u32)>) -> Result<()> {
+        let report = |attributes, (x, y): (u32, u32)| TouchState {
+            attributes,
+            x,
+            y,
+            diameter_x: TOUCH_DIAMETER,
+            diameter_y: TOUCH_DIAMETER,
+            ..Default::default()
+        };
+        match (self.touch, at) {
+            (None, Some(at)) => {
+                self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[report(TOUCH_START, at)]))?;
+                self.touch = Some(at);
+                let _ = svc::sleep_thread(TOUCH_EDGE_NS);
+                self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[report(0, at)]))
             }
-            None => self.srv.unset_touch_screen_auto_pilot_state(),
+            (Some(_), Some(at)) => {
+                self.touch = Some(at);
+                self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[report(0, at)]))
+            }
+            (Some(last), None) => {
+                self.touch = None;
+                let ended = self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[report(TOUCH_END, last)]));
+                let _ = svc::sleep_thread(TOUCH_EDGE_NS);
+                ended.and(self.srv.unset_touch_screen_auto_pilot_state())
+            }
+            (None, None) => Ok(()),
         }
     }
 }
@@ -227,22 +248,18 @@ pub fn play(steps: &[Step]) -> Result<()> {
     let _one_at_a_time = PRESSING.lock();
     let mut pad = VirtualController::attach()?;
     let _ = svc::sleep_thread(SETTLE_NS);
-    let mut touching = None;
     let result = (|| {
         for step in steps {
             pad.set_state(step)?;
-            if step.touch != touching {
-                pad.set_touch(step.touch, touching.is_none())?;
-                touching = step.touch;
+            if step.touch != pad.touch {
+                pad.set_touch(step.touch)?;
             }
             let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
         }
         Ok(())
     })();
     // Never leave a finger down or a button held, even after an error.
-    if touching.is_some() {
-        let _ = pad.set_touch(None, false);
-    }
+    let _ = pad.set_touch(None);
     let _ = pad.set_buttons(0);
     let _ = svc::sleep_thread(GAP_NS);
     result

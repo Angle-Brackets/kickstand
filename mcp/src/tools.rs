@@ -165,6 +165,30 @@ pub struct RunNroArgs {
     pub elf: Option<String>,
     /// The module name its backtraces use (default: the ELF's file name without .elf).
     pub module: Option<String>,
+    /// "applet" (default: hbmenu in the Album, a few hundred MB of memory) or "full" (in a game's place,
+    /// full memory, for homebrew that needs it).
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct StatusArgs {
+    /// Include a small screenshot (default true).
+    pub screenshot: Option<bool>,
+    /// Its width in pixels (default 480; the screen is 1280).
+    pub width: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct OpenHbmenuArgs {
+    /// "applet" (default) or "full"; see the tool's description.
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CloseAppArgs {
+    /// "applet" (hbmenu or an NRO in the Album) or "application" (a game, or hbmenu or an NRO with full
+    /// memory). Default: the applet if hbloader runs there, otherwise the application.
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -399,23 +423,36 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "What application (game, or hbloader running hbmenu or an NRO in a game's place) is running, if any. Cheaper and surer than a screenshot for knowing whether something launched, crashed or closed.")]
-    async fn app_status(&self) -> CallToolResult {
+    #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
+    async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> CallToolResult {
         let result = async {
-            anyhow::Ok(match self.client.app_status().await? {
-                Some(app) => crate::client::describe_app(&app),
-                None => "no application is running (the home menu, or the lock screen)".to_string(),
-            })
+            let status = self.client.status().await?;
+            let mut content = vec![ContentBlock::text(crate::client::describe_status(&status))];
+            if args.screenshot.unwrap_or(true) {
+                let jpeg = self.client.screenshot().await?;
+                let width = args.width.unwrap_or(480);
+                let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, None, Some(width))).await??;
+                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+            }
+            anyhow::Ok(content)
         };
-        result.await.map_or_else(fail, ok)
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Terminate the running application immediately (hbmenu, an NRO, or a game). The application can't save first, so only close a game the user isn't playing.")]
-    async fn close_app(&self) -> CallToolResult {
+    #[tool(description = "Terminate homebrew or a game immediately. By default the hbmenu applet (hbmenu or an NRO in applet mode) if it's open, otherwise the application (hbmenu or an NRO with full memory, or a game); target picks one. What's closed can't save first, so only close a game the user isn't playing.")]
+    async fn close_app(&self, Parameters(args): Parameters<CloseAppArgs>) -> CallToolResult {
         let result = async {
-            anyhow::Ok(match self.client.close_app().await? {
-                Some(app) => format!("closed {}", crate::client::describe_app(&app)),
-                None => "no application was running".to_string(),
+            let applet = match args.target.as_deref() {
+                Some("applet") => true,
+                Some("application") => false,
+                Some(other) => anyhow::bail!("target is \"applet\" or \"application\", not {other:?}"),
+                None => self.client.applet_status().await?.is_some_and(|a| a.hbl == Some(true)),
+            };
+            anyhow::Ok(match (applet, if applet { self.client.close_applet().await? } else { self.client.close_app().await? }) {
+                (true, Some(a)) => format!("closed the Album's hbloader (applet mode), pid {}", a.pid),
+                (true, None) => "the Album wasn't open".to_string(),
+                (false, Some(app)) => format!("closed {}", crate::client::describe_app(&app)),
+                (false, None) => "no application was running".to_string(),
             })
         };
         result.await.map_or_else(fail, ok)
@@ -443,18 +480,22 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Open hbmenu with full memory, the way to run homebrew. Starts a title from the home menu with R held so Atmosphère runs hbloader in its place: the host title that worked before, or else each title on the home menu's row in turn (closing any that start as the game) until one works, then remembers it. Closes whatever application is running first, so ask before using it while the user plays. Takes 20 s or more per title tried. If no title works, relay the error to the user: they may need to launch a title holding R themselves.")]
-    async fn open_hbmenu(&self) -> CallToolResult {
+    #[tool(description = "Open hbmenu, where homebrew runs. mode \"applet\" (default): the home menu's Album button, which Atmosphère runs hbmenu in: quick, no game involved (a running game stays suspended), but homebrew gets a few hundred MB of memory. mode \"full\": a title started with R held, so hbloader runs in its place with the console's full memory, for homebrew that needs it (hbmenu shows \"Applet Mode\" in red otherwise); closes whatever application runs (ask before closing a game the user is playing), tries the host title that worked before or else each title on the home menu's row, 20 s or more each. If no title works, relay the error: the user may need to launch a title holding R themselves.")]
+    async fn open_hbmenu(&self, Parameters(args): Parameters<OpenHbmenuArgs>) -> CallToolResult {
         let result = async {
-            let opened = crate::launch::open_hbmenu(&self.client).await?;
+            let mode = crate::launch::Mode::parse(args.mode.as_deref())?;
+            let opened = crate::launch::open_hbmenu(&self.client, mode).await?;
             let mut text = opened.notes.join("\n");
-            write!(text, "\nhbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name)?;
+            match opened.host {
+                Some(host) => write!(text, "\nhbmenu is open with full memory (host title {:016x} {})", host.id, host.name)?,
+                None => write!(text, "\nhbmenu is open in applet mode")?,
+            }
             anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args, from a fresh hbmenu with full memory, and return its stdout so far. Closes whatever is running first (another NRO, hbmenu, or a game: ask before closing a game the user is playing), opens hbmenu through the host title (see open_hbmenu), starts NetLoader and sends it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
+    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"applet\" (default) runs it in applet mode (see open_hbmenu); \"full\" with the console's full memory, closing whatever application runs (ask before closing a game the user is playing). An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
     async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>) -> CallToolResult {
         let result = async {
             let program = match (args.local_path, args.sd_path) {
@@ -474,7 +515,8 @@ impl Tools {
             if let Some(elf) = &args.elf {
                 *self.elf.lock().unwrap() = Some((elf.clone(), args.module.clone()));
             }
-            let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default()).await?;
+            let mode = crate::launch::Mode::parse(args.mode.as_deref())?;
+            let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default(), mode).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {
                 let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols, started.pid);
@@ -556,7 +598,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Write to the running homebrew's memory (refused for games): set a variable to test a fix or reach a state quickly (e.g. a flag, a position, a debug toggle). Takes an address expression like read_memory and returns the value before and after. Writing code or pointers can crash the NRO; check app_status and crash_reports if it stops.")]
+    #[tool(description = "Write to the running homebrew's memory (refused for games): set a variable to test a fix or reach a state quickly (e.g. a flag, a position, a debug toggle). Takes an address expression like read_memory and returns the value before and after. Writing code or pointers can crash the NRO; check status and crash_reports if it stops.")]
     async fn write_memory(&self, Parameters(args): Parameters<WriteMemoryArgs>) -> CallToolResult {
         let result = async {
             let elf = self.elf(args.elf, args.module)?;
@@ -797,6 +839,6 @@ impl Tools {
 #[tool_handler(
     router = self.tool_router,
     name = "kickstand",
-    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished. To run homebrew, use run_nro (it opens hbmenu itself) and read its stdout with nro_output; app_status says what's running, screenshot shows it."
+    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished. To run homebrew, use run_nro (it opens hbmenu itself) and read its stdout with nro_output; status says where the console is (what runs, the lock screen after a reboot, keep-awake) with a small screenshot."
 )]
 impl ServerHandler for Tools {}

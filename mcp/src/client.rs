@@ -279,6 +279,46 @@ impl Client {
         }
     }
 
+    /// Where the console is: uptime, unlock presses, keep-awake, the application and the applet. A daemon
+    /// older than protocol 19 is asked the pieces it knows instead.
+    pub async fn status(&self) -> Result<proto::ConsoleStatus> {
+        match self.request(Request::Status).await? {
+            Response::Status(status) => Ok(status),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => {
+                let (_, uptime) = self.ping().await?;
+                Ok(proto::ConsoleStatus {
+                    uptime_ms: uptime.as_millis() as u64,
+                    unlocking_ms: None,
+                    keep_awake_s: self.keep_awake(None).await?,
+                    application: self.app_status().await?,
+                    applet: self.applet_status().await.unwrap_or(None),
+                })
+            }
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// The Album's process (hbmenu in applet mode), if it's open.
+    pub async fn applet_status(&self) -> Result<Option<proto::App>> {
+        match self.request(Request::AppletStatus).await? {
+            Response::App(app) => Ok(app),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Terminates the Album's process; returns what was closed (`None`: it wasn't open).
+    pub async fn close_applet(&self) -> Result<Option<proto::App>> {
+        match self.request(Request::CloseApplet).await? {
+            Response::App(app) => Ok(app),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Points this connection's memory requests at the Album's process (`applet`) or the application.
+    pub async fn memory_target(&self, applet: bool) -> Result<()> {
+        expect(self.request(Request::MemoryTarget { applet }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
     /// Installed applications, most recently used first (the home menu's order).
     pub async fn list_apps(&self, max: u16) -> Result<Vec<proto::AppEntry>> {
         match self.request(Request::ListApps { max }).await? {
@@ -603,6 +643,29 @@ pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
         anyhow::bail!("no buttons given");
     }
     Ok(buttons)
+}
+
+/// `status` as a few lines of text.
+pub fn describe_status(status: &proto::ConsoleStatus) -> String {
+    let secs = status.uptime_ms / 1000;
+    let unlock = match status.unlocking_ms {
+        Some(ms) => format!("the sysmodule is still pressing B to get past the lock screen (after an agent reboot) for {} s more", ms.div_ceil(1000)),
+        None => "no unlock presses pending".to_string(),
+    };
+    let awake = match status.keep_awake_s {
+        0 => "keep-awake: off (the console's own sleep timers apply)".to_string(),
+        s => format!("keep-awake: {} min left", s.div_ceil(60)),
+    };
+    let application = match &status.application {
+        Some(app) => format!("application: {}", describe_app(app)),
+        None => "application: none".to_string(),
+    };
+    let applet = match &status.applet {
+        Some(a) if a.hbl == Some(true) => format!("applet mode: hbloader (hbmenu or an NRO) in the Album, pid {}", a.pid),
+        Some(a) => format!("applet mode: the Album is open showing pictures, pid {}", a.pid),
+        None => "applet mode: the Album isn't open".to_string(),
+    };
+    format!("uptime {}m {}s; {unlock}\n{awake}\n{application}\n{applet}", secs / 60, secs % 60)
 }
 
 pub fn describe_app(app: &proto::App) -> String {

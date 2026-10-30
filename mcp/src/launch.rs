@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Opening hbmenu with nobody at the console: launch a title from the home menu while holding R, which
-//! Atmosphère turns into hbloader with the title's full memory. Not every title works (ones that check
-//! online rights, game cards that aren't inserted), and only the home menu's row can do it, not "All
-//! Software". So the first time, try each tile of the row in order; remember the one that worked (the
-//! host title, in `~/.config/kickstand/host-title`) and go straight to it afterwards.
+//! Opening hbmenu with nobody at the console, in one of two places ([`Mode`]):
+//! - **Applet mode** (the default, the user's choice: it's the consistent one): the home menu's Album
+//!   button, which Atmosphère runs hbloader in place of. No game is involved and a running game stays
+//!   suspended, but homebrew gets a few hundred MB of memory, not the console's full ~3 GB.
+//! - **Full memory**: launch a title from the home menu while holding R, which Atmosphère turns into
+//!   hbloader with the title's memory. Not every title works (ones that check online rights, game cards that
+//!   aren't inserted), and only the home menu's row can do it, not "All Software". So the first time, try
+//!   each tile of the row in order; remember the one that worked (the host title, in
+//!   `~/.config/kickstand/host-title`) and go straight to it afterwards. The R hold has been unreliable with
+//!   the virtual controller (see `context/AGENT_LOG.md`).
 //!
 //! Running an NRO then goes through hbmenu's NetLoader ([`run_nro`]): an NRO from this PC is sent as is;
 //! one already on the SD card is opened by sending the Kickstand NRO with `--open <path>`.
@@ -29,7 +34,8 @@ const AFTER_CLOSE: Duration = Duration::from_millis(1500);
 const PROCESS_WAIT: Duration = Duration::from_secs(5);
 
 pub struct Opened {
-    pub host: AppEntry,
+    /// The title hbmenu runs in place of, in full-memory mode.
+    pub host: Option<AppEntry>,
     /// What was tried on the way, for the agent to relay.
     pub notes: Vec<String>,
 }
@@ -38,16 +44,88 @@ fn step(buttons: &[Button], ms: u32) -> InputStep {
     InputStep { buttons: buttons.to_vec(), ms, ..Default::default() }
 }
 
-/// Opens hbmenu, from whatever is running. Fails with what it tried if no title on the row works.
-pub async fn open_hbmenu(client: &Client) -> Result<Opened> {
+/// Where hbmenu runs (see the module docs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Applet,
+    Full,
+}
+
+impl Mode {
+    pub fn parse(name: Option<&str>) -> Result<Self> {
+        match name.unwrap_or("applet") {
+            "applet" => Ok(Mode::Applet),
+            "full" => Ok(Mode::Full),
+            other => bail!("mode is \"applet\" or \"full\", not {other:?}"),
+        }
+    }
+}
+
+/// The process hbmenu runs in for `mode`: the Album's, or the application's.
+async fn status(client: &Client, mode: Mode) -> Result<Option<App>> {
+    match mode {
+        Mode::Applet => client.applet_status().await,
+        Mode::Full => client.app_status().await,
+    }
+}
+
+/// Opens hbmenu in `mode`. In full-memory mode, closes whatever application runs first and fails with what
+/// it tried if no title on the row works.
+pub async fn open_hbmenu(client: &Client, mode: Mode) -> Result<Opened> {
+    match mode {
+        Mode::Applet => open_applet(client).await,
+        Mode::Full => open_full(client).await,
+    }
+}
+
+/// How long the Album gets to show up after A.
+const ALBUM_WAIT: Duration = Duration::from_secs(8);
+
+async fn open_applet(client: &Client) -> Result<Opened> {
+    let mut notes = Vec::new();
+    if let Some(app) = client.applet_status().await? {
+        if app.hbl == Some(true) {
+            notes.push("hbmenu (or an NRO) was already open in applet mode".into());
+            return Ok(Opened { host: None, notes });
+        }
+        close(client, Mode::Applet, &app).await?;
+        notes.push("closed the Album (it was showing pictures, not hbmenu)".into());
+    }
+    // HOME selects the first tile; Down moves to the leftmost button under the row, and the Album is the
+    // fourth. (The home menu ignores the virtual touch screen.)
+    let mut steps = vec![step(&[Button::Home], 100), step(&[], 1500), step(&[Button::Down], 100), step(&[], 400)];
+    for _ in 0..3 {
+        steps.extend([step(&[Button::Right], 80), step(&[], 200)]);
+    }
+    steps.push(step(&[Button::A], 100));
+    client.input(steps).await?;
+    let start = tokio::time::Instant::now();
+    loop {
+        match client.applet_status().await? {
+            Some(app) if app.hbl == Some(true) => {
+                HBMENU_PID.store(app.pid, Ordering::Relaxed);
+                notes.push("hbmenu opened in applet mode (the Album)".into());
+                return Ok(Opened { host: None, notes });
+            }
+            Some(_) => bail!("the Album opened without hbloader: Atmosphère's hbl_config doesn't override it here"),
+            None if start.elapsed() > ALBUM_WAIT => {
+                bail!("the Album didn't open: the home menu may not have been showing; check with screenshot")
+            }
+            None => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+}
+
+/// Opens hbmenu with full memory through a title.
+async fn open_full(client: &Client) -> Result<Opened> {
     let mut notes = Vec::new();
     if let Some(app) = client.app_status().await? {
         if app.hbl == Some(true) {
             let host = AppEntry { id: app.program_id, name: String::new() };
             notes.push("hbloader was already running (hbmenu or an NRO)".into());
-            return Ok(Opened { host, notes });
+            return Ok(Opened { host: Some(host), notes });
         }
-        close(client, &app).await?;
+        close(client, Mode::Full, &app).await?;
         notes.push(format!("closed the running title {:016x}", app.program_id));
     }
 
@@ -74,12 +152,12 @@ pub async fn open_hbmenu(client: &Client) -> Result<Opened> {
                 let host = apps.iter().find(|a| a.id == app.program_id).cloned().unwrap_or(AppEntry { id: app.program_id, name: String::new() });
                 config::save_host_title(host.id, &host.name)?;
                 notes.push(format!("hbmenu opened through {label} (tile {tile})"));
-                return Ok(Opened { host, notes });
+                return Ok(Opened { host: Some(host), notes });
             }
             Some(app) => {
                 let how = if app.hbl.is_none() { "Atmosphère didn't say whether it was hbloader" } else { "it started as the game" };
                 notes.push(format!("{label} (tile {tile}): {how}"));
-                close(client, &app).await?;
+                close(client, Mode::Full, &app).await?;
             }
             None => {
                 notes.push(format!("{label} (tile {tile}): nothing started (it needs a card, rights or an online check)"));
@@ -142,7 +220,7 @@ pub async fn launch_title(client: &Client, query: &str, user: usize) -> Result<(
             notes.push(format!("{} was already running; switch to it with HOME then A", target.name));
             return Ok((target, notes));
         }
-        close(client, &app).await?;
+        close(client, Mode::Full, &app).await?;
         notes.push(format!("closed the running application {:016x}", app.program_id));
     }
     select_tile(client, tile).await?;
@@ -191,10 +269,13 @@ async fn wait_for_app(client: &Client) -> Result<Option<App>> {
 }
 
 /// Terminates `app` and waits for the home menu to take over again.
-async fn close(client: &Client, app: &App) -> Result<()> {
-    client.close_app().await?;
+async fn close(client: &Client, mode: Mode, app: &App) -> Result<()> {
+    match mode {
+        Mode::Applet => client.close_applet().await?,
+        Mode::Full => client.close_app().await?,
+    };
     let start = tokio::time::Instant::now();
-    while client.app_status().await?.is_some_and(|now| now.pid == app.pid) {
+    while status(client, mode).await?.is_some_and(|now| now.pid == app.pid) {
         if start.elapsed() > PROCESS_WAIT {
             bail!("application {:016x} didn't close", app.program_id);
         }
@@ -228,8 +309,9 @@ pub struct Started {
     pub output: Option<TcpStream>,
 }
 
-/// Starts an NRO with `args` from a fresh hbmenu: whatever runs (hbmenu, an NRO, a game) is closed first.
-pub async fn run_nro(client: &Client, program: Program, args: Vec<String>) -> Result<Started> {
+/// Starts an NRO with `args` from a fresh hbmenu in `mode`: an NRO already running there is closed first
+/// (and in full-memory mode, any game).
+pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode) -> Result<Started> {
     let (nro, dest, args) = match program {
         Program::Local { nro, dest } => {
             let dest = check_path(&dest, true)?;
@@ -254,7 +336,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>) -> Re
     let mut notes = Vec::new();
     let output = nxlink::OutputListener::bind().await?;
     // hbmenu can't be told apart from an NRO, so only a process known to show hbmenu is used as is.
-    let current = client.app_status().await?;
+    let current = status(client, mode).await?;
     let mut sock = None;
     if let Some(app) = &current
         && app.hbl == Some(true)
@@ -271,20 +353,20 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>) -> Re
     let sock = match sock {
         Some(sock) => sock,
         None => {
-            if let Some(app) = client.app_status().await?
+            if let Some(app) = status(client, mode).await?
                 && app.hbl == Some(true)
             {
-                close(client, &app).await?;
+                close(client, mode, &app).await?;
                 notes.push("closed the running hbloader (hbmenu or an NRO)".into());
             }
-            notes.extend(open_hbmenu(client).await?.notes);
+            notes.extend(open_hbmenu(client, mode).await?.notes);
             start_netloader(client, NETLOADER_WAIT).await?
         }
     };
     HBMENU_PID.store(0, Ordering::Relaxed);
     nxlink::send(sock, &nro, &dest, &args).await?;
     notes.push(format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()));
-    let pid = client.app_status().await?.map_or(0, |a| a.pid);
+    let pid = status(client, mode).await?.map_or(0, |a| a.pid);
     let output = output.accept(OUTPUT_WAIT).await?;
     if output.is_none() {
         notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());

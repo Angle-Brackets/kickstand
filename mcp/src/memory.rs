@@ -365,14 +365,24 @@ impl Elf {
     }
 }
 
+/// Points memory requests at the homebrew being worked on: hbloader in the Album (applet mode) if it's
+/// there, otherwise the application. Returns which, for the output.
+async fn target(client: &Client) -> Result<&'static str> {
+    let applet = client.applet_status().await?.is_some_and(|a| a.hbl == Some(true));
+    client.memory_target(applet).await?;
+    Ok(if applet { "applet mode (the Album)" } else { "the application" })
+}
+
 /// The application's memory map, as text.
 pub async fn map(client: &Client, elf: &Elf) -> Result<String> {
-    Ok(Layout::fetch(client).await?.render(elf.symbols.as_ref()))
+    let which = target(client).await?;
+    Ok(format!("in {which}: {}", Layout::fetch(client).await?.render(elf.symbols.as_ref())))
 }
 
 /// Reads `len` bytes at the address `expr` and shows them as `format` (`len` 0: one value, or 256 bytes
 /// for a string).
 pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Format) -> Result<String> {
+    target(client).await?;
     let layout = Layout::fetch(client).await?;
     let address = resolve(client, &layout, elf.symbols.as_ref(), elf.module.as_deref(), expr).await?;
     let len = match len {
@@ -393,6 +403,7 @@ pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Fo
 
 /// Writes `value` encoded as `format` at the address `expr`; returns what was there before and after.
 pub async fn poke(client: &Client, elf: &Elf, expr: &str, value: &str, format: Format) -> Result<String> {
+    target(client).await?;
     let layout = Layout::fetch(client).await?;
     let address = resolve(client, &layout, elf.symbols.as_ref(), elf.module.as_deref(), expr).await?;
     let data = format.encode(value)?;

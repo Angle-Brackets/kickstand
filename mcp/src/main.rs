@@ -91,8 +91,13 @@ enum Command {
     Input { steps: String },
     /// The running application, if any, and whether it's hbloader (hbmenu or an NRO).
     App,
-    /// Terminate the running application without letting it save.
-    CloseApp,
+    /// Where the console is: uptime, unlock presses after a reboot, keep-awake, application, applet.
+    Status,
+    /// Terminate the running application (or with --applet, the Album) without letting it save.
+    CloseApp {
+        #[arg(long)]
+        applet: bool,
+    },
     /// Installed titles, most recently used first (the home menu's order).
     Apps {
         #[arg(long, default_value_t = proto::HOME_MENU_TILES as u16)]
@@ -105,13 +110,19 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         user: usize,
     },
-    /// Open hbmenu with full memory by starting a title with R held: the saved host title, or the first
-    /// one on the home menu's row that works. Closes any running title first.
-    Hbmenu,
-    /// Run an NRO from a fresh hbmenu (closing whatever runs, opening hbmenu through the host title) and
-    /// stream its stdout until it exits. NRO is a file on this PC, or sdmc:/path for one on the SD card.
+    /// Open hbmenu in applet mode (the home menu's Album button), or with --full, with full memory by
+    /// starting a title with R held (the saved host title, or the first on the home menu's row that works;
+    /// closes any running title first).
+    Hbmenu {
+        #[arg(long)]
+        full: bool,
+    },
+    /// Run an NRO from hbmenu (applet mode, or --full for full memory) and stream its stdout until it
+    /// exits. NRO is a file on this PC, or sdmc:/path for one on the SD card.
     Run {
         nro: String,
+        #[arg(long)]
+        full: bool,
         /// Where a local NRO goes on the SD card (default /switch/kickstand/<file name>).
         #[arg(long)]
         dest: Option<String>,
@@ -394,11 +405,22 @@ async fn main() -> Result<()> {
             client.input(client::parse_steps(&steps)?).await?;
             println!("played");
         }
-        Command::App => match client.app_status().await? {
-            Some(app) => println!("{}", client::describe_app(&app)),
-            None => println!("no application is running"),
+        Command::Status => println!("{}", client::describe_status(&client.status().await?)),
+        Command::App => {
+            match client.app_status().await? {
+                Some(app) => println!("application: {}", client::describe_app(&app)),
+                None => println!("application: none"),
+            }
+            match client.applet_status().await? {
+                Some(a) => println!("applet: the Album, pid {}{}", a.pid, if a.hbl == Some(true) { ", hbloader" } else { "" }),
+                None => println!("applet: the Album isn't open"),
+            }
+        }
+        Command::CloseApp { applet: true } => match client.close_applet().await? {
+            Some(a) => println!("closed the Album, pid {}", a.pid),
+            None => println!("the Album wasn't open"),
         },
-        Command::CloseApp => match client.close_app().await? {
+        Command::CloseApp { applet: false } => match client.close_app().await? {
             Some(app) => println!("closed {}", client::describe_app(&app)),
             None => println!("no application was running"),
         },
@@ -415,12 +437,15 @@ async fn main() -> Result<()> {
             }
             println!("{} ({:016x}) is running", app.name, app.id);
         }
-        Command::Hbmenu => {
-            let opened = launch::open_hbmenu(&client).await?;
+        Command::Hbmenu { full } => {
+            let opened = launch::open_hbmenu(&client, if full { launch::Mode::Full } else { launch::Mode::Applet }).await?;
             for note in &opened.notes {
                 println!("{note}");
             }
-            println!("hbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name);
+            match opened.host {
+                Some(host) => println!("hbmenu is open with full memory (host title {:016x} {})", host.id, host.name),
+                None => println!("hbmenu is open in applet mode"),
+            }
         }
         Command::Crashes { limit } => {
             for e in crash::list(&client, limit).await? {
@@ -461,7 +486,7 @@ async fn main() -> Result<()> {
             let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
             println!("{}", memory::poke(&client, &elf, &address, &value, memory::Format::parse(&format)?).await?);
         }
-        Command::Run { nro, dest, elf, module, args } => {
+        Command::Run { nro, full, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
                 Some(path) => launch::Program::Sd(path.to_string()),
                 None => {
@@ -471,7 +496,8 @@ async fn main() -> Result<()> {
                 }
             };
             let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref()).map(symbolize::Symbolizer::shared)).transpose()?;
-            let started = launch::run_nro(&client, program, args).await?;
+            let mode = if full { launch::Mode::Full } else { launch::Mode::Applet };
+            let started = launch::run_nro(&client, program, args, mode).await?;
             for note in &started.notes {
                 eprintln!("{note}");
             }

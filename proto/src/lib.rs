@@ -87,7 +87,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -194,6 +194,17 @@ pub enum Request {
     /// Writes `data` (at most [`MAX_CHUNK`]) to the running application's memory at `address`. Only to
     /// homebrew (the application is hbloader), never a game's memory.
     WriteMemory { address: u64, data: Vec<u8> },
+    /// (18) hbmenu's applet: the Album, which Atmosphère runs hbloader in place of (applet mode: no game
+    /// needed, less memory). Answers [`Response::App`] with its process, if the Album is open.
+    AppletStatus,
+    /// (18) Terminates the Album's process (hbmenu or an NRO in applet mode). Answers [`Response::App`] with
+    /// what was closed.
+    CloseApplet,
+    /// (18) Which process this connection's memory requests act on: the applet (the Album) or, by default,
+    /// the application. Answers [`Response::Ok`].
+    MemoryTarget { applet: bool },
+    /// (19) Where the console is, in one call. Answers [`Response::Status`].
+    Status,
 }
 
 /// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
@@ -332,6 +343,23 @@ pub enum Response {
     Apps(Vec<AppEntry>),
     Memory(MemoryMap),
     Error(Error),
+    /// (19)
+    Status(ConsoleStatus),
+}
+
+/// Answer to [`Request::Status`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleStatus {
+    pub uptime_ms: u64,
+    /// After an agent's reboot, the sysmodule presses B to get past the lock screen until this many ms from
+    /// now (nothing says when the lock screen is gone); `None` when no presses are to come.
+    pub unlocking_ms: Option<u64>,
+    /// Seconds left on the keep-awake lease.
+    pub keep_awake_s: u64,
+    /// The application (a game, or hbloader in a game's place).
+    pub application: Option<App>,
+    /// The Album's process: hbloader in applet mode, or the Album itself.
+    pub applet: Option<App>,
 }
 
 /// Answer to [`Request::MemoryMap`]: the mapped regions (any permission) in address order.
@@ -564,6 +592,10 @@ mod tests {
                 Request::MemoryMap => 27,
                 Request::ReadMemory { .. } => 28,
                 Request::WriteMemory { .. } => 29,
+                Request::AppletStatus => 30,
+                Request::CloseApplet => 31,
+                Request::MemoryTarget { .. } => 32,
+                Request::Status => 33,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -585,6 +617,7 @@ mod tests {
                 Response::Apps(_) => 14,
                 Response::Memory(_) => 15,
                 Response::Error(_) => 16,
+                Response::Status(_) => 17,
             }
         }
         let s = || String::from("/a");
@@ -619,6 +652,10 @@ mod tests {
             Request::MemoryMap,
             Request::ReadMemory { address: 0, len: 0 },
             Request::WriteMemory { address: 0, data: Vec::new() },
+            Request::AppletStatus,
+            Request::CloseApplet,
+            Request::MemoryTarget { applet: true },
+            Request::Status,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -642,6 +679,7 @@ mod tests {
             Response::Apps(Vec::new()),
             Response::Memory(MemoryMap { app, heap: None, regions: Vec::new(), truncated: false }),
             Response::error(ErrorKind::Io, s()),
+            Response::Status(ConsoleStatus { uptime_ms: 0, unlocking_ms: None, keep_awake_s: 0, application: None, applet: None }),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

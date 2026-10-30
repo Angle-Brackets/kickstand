@@ -132,6 +132,15 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
             Request::Press { .. } | Request::Input { .. } => Response::Ok,
             Request::AppStatus | Request::CloseApp => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
+            Request::AppletStatus | Request::CloseApplet => Response::App(None),
+            Request::MemoryTarget { .. } => Response::Ok,
+            Request::Status => Response::Status(proto::ConsoleStatus {
+                uptime_ms: 1,
+                unlocking_ms: None,
+                keep_awake_s: 0,
+                application: None,
+                applet: None,
+            }),
             Request::MemoryMap => Response::Memory(proto::MemoryMap {
                 app: MOCK_APP,
                 heap: Some((MOCK_HEAP, 0x1000)),

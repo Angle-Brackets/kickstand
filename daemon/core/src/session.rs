@@ -34,6 +34,8 @@ pub struct Session<'a> {
     staging: String,
     kind: DaemonKind,
     authed: bool,
+    /// Memory requests act on the Album's process instead of the application.
+    memory_applet: bool,
     upload: Option<Upload>,
     after_reply: Option<AfterReply>,
     /// The last screenshot's JPEG, until the next one or the end of the connection.
@@ -55,7 +57,7 @@ impl<'a> Session<'a> {
     /// (below [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
     pub fn new(token: Option<&'a str>, kind: DaemonKind, slot: usize) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { token, kind, staging, authed: false, upload: None, after_reply: None, screenshot: None }
+        Session { token, kind, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -110,9 +112,19 @@ impl<'a> Session<'a> {
             Request::AppStatus => app_status(),
             Request::CloseApp => close_app(),
             Request::ListApps { max } => list_apps(usize::from(max)),
-            Request::MemoryMap => memory_map(),
-            Request::ReadMemory { address, len } => read_memory(address, len as usize),
-            Request::WriteMemory { address, data } => write_memory(address, &data),
+            Request::MemoryMap => memory_map(self.memory_applet),
+            Request::ReadMemory { address, len } => read_memory(self.memory_applet, address, len as usize),
+            Request::WriteMemory { address, data } => write_memory(self.memory_applet, address, &data),
+            Request::AppletStatus => match services::pm::album() {
+                Ok(app) => Response::App(app.map(|a| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl })),
+                Err(rc) => system_error("finding the Album's process (pm)", rc),
+            },
+            Request::CloseApplet => close_applet(),
+            Request::Status => status(),
+            Request::MemoryTarget { applet } => {
+                self.memory_applet = applet;
+                Response::Ok
+            }
             Request::KeepAwake { minutes } => keep_awake(minutes),
             Request::Screenshot => self.screenshot(),
             Request::ScreenshotRead { offset, len } => match &self.screenshot {
@@ -456,11 +468,46 @@ fn list_apps(max: usize) -> Response {
     Response::Apps(apps)
 }
 
-fn running_app() -> Result<services::pm::Application, Response> {
-    match services::pm::application() {
+/// The process memory requests act on: the application, or the Album's with `applet`.
+fn running_app(applet: bool) -> Result<services::pm::Application, Response> {
+    let found = if applet { services::pm::album() } else { services::pm::application() };
+    match found {
         Ok(Some(app)) => Ok(app),
+        Ok(None) if applet => Err(Response::error(ErrorKind::NotFound, "the Album (hbmenu in applet mode) isn't open")),
         Ok(None) => Err(Response::error(ErrorKind::NotFound, "no application is running")),
-        Err(rc) => Err(system_error("finding the application (pm)", rc)),
+        Err(rc) => Err(system_error("finding the process (pm)", rc)),
+    }
+}
+
+fn status() -> Response {
+    let app = |a: services::pm::Application| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl };
+    let application = match services::pm::application() {
+        Ok(found) => found.map(app),
+        Err(rc) => return system_error("finding the application (pm)", rc),
+    };
+    let applet = match services::pm::album() {
+        Ok(found) => found.map(app),
+        Err(rc) => return system_error("finding the Album's process (pm)", rc),
+    };
+    Response::Status(proto::ConsoleStatus {
+        uptime_ms: crate::uptime_ms(),
+        unlocking_ms: crate::awake::unlocking_ms(),
+        keep_awake_s: crate::awake::remaining_ms() / 1000,
+        application,
+        applet,
+    })
+}
+
+fn close_applet() -> Response {
+    let app = match services::pm::album() {
+        Ok(Some(app)) => app,
+        Ok(None) => return Response::App(None),
+        Err(rc) => return system_error("finding the Album's process (pm)", rc),
+    };
+    crate::log!("closing the Album (pid {})", app.pid);
+    match services::pm::terminate_process(app.pid) {
+        Ok(()) => Response::App(Some(App { pid: app.pid, program_id: app.program_id, hbl: app.hbl })),
+        Err(rc) => system_error("terminating the Album (pm:shell)", rc),
     }
 }
 
@@ -468,8 +515,8 @@ fn attach(pid: u64) -> Result<services::debug::Debugged, Response> {
     services::debug::Debugged::attach(pid).map_err(|rc| system_error("attaching to the application as its debugger", rc))
 }
 
-fn memory_map() -> Response {
-    let (app, process) = match running_app().and_then(|app| Ok((attach(app.pid)?, app))) {
+fn memory_map(applet: bool) -> Response {
+    let (app, process) = match running_app(applet).and_then(|app| Ok((attach(app.pid)?, app))) {
         Ok((process, app)) => (app, process),
         Err(response) => return response,
     };
@@ -498,14 +545,14 @@ fn memory_map() -> Response {
     Response::Memory(MemoryMap { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, heap, regions, truncated })
 }
 
-fn read_memory(address: u64, len: usize) -> Response {
+fn read_memory(applet: bool, address: u64, len: usize) -> Response {
     let len = len.min(MAX_CHUNK);
     let mut data = Vec::new();
     if data.try_reserve_exact(len).is_err() {
         return Response::error(ErrorKind::OutOfMemory, "no room for the read buffer right now");
     }
     data.resize(len, 0);
-    let process = match running_app().and_then(|app| attach(app.pid)) {
+    let process = match running_app(applet).and_then(|app| attach(app.pid)) {
         Ok(process) => process,
         Err(response) => return response,
     };
@@ -515,16 +562,16 @@ fn read_memory(address: u64, len: usize) -> Response {
     }
 }
 
-fn write_memory(address: u64, data: &[u8]) -> Response {
+fn write_memory(applet: bool, address: u64, data: &[u8]) -> Response {
     if data.len() > MAX_CHUNK {
         return Response::error(ErrorKind::BadRequest, format!("at most {MAX_CHUNK} bytes per write"));
     }
-    let app = match running_app() {
+    let app = match running_app(applet) {
         Ok(app) => app,
         Err(response) => return response,
     };
     if app.hbl != Some(true) {
-        return Response::error(ErrorKind::Forbidden, "only homebrew's memory may be written (the application isn't hbloader)");
+        return Response::error(ErrorKind::Forbidden, "only homebrew's memory may be written (the process isn't hbloader)");
     }
     let process = match attach(app.pid) {
         Ok(process) => process,

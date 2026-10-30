@@ -61,15 +61,23 @@ async fn handle(mut sock: TcpStream, client: &Client, frames: &Frames) -> Result
     match path {
         "/" => respond(&mut sock, "text/html; charset=utf-8", PAGE.as_bytes()).await,
         "/status" => {
-            let app = match client.app_status().await {
-                Ok(Some(app)) => crate::client::describe_app(&app),
-                Ok(None) => "home menu (no application running)".into(),
-                Err(e) => format!("console not answering: {e:#}"),
-            };
-            let awake = match client.keep_awake(None).await {
-                Ok(0) => "keep-awake off".to_string(),
-                Ok(s) => format!("kept awake for {}m more", s / 60),
-                Err(_) => String::new(),
+            let (app, awake) = match client.status().await {
+                Ok(status) => {
+                    let mut app = match (&status.applet, &status.application) {
+                        (Some(a), _) if a.hbl == Some(true) => "homebrew in applet mode (the Album)".to_string(),
+                        (_, Some(app)) => crate::client::describe_app(app),
+                        _ => "home menu (nothing running)".to_string(),
+                    };
+                    if let Some(ms) = status.unlocking_ms {
+                        app.push_str(&format!(" · getting past the lock screen ({} s)", ms.div_ceil(1000)));
+                    }
+                    let awake = match status.keep_awake_s {
+                        0 => "keep-awake off".to_string(),
+                        s => format!("kept awake for {}m more", s / 60),
+                    };
+                    (app, awake)
+                }
+                Err(e) => (format!("console not answering: {e:#}"), String::new()),
             };
             let body = serde_json::json!({ "app": app, "awake": awake }).to_string();
             respond(&mut sock, "application/json", body.as_bytes()).await

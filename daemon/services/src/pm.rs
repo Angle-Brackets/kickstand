@@ -137,6 +137,20 @@ pub fn application() -> Result<Option<Application>> {
     let dmnt = service::new_service_object::<DebugMonitorExtService>()?;
     // pm answers with an error when no application is running.
     let Ok(pid) = dmnt.get_application_process_id() else { return Ok(None) };
+    describe(pid)
+}
+
+/// The Album (`photoViewer`), where Atmosphère runs hbloader by default: hbmenu in applet mode.
+pub const ALBUM_PROGRAM_ID: u64 = 0x0100_0000_0000_100D;
+
+/// The Album's process, if it's open.
+pub fn album() -> Result<Option<Application>> {
+    let dmnt = service::new_service_object::<DebugMonitorExtService>()?;
+    let Ok(pid) = dmnt.get_process_id(ProgramId(ALBUM_PROGRAM_ID)) else { return Ok(None) };
+    describe(pid)
+}
+
+fn describe(pid: u64) -> Result<Option<Application>> {
     let info = service::new_service_object::<InfoService>()?;
     let program_id = info.get_program_id(pid)?.0;
     let hbl = info.atmosphere_get_process_info(pid).ok().map(|p| p.override_flags & OVERRIDE_HBL != 0);

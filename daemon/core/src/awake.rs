@@ -88,6 +88,14 @@ fn run() {
 /// unlocked. (A press at 53 s once came too early.)
 const UNLOCK_AT_MS: [u64; 5] = [60_000, 90_000, 120_000, 150_000, 180_000];
 
+/// Uptime (ms) of the last unlock press still to come, 0 if none.
+static UNLOCKING_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds until the last unlock press after an agent reboot, if presses are still to come.
+pub fn unlocking_ms() -> Option<u64> {
+    UNLOCKING_UNTIL_MS.load(Ordering::Relaxed).checked_sub(uptime_ms()).filter(|&ms| ms > 0)
+}
+
 /// Sysmodule at boot: if the agent asked for this reboot ([`AGENT_REBOOT_FLAG`]), takes a lease and gets
 /// past the lock screen. A boot the user started is left alone.
 pub fn unlock_after_agent_reboot() {
@@ -105,7 +113,9 @@ pub fn unlock_after_agent_reboot() {
         log!("stale {AGENT_REBOOT_FLAG} (started at {}s): not unlocking", uptime_ms() / 1000);
         return;
     }
-    extend(UNLOCK_AT_MS[UNLOCK_AT_MS.len() - 1] + ACTIVITY_LEASE_MS);
+    let last = UNLOCK_AT_MS[UNLOCK_AT_MS.len() - 1];
+    extend(last + ACTIVITY_LEASE_MS);
+    UNLOCKING_UNTIL_MS.store(last, Ordering::Relaxed);
     let spawned = thread::Builder::new().name("unlock").stack_size(0x4000).spawn(|| {
         log!("booted by an agent reboot: unlocking");
         for at in UNLOCK_AT_MS {
@@ -119,6 +129,7 @@ pub fn unlock_after_agent_reboot() {
         }
     });
     if let Err(rc) = spawned {
+        UNLOCKING_UNTIL_MS.store(0, Ordering::Relaxed);
         log!("unlock thread didn't start: {rc}");
     }
 }
