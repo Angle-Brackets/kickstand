@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
 use proto::{
-    App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_INPUT_MS, MAX_INPUT_STEPS, PROTOCOL_VERSION, STICK_MAX, Request,
+    App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_CHUNK, MAX_INPUT_MS, MAX_INPUT_STEPS, MAX_MEMORY_REGIONS, MemoryMap,
+    MemoryRegion, PROTOCOL_VERSION, STICK_MAX, Request,
     Response, SysmoduleStatus, crc32,
 };
 use services::power::MAX_PAYLOAD_SIZE;
@@ -109,6 +110,9 @@ impl<'a> Session<'a> {
             Request::AppStatus => app_status(),
             Request::CloseApp => close_app(),
             Request::ListApps { max } => list_apps(usize::from(max)),
+            Request::MemoryMap => memory_map(),
+            Request::ReadMemory { address, len } => read_memory(address, len as usize),
+            Request::WriteMemory { address, data } => write_memory(address, &data),
             Request::KeepAwake { minutes } => keep_awake(minutes),
             Request::Screenshot => self.screenshot(),
             Request::ScreenshotRead { offset, len } => match &self.screenshot {
@@ -450,6 +454,87 @@ fn list_apps(max: usize) -> Response {
         .map(|id| AppEntry { id, name: names.as_mut().and_then(|n| n.get(id).ok()).unwrap_or_default() })
         .collect();
     Response::Apps(apps)
+}
+
+fn running_app() -> Result<services::pm::Application, Response> {
+    match services::pm::application() {
+        Ok(Some(app)) => Ok(app),
+        Ok(None) => Err(Response::error(ErrorKind::NotFound, "no application is running")),
+        Err(rc) => Err(system_error("finding the application (pm)", rc)),
+    }
+}
+
+fn attach(pid: u64) -> Result<services::debug::Debugged, Response> {
+    services::debug::Debugged::attach(pid).map_err(|rc| system_error("attaching to the application as its debugger", rc))
+}
+
+fn memory_map() -> Response {
+    let (app, process) = match running_app().and_then(|app| Ok((attach(app.pid)?, app))) {
+        Ok((process, app)) => (app, process),
+        Err(response) => return response,
+    };
+    let (mappings, truncated) = match process.mappings(MAX_MEMORY_REGIONS) {
+        Ok(found) => found,
+        Err(rc) => return system_error("listing the mappings", rc),
+    };
+    const EXECUTE: u32 = 4;
+    let regions: Vec<MemoryRegion> = mappings
+        .iter()
+        .map(|m| {
+            let mut magic = [0u8; 4];
+            let nro = m.permission & EXECUTE != 0 && process.read(m.base_address + 0x10, &mut magic).is_ok() && &magic == b"NRO0";
+            MemoryRegion { base: m.base_address, size: m.size, state: m.state, perm: m.permission, nro }
+        })
+        .collect();
+    drop(process);
+    let mut heap: Option<(u64, u64)> = None;
+    for r in regions.iter().skip_while(|r| r.state != services::debug::STATE_HEAP) {
+        match &mut heap {
+            None => heap = Some((r.base, r.size)),
+            Some((base, size)) if r.state == services::debug::STATE_HEAP && *base + *size == r.base => *size += r.size,
+            Some(_) => break,
+        }
+    }
+    Response::Memory(MemoryMap { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, heap, regions, truncated })
+}
+
+fn read_memory(address: u64, len: usize) -> Response {
+    let len = len.min(MAX_CHUNK);
+    let mut data = Vec::new();
+    if data.try_reserve_exact(len).is_err() {
+        return Response::error(ErrorKind::OutOfMemory, "no room for the read buffer right now");
+    }
+    data.resize(len, 0);
+    let process = match running_app().and_then(|app| attach(app.pid)) {
+        Ok(process) => process,
+        Err(response) => return response,
+    };
+    match process.read(address, &mut data) {
+        Ok(()) => Response::Data { data, file_size: len as u64 },
+        Err(rc) => system_error(&format!("reading {len} bytes at {address:#x}"), rc),
+    }
+}
+
+fn write_memory(address: u64, data: &[u8]) -> Response {
+    if data.len() > MAX_CHUNK {
+        return Response::error(ErrorKind::BadRequest, format!("at most {MAX_CHUNK} bytes per write"));
+    }
+    let app = match running_app() {
+        Ok(app) => app,
+        Err(response) => return response,
+    };
+    if app.hbl != Some(true) {
+        return Response::error(ErrorKind::Forbidden, "only homebrew's memory may be written (the application isn't hbloader)");
+    }
+    let process = match attach(app.pid) {
+        Ok(process) => process,
+        Err(response) => return response,
+    };
+    crate::log!("writing {} bytes at {address:#x} in pid {}", data.len(), app.pid);
+    match process.write(address, data) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error(&format!("writing {} bytes at {address:#x}", data.len()), rc),
+    }
 }
 
 fn sysmodule_status() -> SysmoduleStatus {

@@ -41,6 +41,8 @@ lowest_priority = 16
 max_core_number = 3
 min_core_number = 3
 kernel_version = "3.0"
+# svcDebugActiveProcess on any process, for the memory requests.
+force_debug = true
 enable_system_calls = [
     "SetHeapSize",
     "SetMemoryPermission",

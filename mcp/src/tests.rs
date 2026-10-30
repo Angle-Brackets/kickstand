@@ -252,3 +252,38 @@ async fn nxlink_send_matches_netloader() {
     assert!(received == nro, "the NRO didn't survive the trip");
     assert_eq!(argv, b"a\0b c\0");
 }
+
+#[tokio::test]
+async fn memory_addresses_reads_and_writes() {
+    use crate::memory::{Elf, Format, Layout, peek, poke, resolve};
+    use crate::mock::{MOCK_HEAP, MOCK_NRO};
+    let (client, _root) = start("tok").await;
+    let layout = Layout::fetch(&client).await.unwrap();
+    assert_eq!(layout.nro, Some((MOCK_NRO, 0x2000)));
+    let at = |expr: &'static str| {
+        let (client, layout) = (client.clone(), &layout);
+        async move { resolve(&client, layout, None, Some("Game"), expr).await }
+    };
+    assert_eq!(at("nro+0x1008").await.unwrap(), MOCK_NRO + 0x1008);
+    assert_eq!(at("game + 16").await.unwrap(), MOCK_NRO + 0x10);
+    assert_eq!(at("heap+0x20-0x8").await.unwrap(), MOCK_HEAP + 0x18);
+    assert_eq!(at("[nro+0x1008]+4").await.unwrap(), MOCK_HEAP + 0x14);
+    assert!(at("gPlayer").await.unwrap_err().to_string().contains("ELF"));
+
+    let elf = Elf::load(None, None).unwrap();
+    let shown = peek(&client, &elf, "[nro+0x1008]+4", 0, Format::F32).await.unwrap();
+    assert!(shown.ends_with(": 1.5\n"), "{shown}");
+    let ptr = peek(&client, &elf, "nro+0x1008", 0, Format::Ptr).await.unwrap();
+    assert!(ptr.contains(&format!("{:#x}", MOCK_HEAP + 0x10)), "{ptr}");
+    let hex = peek(&client, &elf, "nro", 0x20, Format::Hex).await.unwrap();
+    assert!(hex.contains("|....") && hex.contains("NRO0"), "{hex}");
+    assert!(layout.render(None).contains("<- NRO header"));
+
+    let wrote = poke(&client, &elf, "heap+0x14", "-2.25", Format::F32).await.unwrap();
+    assert!(wrote.contains("before: 1.5\n") && wrote.contains("after:  -2.25"), "{wrote}");
+    poke(&client, &elf, "heap", "0x10000", Format::U16).await.unwrap_err();
+    poke(&client, &elf, "heap", "-1", Format::I16).await.unwrap();
+    assert!(peek(&client, &elf, "heap", 2, Format::U16).await.unwrap().ends_with(": 65535\n"));
+    poke(&client, &elf, "heap+0x40", "hi", Format::Str).await.unwrap();
+    assert!(peek(&client, &elf, "heap+0x40", 0, Format::Str).await.unwrap().contains("\"hi\""));
+}

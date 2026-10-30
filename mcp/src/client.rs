@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use proto::{DaemonKind, DirEntry, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -282,6 +282,38 @@ impl Client {
             Response::Apps(apps) => Ok(apps),
             other => Err(unexpected(other)),
         }
+    }
+
+    /// The running application's memory map.
+    pub async fn memory_map(&self) -> Result<proto::MemoryMap> {
+        match self.request(Request::MemoryMap).await? {
+            Response::Memory(map) => Ok(map),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// `len` bytes of the running application's memory at `address`, a chunk per request.
+    pub async fn read_memory(&self, address: u64, len: usize) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let at = address.wrapping_add(out.len() as u64);
+            let want = (len - out.len()).min(proto::MAX_CHUNK) as u32;
+            match self.request(Request::ReadMemory { address: at, len: want }).await? {
+                Response::Data { data, .. } if data.len() == want as usize => out.extend_from_slice(&data),
+                Response::Data { data, .. } => bail!("asked for {want} bytes at {at:#x}, got {}", data.len()),
+                other => return Err(unexpected(other)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Writes `data` to the running application's memory at `address` (homebrew only).
+    pub async fn write_memory(&self, address: u64, data: &[u8]) -> Result<()> {
+        for (i, chunk) in data.chunks(proto::MAX_CHUNK).enumerate() {
+            let req = Request::WriteMemory { address: address.wrapping_add((i * proto::MAX_CHUNK) as u64), data: chunk.to_vec() };
+            expect(self.request(req).await?, |r| matches!(r, Response::Ok))?;
+        }
+        Ok(())
     }
 
     /// Moves the sysmodule's indicator (debug; see [`Request::IndicatorPosition`]).

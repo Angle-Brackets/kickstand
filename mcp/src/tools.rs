@@ -25,8 +25,13 @@ pub struct Tools {
     /// The stdout of the last NRO run_nro started.
     output: Arc<std::sync::Mutex<crate::launch::OutputLog>>,
     collector: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// The ELF (and module name) run_nro or a memory tool was last given, for the memory tools' symbols.
+    elf: Arc<std::sync::Mutex<Option<ElfChoice>>>,
     tool_router: ToolRouter<Self>,
 }
+
+/// An ELF path and the module name its addresses use.
+type ElfChoice = (String, Option<String>);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct PathArg {
@@ -230,6 +235,19 @@ pub struct ScreenshotArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct WaitScreenArgs {
+    /// "change" (default): until the screen differs from now, e.g. a load ends or a dialog appears. "still":
+    /// until it stops changing, e.g. a transition or scrolling text finishes.
+    pub until: Option<String>,
+    /// Give up after this many seconds (default 10, max 60) and return the screen as it is.
+    pub timeout_seconds: Option<f64>,
+    /// Only watch this part of the 1280x720 screen, "x,y,w,h" (e.g. a text box), ignoring the rest.
+    pub region: Option<String>,
+    /// Width of the image you get back (default 640; 1280 for full size).
+    pub width: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct RecordGifArgs {
     /// Where to save the GIF on this PC (default: ~/Pictures/kickstand/gif-<unix time>.gif).
     pub local_path: Option<String>,
@@ -239,6 +257,43 @@ pub struct RecordGifArgs {
     pub fps: Option<u32>,
     /// GIF width in pixels (default 640; the console's screen is 1280).
     pub width: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct MemoryMapArgs {
+    /// The NRO's ELF on this PC, to name the symbol each region starts at (default: the last ELF given to
+    /// run_nro or a memory tool).
+    pub elf: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ReadMemoryArgs {
+    /// An address expression: 0x… (absolute), nro+0x… (in the homebrew's NRO; also its module name, e.g.
+    /// Paperboat+0x…), heap+0x…, a symbol from the ELF (e.g. gPlayerStatus), any of those plus or minus
+    /// offsets, and [expr] for the 64-bit pointer stored at expr (e.g. [gCurrentEncounter]+0x10).
+    pub address: String,
+    /// Bytes to read (default: one value of the format, 64 for hex, 256 for str; at most 1048576).
+    pub length: Option<usize>,
+    /// How to show it: hex (a hexdump, default), u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, ptr (64-bit
+    /// pointers, named when they point into the NRO) or str (up to a NUL).
+    pub format: Option<String>,
+    /// The NRO's ELF on this PC, for symbol names (default: the last ELF given to run_nro or a memory tool).
+    pub elf: Option<String>,
+    /// The module name for `<module>+0x…` (default: the ELF's file name without .elf).
+    pub module: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WriteMemoryArgs {
+    /// An address expression, as read_memory takes.
+    pub address: String,
+    /// The value: a number for the integer and float formats (0x… allowed), text for str (written with a
+    /// NUL after it), hex digits for hex (raw bytes, spaces allowed).
+    pub value: String,
+    /// u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, ptr, str or hex.
+    pub format: String,
+    pub elf: Option<String>,
+    pub module: Option<String>,
 }
 
 /// `~/Pictures/kickstand/<ext>-<unix time>.<ext>`, creating the folder: where captures go when the agent
@@ -255,6 +310,16 @@ fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
 const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
 impl Tools {
+    /// The ELF to use: `elf` (remembered for next time) or the last one given.
+    fn elf(&self, elf: Option<String>, module: Option<String>) -> anyhow::Result<crate::memory::Elf> {
+        let mut last = self.elf.lock().unwrap();
+        if let Some(elf) = elf {
+            *last = Some((elf, module.clone()));
+        }
+        let (elf, remembered_module) = last.clone().unzip();
+        crate::memory::Elf::load(elf.as_deref().map(std::path::Path::new), module.or(remembered_module.flatten()).as_deref())
+    }
+
     /// Waits up to `wait_s` for the NRO to exit, then returns its new output and status.
     async fn read_output(&self, wait_s: u32) -> String {
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait_s));
@@ -265,6 +330,13 @@ impl Tools {
         let status = if open { "the NRO is running" } else { "the NRO's stdout is closed (it exited)" };
         if new.is_empty() { format!("\n[no new output; {status}]") } else { format!("\n--- output ---\n{new}\n[{status}]") }
     }
+}
+
+/// "x,y,w,h".
+fn parse_region(r: &str) -> anyhow::Result<(u32, u32, u32, u32)> {
+    let n: Vec<u32> = r.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
+    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
+    Ok((x, y, w, h))
 }
 
 fn ok(text: String) -> CallToolResult {
@@ -278,7 +350,7 @@ fn fail(e: anyhow::Error) -> CallToolResult {
 #[tool_router]
 impl Tools {
     pub fn new(client: Arc<Client>) -> Self {
-        Tools { client, output: Default::default(), collector: Default::default(), tool_router: Self::tool_router() }
+        Tools { client, output: Default::default(), collector: Default::default(), elf: Default::default(), tool_router: Self::tool_router() }
     }
 
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
@@ -396,6 +468,9 @@ impl Tools {
                 Some(elf) => Some(crate::symbolize::Symbolizer::new(elf.as_ref(), args.module.as_deref())?.shared()),
                 None => None,
             };
+            if let Some(elf) = &args.elf {
+                *self.elf.lock().unwrap() = Some((elf.clone(), args.module.clone()));
+            }
             let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default()).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {
@@ -459,6 +534,35 @@ impl Tools {
         result.await.unwrap_or_else(fail)
     }
 
+    #[tool(description = "The running application's memory map: each region's range, size, permissions and kind, and where the homebrew's NRO is (nro+0x… addresses and the ELF's symbols are relative to it). Use it to see what read_memory can reach.")]
+    async fn memory_map(&self, Parameters(args): Parameters<MemoryMapArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, None)?;
+            crate::memory::map(&self.client, &elf).await
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Read the running application's memory while it runs (homebrew or a game): a variable by its symbol from the NRO's ELF (e.g. gPlayerStatus, with format f32 for floats), a struct field (symbol+0x…), a pointer chain ([symbol]+0x…), or any address from memory_map. Shows a hexdump or typed values; pointers into the NRO are named. Each call stops the application for a moment (the daemon attaches as its debugger and detaches), so one read is consistent, but values move between calls.")]
+    async fn read_memory(&self, Parameters(args): Parameters<ReadMemoryArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, args.module)?;
+            let format = crate::memory::Format::parse(args.format.as_deref().unwrap_or("hex"))?;
+            crate::memory::peek(&self.client, &elf, &args.address, args.length.unwrap_or(0), format).await
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Write to the running homebrew's memory (refused for games): set a variable to test a fix or reach a state quickly (e.g. a flag, a position, a debug toggle). Takes an address expression like read_memory and returns the value before and after. Writing code or pointers can crash the NRO; check app_status and crash_reports if it stops.")]
+    async fn write_memory(&self, Parameters(args): Parameters<WriteMemoryArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, args.module)?;
+            let format = crate::memory::Format::parse(&args.format)?;
+            crate::memory::poke(&self.client, &elf, &args.address, &args.value, format).await
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
     #[tool(description = "More stdout from the NRO run_nro last started: what arrived since the last read, and whether it's still running (its stdout open).")]
     async fn nro_output(&self, Parameters(args): Parameters<NroOutputArgs>) -> CallToolResult {
         let wait = args.wait_seconds.unwrap_or(0).min(60);
@@ -477,14 +581,7 @@ impl Tools {
     #[tool(description = "Take a screenshot of the Switch's screen and look at it (JPEG, 1280x720). Use width to look at a smaller copy when you only need to see what's on screen, and region to read part of it closely. The kickstand indicator isn't in it. Optionally saves the full image on this PC.")]
     async fn screenshot(&self, Parameters(args): Parameters<ScreenshotArgs>) -> CallToolResult {
         let result = async {
-            let region = match &args.region {
-                Some(r) => {
-                    let n: Vec<u32> = r.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
-                    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
-                    Some((x, y, w, h))
-                }
-                None => None,
-            };
+            let region = args.region.as_deref().map(parse_region).transpose()?;
             let jpeg = self.client.screenshot().await?;
             let mut text = format!("screenshot: {} bytes", jpeg.len());
             if let Some(path) = &args.local_path {
@@ -492,6 +589,36 @@ impl Tools {
                 write!(text, ", saved to {path}")?;
             }
             let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, region, args.width)).await??;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Wait for the Switch's screen to change (a load to finish, a menu or dialog to appear, the game to react to input) or to stop changing (a transition, fade or scrolling text to end), then look at it: one call instead of polling with screenshots. Returns the screen when that happens, or when the timeout passes (and says which).")]
+    async fn wait_screen(&self, Parameters(args): Parameters<WaitScreenArgs>) -> CallToolResult {
+        let result = async {
+            let until = match args.until.as_deref().unwrap_or("change") {
+                "change" | "changed" => crate::capture::Until::Change,
+                "still" | "stable" | "settle" => crate::capture::Until::Still,
+                other => anyhow::bail!("until is \"change\" or \"still\", not {other:?}"),
+            };
+            let region = args.region.as_deref().map(parse_region).transpose()?;
+            let timeout = args.timeout_seconds.unwrap_or(10.0).clamp(0.0, crate::capture::MAX_WAIT_SECONDS);
+            let waited = crate::capture::wait(&self.client, until, region, std::time::Duration::from_secs_f64(timeout)).await?;
+            let text = format!(
+                "{} after {:.1} s ({} captures)",
+                match (waited.met, until) {
+                    (true, crate::capture::Until::Change) => "the screen changed",
+                    (true, crate::capture::Until::Still) => "the screen is still",
+                    (false, crate::capture::Until::Change) => "timed out: the screen didn't change",
+                    (false, crate::capture::Until::Still) => "timed out: the screen kept changing",
+                },
+                waited.elapsed.as_secs_f64(),
+                waited.captures
+            );
+            let width = args.width.unwrap_or(640);
+            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&waited.jpeg, None, Some(width))).await??;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
             anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
         };

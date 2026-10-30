@@ -19,6 +19,29 @@ pub async fn serve(listener: TcpListener, root: PathBuf, token: String) -> Resul
     }
 }
 
+/// The mock's application: homebrew with an NRO (header, then a data page holding a pointer to a heap
+/// float) and a heap page.
+pub const MOCK_APP: proto::App = proto::App { pid: 0x81, program_id: 0x0100_0000_0000_1000, hbl: Some(true) };
+pub const MOCK_NRO: u64 = 0x800_0000;
+pub const MOCK_HEAP: u64 = 0x1_0000_0000;
+
+fn mock_memory() -> Vec<(u64, u32, Vec<u8>)> {
+    let mut text = vec![0u8; 0x1000];
+    text[0x10..0x14].copy_from_slice(b"NRO0");
+    text[0x18..0x1C].copy_from_slice(&0x2000u32.to_le_bytes());
+    let mut data = vec![0u8; 0x1000];
+    data[8..16].copy_from_slice(&(MOCK_HEAP + 0x10).to_le_bytes());
+    let mut heap = vec![0u8; 0x1000];
+    heap[0x14..0x18].copy_from_slice(&1.5f32.to_le_bytes());
+    vec![(MOCK_NRO, 5, text), (MOCK_NRO + 0x1000, 3, data), (MOCK_HEAP, 3, heap)]
+}
+
+fn mock_span(memory: &mut [(u64, u32, Vec<u8>)], address: u64, len: usize) -> Option<&mut [u8]> {
+    let (base, _, data) = memory.iter_mut().find(|(base, _, data)| (*base..*base + data.len() as u64).contains(&address))?;
+    let start = (address - *base) as usize;
+    data.get_mut(start..start + len)
+}
+
 struct Upload {
     path: String,
     data: Vec<u8>,
@@ -28,6 +51,7 @@ struct Upload {
 async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
     let mut authed = false;
     let mut upload: Option<Upload> = None;
+    let mut memory = mock_memory();
     loop {
         let mut prefix = [0u8; 4];
         stream.read_exact(&mut prefix).await?;
@@ -104,6 +128,32 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
             Request::Press { .. } | Request::Input { .. } => Response::Ok,
             Request::AppStatus | Request::CloseApp => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
+            Request::MemoryMap => Response::Memory(proto::MemoryMap {
+                app: MOCK_APP,
+                heap: Some((MOCK_HEAP, 0x1000)),
+                regions: memory
+                    .iter()
+                    .map(|(base, perm, data)| proto::MemoryRegion {
+                        base: *base,
+                        size: data.len() as u64,
+                        state: if *base == MOCK_HEAP { 5 } else { 3 },
+                        perm: *perm,
+                        nro: data.get(0x10..0x14) == Some(b"NRO0"),
+                    })
+                    .collect(),
+                truncated: false,
+            }),
+            Request::ReadMemory { address, len } => match mock_span(&mut memory, address, len as usize) {
+                Some(span) => Response::Data { data: span.to_vec(), file_size: u64::from(len) },
+                None => Response::error(ErrorKind::System, "unmapped"),
+            },
+            Request::WriteMemory { address, data } => match mock_span(&mut memory, address, data.len()) {
+                Some(span) => {
+                    span.copy_from_slice(&data);
+                    Response::Ok
+                }
+                None => Response::error(ErrorKind::System, "unmapped"),
+            },
             Request::IndicatorPosition { .. } => Response::Ok,
             Request::Screenshot | Request::ScreenshotRead { .. } => {
                 Response::error(ErrorKind::Unsupported, "the mock has no screen")

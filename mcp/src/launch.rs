@@ -104,10 +104,14 @@ async fn try_tile(client: &Client, tile: usize) -> Result<Option<App>> {
     select_tile(client, tile).await?;
     // Start it, holding R long enough to cover the process starting. A title that asks who is playing
     // only starts once that's answered, so nothing is running yet: confirm the first user, still on R.
+    // Right after boot the picker can take a few seconds to appear and swallow that press, so try a
+    // third time.
     let launch = vec![step(&[Button::R], 300), step(&[Button::R, Button::A], 150), step(&[Button::R], 6000)];
-    client.input(launch.clone()).await?;
-    if let Some(app) = client.app_status().await? {
-        return Ok(Some(app));
+    for _ in 0..2 {
+        client.input(launch.clone()).await?;
+        if let Some(app) = client.app_status().await? {
+            return Ok(Some(app));
+        }
     }
     client.input(launch).await?;
     wait_for_app(client).await

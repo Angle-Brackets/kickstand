@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -160,6 +160,16 @@ pub enum Request {
     /// The installed applications, most recently used first (the order of the home menu's row, which
     /// shows the first [`HOME_MENU_TILES`]). Answers [`Response::Apps`].
     ListApps { max: u16 },
+    /// The running application's memory map. The daemon attaches as its debugger for each memory request
+    /// (the application stops for that moment) and detaches before answering. Sysmodule only. Answers
+    /// [`Response::Memory`].
+    MemoryMap,
+    /// Reads `len` bytes (capped at [`MAX_CHUNK`]) of the running application's memory at `address`.
+    /// Answers [`Response::Data`] with `file_size` = the bytes read.
+    ReadMemory { address: u64, len: u32 },
+    /// Writes `data` (at most [`MAX_CHUNK`]) to the running application's memory at `address`. Only to
+    /// homebrew (the application is hbloader), never a game's memory.
+    WriteMemory { address: u64, data: Vec<u8> },
 }
 
 /// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
@@ -296,7 +306,33 @@ pub enum Response {
     KeepAwake { remaining_s: u64 },
     App(Option<App>),
     Apps(Vec<AppEntry>),
+    Memory(MemoryMap),
     Error(Error),
+}
+
+/// Answer to [`Request::MemoryMap`]: the mapped regions (any permission) in address order.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemoryMap {
+    pub app: App,
+    /// The heap: the first run of heap mappings, as (base, size).
+    pub heap: Option<(u64, u64)>,
+    pub regions: Vec<MemoryRegion>,
+    /// There were more than [`MAX_MEMORY_REGIONS`].
+    pub truncated: bool,
+}
+
+pub const MAX_MEMORY_REGIONS: usize = 1024;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRegion {
+    pub base: u64,
+    pub size: u64,
+    /// The kernel's `MemoryState` (low byte: the type, e.g. 3 code, 4 code data, 5 heap).
+    pub state: u32,
+    /// `MemoryPermission` bits: 1 read, 2 write, 4 execute.
+    pub perm: u32,
+    /// The region starts with an NRO's header (`NRO0` at 0x10): it's the loaded homebrew's code.
+    pub nro: bool,
 }
 
 /// The running application.

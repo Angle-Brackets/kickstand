@@ -111,3 +111,78 @@ pub fn reframe(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>, width: Option<
     JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img)?;
     Ok(out)
 }
+
+/// What [`wait`] waits for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Until {
+    /// The screen differs from when the wait began (a load finished, a dialog opened).
+    Change,
+    /// Two captures in a row look the same as the one before (a transition or animation ended).
+    Still,
+}
+
+pub struct Waited {
+    /// The last capture.
+    pub jpeg: Vec<u8>,
+    /// False: the timeout came first.
+    pub met: bool,
+    pub elapsed: Duration,
+    pub captures: usize,
+}
+
+pub const MAX_WAIT_SECONDS: f64 = 60.0;
+
+/// Captures until `until` holds or `timeout` passes, comparing small grayscale copies of `region` (the
+/// whole screen if `None`) so JPEG noise and the odd pixel don't count.
+pub async fn wait(client: &Client, until: Until, region: Option<(u32, u32, u32, u32)>, timeout: Duration) -> Result<Waited> {
+    let start = Instant::now();
+    let first = client.screenshot().await?;
+    let reference = thumbnail(&first, region)?;
+    let mut previous = reference.clone();
+    let (mut jpeg, mut captures, mut still_for) = (first, 1, 0);
+    loop {
+        if start.elapsed() >= timeout {
+            return Ok(Waited { jpeg, met: false, elapsed: start.elapsed(), captures });
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        jpeg = client.screenshot().await?;
+        captures += 1;
+        let now = thumbnail(&jpeg, region)?;
+        let met = match until {
+            Until::Change => changed(&reference, &now) > CHANGED,
+            Until::Still => {
+                still_for = if changed(&previous, &now) < STILL { still_for + 1 } else { 0 };
+                still_for >= 2
+            }
+        };
+        if met {
+            return Ok(Waited { jpeg, met, elapsed: start.elapsed(), captures });
+        }
+        previous = now;
+    }
+}
+
+/// Over this fraction of thumbnail pixels changed: the screen changed.
+const CHANGED: f32 = 0.01;
+/// Under this: nothing moved.
+const STILL: f32 = 0.003;
+
+/// A 128x72 (for the whole screen) grayscale copy.
+fn thumbnail(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>) -> Result<image::GrayImage> {
+    let mut img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?.to_luma8();
+    if let Some((x, y, w, h)) = region {
+        let (iw, ih) = img.dimensions();
+        if x >= iw || y >= ih || w == 0 || h == 0 {
+            bail!("region {x},{y},{w},{h} is off the {iw}x{ih} screen");
+        }
+        img = image::imageops::crop_imm(&img, x, y, w.min(iw - x), h.min(ih - y)).to_image();
+    }
+    let (w, h) = ((img.width() / 10).max(1), (img.height() / 10).max(1));
+    Ok(image::imageops::resize(&img, w, h, FilterType::Triangle))
+}
+
+/// The fraction of pixels more than 16 levels apart.
+fn changed(a: &image::GrayImage, b: &image::GrayImage) -> f32 {
+    let differ = a.as_raw().iter().zip(b.as_raw()).filter(|(x, y)| x.abs_diff(**y) > 16).count();
+    differ as f32 / a.as_raw().len().max(1) as f32
+}

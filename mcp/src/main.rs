@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod crash;
 mod launch;
+mod memory;
 mod mock;
 mod nxlink;
 mod symbolize;
@@ -147,6 +148,50 @@ enum Command {
         /// Also save Atmosphère's screenshot of the crash here.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+    },
+    /// Wait until the screen changes ("change") or stops changing ("still"), then save it to FILE.
+    Wait {
+        #[arg(default_value = "change")]
+        until: String,
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
+        /// Only watch "x,y,w,h" of the screen.
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// The running application's memory map, and where the homebrew's NRO is in it.
+    Memory {
+        /// The NRO's ELF, to name what regions start with.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+    },
+    /// Read the running application's memory. ADDRESS is 0x…, nro+0x…, heap+0x…, a symbol (with --elf),
+    /// any of those plus or minus offsets, or [ADDRESS] for the pointer stored there.
+    Peek {
+        address: String,
+        /// Bytes to read (default: one value, 64 for hex, 256 for str).
+        #[arg(long, short = 'n', default_value_t = 0)]
+        len: usize,
+        /// hex, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, ptr, str.
+        #[arg(long = "as", default_value = "hex")]
+        format: String,
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        module: Option<String>,
+    },
+    /// Write to the running homebrew's memory (refused for games): VALUE as --as says (hex: bytes).
+    Poke {
+        address: String,
+        value: String,
+        #[arg(long = "as")]
+        format: String,
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        module: Option<String>,
     },
     /// Serve a page showing the console's screen live, for a person to follow along.
     Watch {
@@ -390,6 +435,31 @@ async fn main() -> Result<()> {
                 std::fs::write(&path, jpg)?;
                 println!("screenshot saved to {}", path.display());
             }
+        }
+        Command::Wait { until, timeout, region, out } => {
+            let until = if until == "still" { capture::Until::Still } else { capture::Until::Change };
+            let region = match region {
+                Some(r) => {
+                    let n: Vec<u32> = r.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
+                    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
+                    Some((x, y, w, h))
+                }
+                None => None,
+            };
+            let waited = capture::wait(&client, until, region, std::time::Duration::from_secs_f64(timeout.clamp(0.0, capture::MAX_WAIT_SECONDS))).await?;
+            println!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures);
+            if let Some(out) = out {
+                std::fs::write(&out, &waited.jpeg)?;
+            }
+        }
+        Command::Memory { elf } => print!("{}", memory::map(&client, &memory::Elf::load(elf.as_deref(), None)?).await?),
+        Command::Peek { address, len, format, elf, module } => {
+            let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
+            print!("{}", memory::peek(&client, &elf, &address, len, memory::Format::parse(&format)?).await?);
+        }
+        Command::Poke { address, value, format, elf, module } => {
+            let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
+            println!("{}", memory::poke(&client, &elf, &address, &value, memory::Format::parse(&format)?).await?);
         }
         Command::Run { nro, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
