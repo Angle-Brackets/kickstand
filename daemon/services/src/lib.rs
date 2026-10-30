@@ -4,5 +4,7 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod pm;
 pub mod power;

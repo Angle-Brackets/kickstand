@@ -163,6 +163,13 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
                 }
                 return;
             }
+            Some(AfterReply::RebootDirect(payload)) => {
+                let _ = svc::sleep_thread(500_000_000);
+                if let Err((step, err)) = services::power::reboot_to_payload_direct(&payload) {
+                    log!("reboot to payload failed while {step}: {err:#x}");
+                }
+                return;
+            }
         }
     }
 }

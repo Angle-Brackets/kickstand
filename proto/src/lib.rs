@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -118,12 +118,17 @@ pub enum Request {
     /// sysmodule and exits, so the sysmodule's first bind finds the port free.
     Handover,
     /// Warm reboot into hekate (Atmosphère's `reboot_payload.bin`), never a cold reboot. The daemon replies
-    /// first, then reboots; it doesn't come back unless the sysmodule starts at boot.
+    /// first, then reboots; it doesn't come back unless the sysmodule starts at boot. The NRO goes through
+    /// ams_mitm's redirected `bpc`; the sysmodule loads the payload into IRAM itself.
     RebootToHekate { target: HekateTarget },
     /// How much of its resource limit (memory, threads, events, transfer memories, sessions) the
     /// daemon's group uses, and the daemon's own memory. For the sysmodule that group is the one every
     /// system process shares; for the NRO it's the application's.
     Resources,
+    /// Debug, sysmodule only: reads the 4 KiB page of IRAM at `offset` (page aligned, below 0x40000) with
+    /// Atmosphère's IramCopy smc, the call the sysmodule's reboot uses to load the payload. Answers
+    /// [`Response::Data`] with `file_size` = the IRAM size.
+    IramPeek { offset: u32 },
 }
 
 /// What hekate does after a [`Request::RebootToHekate`].

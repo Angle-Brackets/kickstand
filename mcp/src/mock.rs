@@ -100,6 +100,7 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 let boot2 = root.join(&path::SYSMODULE_BOOT2_FLAG[1..]).exists();
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
+            Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
             Request::Resources => Response::Resources(proto::Resources {
                 limits: vec![proto::ResourceUsage { name: "memory".into(), current: 1 << 20, peak: 1 << 20, limit: 8 << 20 }],
                 process_used: 1 << 20,

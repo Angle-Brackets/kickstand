@@ -202,6 +202,14 @@ impl Client {
         }
     }
 
+    /// Reads one 4 KiB page of IRAM (sysmodule only; see [`Request::IramPeek`]).
+    pub async fn iram_peek(&self, offset: u32) -> Result<Vec<u8>> {
+        match self.request(Request::IramPeek { offset }).await? {
+            Response::Data { data, .. } => Ok(data),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Asks the NRO daemon to exit. The connection is dropped afterwards.
     pub async fn exit(&self) -> Result<()> {
         let resp = self.request(Request::Exit).await;

@@ -59,6 +59,14 @@ enum Command {
     },
     /// End the NRO daemon (back to hbmenu), as if + were pressed.
     Exit,
+    /// Debug: read the IRAM page at OFFSET (hex ok) from the sysmodule and hexdump its start; with
+    /// --compare FILE, also count how many bytes match FILE at the same offset from 0x10000 (the payload).
+    #[command(hide = true)]
+    IramPeek {
+        offset: String,
+        #[arg(long)]
+        compare: Option<PathBuf>,
+    },
     /// Resource limit usage of the daemon's group (for the sysmodule: all system processes)
     Resources,
     /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
@@ -190,6 +198,24 @@ async fn main() -> Result<()> {
             }
             client.reboot_to_hekate(target).await?;
             println!("rebooting into hekate: {what}");
+        }
+        Command::IramPeek { offset, compare } => {
+            let offset = match offset.strip_prefix("0x") {
+                Some(hex) => u32::from_str_radix(hex, 16)?,
+                None => offset.parse()?,
+            };
+            let page = client.iram_peek(offset).await?;
+            for (i, row) in page.chunks(16).take(8).enumerate() {
+                let hex: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
+                println!("{:#07x}: {}", 0x4000_0000u32 + offset + i as u32 * 16, hex.join(" "));
+            }
+            if let Some(file) = compare {
+                let data = std::fs::read(&file)?;
+                let start = (offset as usize).checked_sub(0x10000).context("compare needs an offset of at least 0x10000")?;
+                let want = data.get(start..(start + page.len()).min(data.len())).unwrap_or(&[]);
+                let same = want.iter().zip(&page).filter(|(a, b)| a == b).count();
+                println!("{same} of {} bytes match {} at {start:#x}", want.len(), file.display());
+            }
         }
         Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
         Command::Exit => {

@@ -36,8 +36,10 @@ pub struct Session<'a> {
 pub enum AfterReply {
     /// End the NRO daemon.
     Exit,
-    /// Reboot to the payload that was just installed.
+    /// NRO: reboot through ams_mitm, to the payload just installed with `bpc:ams`.
     Reboot,
+    /// Sysmodule: load this payload into IRAM and reboot to it.
+    RebootDirect(Box<[u8; MAX_PAYLOAD_SIZE]>),
 }
 
 impl<'a> Session<'a> {
@@ -78,6 +80,7 @@ impl<'a> Session<'a> {
                 Response::Ok
             }
             Request::RebootToHekate { target } => self.reboot_to_hekate(target),
+            Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
@@ -242,20 +245,37 @@ impl<'a> Session<'a> {
         Response::Ok
     }
 
-    /// Installs hekate with a boot config for `target` as the reboot payload; the reboot itself happens
+    /// Prepares hekate with a boot config for `target` as the reboot payload; the reboot itself happens
     /// after the reply. Everything that can fail short of the reboot call is checked here.
     fn reboot_to_hekate(&mut self, target: HekateTarget) -> Response {
-        // Only reboots from homebrew under hbl go through ams_mitm; from the sysmodule it'd be cold.
-        if self.kind != DaemonKind::Nro {
-            let msg = "rebooting needs the NRO daemon (launch kickstand from hbmenu); from the sysmodule it would be a cold reboot";
-            return Response::error(ErrorKind::Unsupported, msg);
+        let next = match self.kind {
+            DaemonKind::Nro => install_hekate(target).map(|()| AfterReply::Reboot),
+            DaemonKind::Sysmodule => build_hekate(target).map(AfterReply::RebootDirect),
+        };
+        match next {
+            Ok(next) => {
+                crate::log!("rebooting to hekate: {target:?}");
+                self.after_reply = Some(next);
+                Response::Ok
+            }
+            Err(resp) => resp,
         }
-        if let Err(resp) = install_hekate(target) {
-            return resp;
+    }
+
+    fn iram_peek(&self, offset: u32) -> Response {
+        use services::power::{IRAM_SIZE, PAGE_SIZE, Page};
+        if self.kind != DaemonKind::Sysmodule {
+            return Response::error(ErrorKind::Unsupported, "only the sysmodule may call the secure monitor");
         }
-        crate::log!("rebooting to hekate: {target:?}");
-        self.after_reply = Some(AfterReply::Reboot);
-        Response::Ok
+        let offset = offset as usize;
+        if !offset.is_multiple_of(PAGE_SIZE) || offset >= IRAM_SIZE {
+            return Response::error(ErrorKind::BadRequest, format!("offset must be page aligned and below {IRAM_SIZE:#x}"));
+        }
+        let mut page = Box::new(Page([0; PAGE_SIZE]));
+        match services::power::iram_read(offset, &mut page) {
+            Ok(()) => Response::Data { data: page.0.to_vec(), file_size: IRAM_SIZE as u64 },
+            Err(e) => Response::error(ErrorKind::System, format!("IramCopy failed: SmcResult {e}")),
+        }
     }
 
     fn abort_upload(&mut self) {
@@ -296,10 +316,9 @@ fn sysmodule_start() -> Response {
     }
 }
 
-/// Reads hekate from [`path::REBOOT_PAYLOAD`], writes the boot config for `target` into it and hands it to
-/// Atmosphère as the reboot payload. [`HekateTarget::Menu`] leaves the boot config empty, which restores
-/// the file as it is on the card.
-pub fn install_hekate(target: HekateTarget) -> Result<(), Response> {
+/// Reads hekate from [`path::REBOOT_PAYLOAD`] and writes the boot config for `target` into it.
+/// [`HekateTarget::Menu`] leaves the boot config empty, which is the file as it is on the card.
+fn build_hekate(target: HekateTarget) -> Result<Box<[u8; MAX_PAYLOAD_SIZE]>, Response> {
     let file_size = sd::stat(path::REBOOT_PAYLOAD).map_err(Response::Error)?.size as usize;
     if file_size > MAX_PAYLOAD_SIZE {
         let msg = format!("{} is {file_size} bytes; Atmosphère takes at most {MAX_PAYLOAD_SIZE}", path::REBOOT_PAYLOAD);
@@ -316,11 +335,20 @@ pub fn install_hekate(target: HekateTarget) -> Result<(), Response> {
         payload[done..done + data.len()].copy_from_slice(&data);
         done += data.len();
     }
+    if done != file_size {
+        return Err(Response::error(ErrorKind::Io, format!("{} ended after {done} of {file_size} bytes", path::REBOOT_PAYLOAD)));
+    }
     if !proto::hekate::is_hekate(&payload[..done]) {
         let msg = format!("{} isn't hekate (no ICTC magic), refusing to reboot into it", path::REBOOT_PAYLOAD);
         return Err(Response::error(ErrorKind::BadRequest, msg));
     }
     payload[proto::hekate::BOOT_CFG_OFFSET..proto::hekate::MAGIC_OFFSET].copy_from_slice(&proto::hekate::boot_cfg(target));
+    Ok(payload)
+}
+
+/// [`build_hekate`], then hands the payload to Atmosphère (`bpc:ams`) for a redirected reboot.
+pub fn install_hekate(target: HekateTarget) -> Result<(), Response> {
+    let payload = build_hekate(target)?;
     services::power::set_reboot_payload(&payload).map_err(|rc| system_error("setting the reboot payload (bpc:ams)", rc))
 }
 
