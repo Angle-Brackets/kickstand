@@ -210,6 +210,19 @@ impl Client {
         }
     }
 
+    /// Presses `buttons` together `times` times on a virtual controller (see [`Request::Press`]).
+    pub async fn press(&self, buttons: Vec<proto::Button>, times: u8, hold_ms: u32) -> Result<()> {
+        expect(self.request(Request::Press { buttons, times, hold_ms }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
+    /// Turns keep-awake on or off (or with `None` just asks); returns whether it's on.
+    pub async fn keep_awake(&self, on: Option<bool>) -> Result<bool> {
+        match self.request(Request::KeepAwake { on }).await? {
+            Response::KeepAwake { on } => Ok(on),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Asks the NRO daemon to exit. The connection is dropped afterwards.
     pub async fn exit(&self) -> Result<()> {
         let resp = self.request(Request::Exit).await;
@@ -410,4 +423,22 @@ pub fn describe_resources(r: &proto::Resources) -> String {
     }
     out.push_str(&format!("this process: {} of {} KiB\n", r.process_used / 1024, r.process_total / 1024));
     out
+}
+
+/// Parses buttons written like "a", "zl+zr" or "l,r" (case-insensitive).
+pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
+    let buttons = spec
+        .split(['+', ',', ' '])
+        .filter(|s| !s.is_empty())
+        .map(|name| {
+            proto::Button::from_name(name).ok_or_else(|| {
+                let names: Vec<_> = proto::Button::ALL.iter().map(|b| b.name()).collect();
+                anyhow!("unknown button {name:?}; buttons are {}", names.join(", "))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if buttons.is_empty() {
+        anyhow::bail!("no buttons given");
+    }
+    Ok(buttons)
 }

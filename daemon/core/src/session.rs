@@ -8,7 +8,7 @@ use alloc::vec;
 
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
-use proto::{DaemonKind, ErrorKind, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
+use proto::{Button, DaemonKind, ErrorKind, HekateTarget, PROTOCOL_VERSION, Request, Response, SysmoduleStatus, crc32};
 use services::power::MAX_PAYLOAD_SIZE;
 
 use crate::sd;
@@ -81,6 +81,11 @@ impl<'a> Session<'a> {
             }
             Request::RebootToHekate { target } => self.reboot_to_hekate(target),
             Request::IramPeek { offset } => self.iram_peek(offset),
+            Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
+            Request::KeepAwake { on } => match on.map(crate::awake::set) {
+                Some(Err(e)) => Response::Error(e),
+                _ => Response::KeepAwake { on: crate::awake::is_on() },
+            },
             Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
@@ -288,6 +293,25 @@ impl<'a> Session<'a> {
 impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.abort_upload();
+    }
+}
+
+/// Longest hold [`Request::Press`] accepts; with [`MAX_PRESSES`] it keeps the call under the client's 30 s
+/// reply timeout.
+const MAX_HOLD_MS: u32 = 2_000;
+/// Most presses in one [`Request::Press`].
+const MAX_PRESSES: u8 = 10;
+
+fn press(buttons: &[Button], times: u8, hold_ms: u32) -> Response {
+    if buttons.is_empty() || times == 0 || times > MAX_PRESSES || hold_ms == 0 || hold_ms > MAX_HOLD_MS {
+        let msg = format!("need at least one button, 1-{MAX_PRESSES} presses and a 1-{MAX_HOLD_MS} ms hold");
+        return Response::error(ErrorKind::BadRequest, msg);
+    }
+    let bits = buttons.iter().fold(0, |bits, b| bits | b.bit());
+    crate::log!("press {buttons:?} x{times}");
+    match services::hid::press(bits, u32::from(times), hold_ms) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error("pressing buttons (hid:dbg)", rc),
     }
 }
 

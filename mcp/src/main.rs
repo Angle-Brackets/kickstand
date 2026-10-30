@@ -67,6 +67,21 @@ enum Command {
         #[arg(long)]
         compare: Option<PathBuf>,
     },
+    /// Press buttons on a virtual controller: BUTTONS like "a", "home" or "zl+zr" (pressed together).
+    /// "unlock" presses B three times, which dismisses the lock screen (B, unlike A, does nothing on
+    /// the home menu if the console was already unlocked).
+    Press {
+        buttons: String,
+        /// How many times to press them.
+        #[arg(short = 'n', long, default_value_t = 1)]
+        times: u8,
+        /// How long each press is held, in milliseconds.
+        #[arg(long, default_value_t = 100)]
+        hold_ms: u32,
+    },
+    /// Keep the screen on: "on" stops dimming and auto-sleep (also after reboots), "off" undoes it, no
+    /// argument reports it.
+    KeepAwake { state: Option<OnOff> },
     /// Resource limit usage of the daemon's group (for the sysmodule: all system processes)
     Resources,
     /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
@@ -79,6 +94,12 @@ enum Command {
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -216,6 +237,18 @@ async fn main() -> Result<()> {
                 let same = want.iter().zip(&page).filter(|(a, b)| a == b).count();
                 println!("{same} of {} bytes match {} at {start:#x}", want.len(), file.display());
             }
+        }
+        Command::Press { buttons, times, hold_ms } => {
+            let (buttons, times) = match buttons.as_str() {
+                "unlock" => (vec![proto::Button::B], 3),
+                spec => (client::parse_buttons(spec)?, times),
+            };
+            client.press(buttons, times, hold_ms).await?;
+            println!("pressed");
+        }
+        Command::KeepAwake { state } => {
+            let on = client.keep_awake(state.map(|s| matches!(s, OnOff::On))).await?;
+            println!("keep awake: {}", if on { "on" } else { "off" });
         }
         Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
         Command::Exit => {

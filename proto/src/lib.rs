@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -129,6 +129,97 @@ pub enum Request {
     /// Atmosphère's IramCopy smc, the call the sysmodule's reboot uses to load the payload. Answers
     /// [`Response::Data`] with `file_size` = the IRAM size.
     IramPeek { offset: u32 },
+    /// Presses `buttons` together, `times` times, each held `hold_ms`, on a virtual Pro Controller that is
+    /// attached for the call (about a second to settle, then the presses) and detached after. The lock
+    /// screen wants the same button three times.
+    Press { buttons: Vec<Button>, times: u8, hold_ms: u32 },
+    /// Keeps the screen from dimming and the console from auto-sleeping (by reporting user activity to
+    /// `idle:sys` every 20 s), saved across reboots in [`path::KEEP_AWAKE_FLAG`]. `None` only asks.
+    /// Answers [`Response::KeepAwake`].
+    KeepAwake { on: Option<bool> },
+}
+
+/// A controller button, for [`Request::Press`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    A,
+    B,
+    X,
+    Y,
+    LStick,
+    RStick,
+    L,
+    R,
+    Zl,
+    Zr,
+    Plus,
+    Minus,
+    Left,
+    Up,
+    Right,
+    Down,
+    Home,
+    Capture,
+}
+
+impl Button {
+    pub const ALL: [Button; 18] = [
+        Button::A,
+        Button::B,
+        Button::X,
+        Button::Y,
+        Button::LStick,
+        Button::RStick,
+        Button::L,
+        Button::R,
+        Button::Zl,
+        Button::Zr,
+        Button::Plus,
+        Button::Minus,
+        Button::Left,
+        Button::Up,
+        Button::Right,
+        Button::Down,
+        Button::Home,
+        Button::Capture,
+    ];
+
+    /// Its bit in `HidNpadButton` (HOME and Capture as hid:dbg numbers them).
+    pub fn bit(self) -> u64 {
+        match self {
+            Button::Home => 1 << 18,
+            Button::Capture => 1 << 19,
+            b => 1 << (b as u32),
+        }
+    }
+
+    /// Lowercase name, as the CLI and MCP tool spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Button::A => "a",
+            Button::B => "b",
+            Button::X => "x",
+            Button::Y => "y",
+            Button::LStick => "lstick",
+            Button::RStick => "rstick",
+            Button::L => "l",
+            Button::R => "r",
+            Button::Zl => "zl",
+            Button::Zr => "zr",
+            Button::Plus => "plus",
+            Button::Minus => "minus",
+            Button::Left => "left",
+            Button::Up => "up",
+            Button::Right => "right",
+            Button::Down => "down",
+            Button::Home => "home",
+            Button::Capture => "capture",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Button> {
+        Button::ALL.into_iter().find(|b| b.name().eq_ignore_ascii_case(name))
+    }
 }
 
 /// What hekate does after a [`Request::RebootToHekate`].
@@ -157,6 +248,7 @@ pub enum Response {
     Deleted { path: String, was_dir: bool },
     Sysmodule(SysmoduleStatus),
     Resources(Resources),
+    KeepAwake { on: bool },
     Error(Error),
 }
 

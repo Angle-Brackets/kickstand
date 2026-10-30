@@ -35,6 +35,7 @@ fn main() {
         log!("mounting the SD card failed: {rc}");
         return;
     }
+    daemon_core::awake::start();
 
     let token = token_arg().or_else(daemon_core::read_token_file);
     if token.is_none() {

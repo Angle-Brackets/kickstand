@@ -116,6 +116,24 @@ pub struct RebootArgs {
     pub confirm: bool,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct PressArgs {
+    /// Buttons pressed together, e.g. "a", "home", "zl+zr". Names: a b x y l r zl zr plus minus up down
+    /// left right lstick rstick home capture.
+    pub buttons: String,
+    /// How many times to press them (1-10, default 1). The lock screen wants the same button 3 times.
+    pub times: Option<u8>,
+    /// How long each press is held, in milliseconds (1-2000, default 100).
+    pub hold_ms: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct KeepAwakeArgs {
+    /// true keeps the screen on (no dimming, no auto-sleep, also after reboots); false restores normal
+    /// sleep; leave out to just ask.
+    pub on: Option<bool>,
+}
+
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
@@ -148,6 +166,26 @@ impl Tools {
     #[tool(description = "Resource limit usage of the daemon's group: memory, threads, events, transfer memories, sessions (current, peak, limit), plus the daemon's own memory. From the sysmodule this is the limit all system processes share, so it shows how close the system is to running out.")]
     async fn resources(&self) -> CallToolResult {
         let result = async { anyhow::Ok(crate::client::describe_resources(&self.client.resources().await?)) };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen after a reboot (b three times; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. You can't see the screen yet, so say what you pressed.")]
+    async fn press(&self, Parameters(args): Parameters<PressArgs>) -> CallToolResult {
+        let result = async {
+            let buttons = crate::client::parse_buttons(&args.buttons)?;
+            let times = args.times.unwrap_or(1);
+            self.client.press(buttons, times, args.hold_ms.unwrap_or(100)).await?;
+            anyhow::Ok(format!("pressed {} x{times}", args.buttons))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Keep the Switch's screen on while working unattended: stops dimming and auto-sleep by reporting user activity, and stays on across reboots (so the lock screen doesn't time out either) until turned off. Changes no system settings. It can't wake a console that is already asleep.")]
+    async fn keep_awake(&self, Parameters(args): Parameters<KeepAwakeArgs>) -> CallToolResult {
+        let result = async {
+            let on = self.client.keep_awake(args.on).await?;
+            anyhow::Ok(format!("keep awake is {}", if on { "on" } else { "off" }))
+        };
         result.await.map_or_else(fail, ok)
     }
 

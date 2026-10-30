@@ -26,6 +26,7 @@ fn main() {
     daemon_core::log::enable_file();
     log!("kickstand daemon {} (sysmodule) starting", daemon_core::VERSION);
 
+    daemon_core::awake::start();
     let token = daemon_core::read_token_file();
     if token.is_none() {
         log!("no token in {}: every client will be refused", proto::path::TOKEN_PATH);

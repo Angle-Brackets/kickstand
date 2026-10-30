@@ -39,6 +39,9 @@ pub const SYSMODULE_BOOT2_FLAG: &str = "/atmosphere/contents/42000000004D4350/fl
 /// Where uploads are staged before being moved into place.
 pub const STAGING_DIR: &str = "/kickstand/staging";
 
+/// Present means the daemon keeps the console awake (no dimming or auto-sleep), across reboots too.
+pub const KEEP_AWAKE_FLAG: &str = "/kickstand/keep-awake.flag";
+
 /// Where the daemon reads its shared token from.
 pub const TOKEN_PATH: &str = "/kickstand/token.txt";
 

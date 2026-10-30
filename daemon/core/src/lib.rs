@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod awake;
 pub mod log;
 mod sd;
 pub mod server;
