@@ -133,9 +133,11 @@ pub struct PressArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct InputArgs {
-    /// Space-separated steps, each BUTTONS:MS: the buttons held together for that many milliseconds ("-"
-    /// for none, a pause). A button in consecutive steps stays held, e.g. "r:300 r+a:150 r:6000". At most
-    /// 64 steps and 20 s in all.
+    /// Space-separated steps, each WHAT:MS, held for MS milliseconds. WHAT joins with "+": button names,
+    /// "l=X,Y" / "r=X,Y" for the left/right stick (-1.0..1.0, y up; centred if absent), "touch=X,Y" for a
+    /// finger on the 1280x720 touch screen, or "-" for nothing (a pause). Held things stay held across
+    /// consecutive steps. Examples: "r:300 r+a:150 r:6000" (R through a launch), "l=0,1:1500" (walk up
+    /// 1.5 s), "l=1,0+b:800" (run right), "touch=640,360:100" (tap the centre). At most 64 steps, 20 s.
     pub steps: String,
 }
 
@@ -297,7 +299,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Play timed input on one virtual controller, for what press can't do: holding a button through other presses or a load, long holds, quick sequences. Each step holds exactly its buttons for its time; everything is released at the end.")]
+    #[tool(description = "Play timed input on one virtual controller, for what press can't do: analog sticks (moving in games), touch screen taps and drags, holding a button through other presses or a load, long holds, quick combos. Each step holds exactly what it lists for its time; everything is released at the end. Look with screenshot afterwards.")]
     async fn input(&self, Parameters(args): Parameters<InputArgs>) -> CallToolResult {
         let result = async {
             let steps = crate::client::parse_steps(&args.steps)?;

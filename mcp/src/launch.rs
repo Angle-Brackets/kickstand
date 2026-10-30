@@ -29,7 +29,7 @@ pub struct Opened {
 }
 
 fn step(buttons: &[Button], ms: u32) -> InputStep {
-    InputStep { buttons: buttons.to_vec(), ms }
+    InputStep { buttons: buttons.to_vec(), ms, ..Default::default() }
 }
 
 /// Opens hbmenu, from whatever is running. Fails with what it tried if no title on the row works.

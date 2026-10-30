@@ -104,8 +104,20 @@ impl Client {
             offset: at,
             len: want.min(proto::MAX_CHUNK as u64) as u32,
         };
-        // One connection for the capture and its reads: the daemon keeps the JPEG per connection.
-        Ok(self.read_chunks(Request::Screenshot, read_at, 0, u64::MAX, "the screenshot").await?.0)
+        // caps:sc refuses (2206-0112) while the foreground changes, e.g. an application starting; it
+        // passes within a second or two.
+        let mut tries = 0;
+        loop {
+            // One connection for the capture and its reads: the daemon keeps the JPEG per connection.
+            match self.read_chunks(Request::Screenshot, read_at, 0, u64::MAX, "the screenshot").await {
+                Ok((jpeg, _)) => return Ok(jpeg),
+                Err(e) if tries < 4 && format!("{e:#}").contains("caps:sc") => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Sends `first` (which answers with the first chunk and the total size), then pipelines `read_at`
@@ -488,17 +500,51 @@ pub fn describe_resources(r: &proto::Resources) -> String {
 }
 
 /// Parses buttons written like "a", "zl+zr" or "l,r" (case-insensitive).
-/// Parses input steps like `"r:300 r+a:150 r:6000 -:500"`: buttons held together (`-` for none, a pause)
-/// and for how many milliseconds.
+/// Parses input steps like `"r:300 r+a:150 r:6000 -:500 l=0,1+b:2000 touch=640,360:100"`: what is held
+/// together, joined by `+` (buttons; `l=X,Y` / `r=X,Y` for the sticks, -1.0 to 1.0 with y up;
+/// `touch=X,Y` for a finger on the 1280x720 touch screen; `-` for nothing, a pause), then `:` and for how
+/// many milliseconds.
 pub fn parse_steps(spec: &str) -> Result<Vec<proto::InputStep>> {
     spec.split_whitespace()
         .map(|step| {
-            let (buttons, ms) = step.split_once(':').ok_or_else(|| anyhow!("step {step:?} isn't BUTTONS:MS"))?;
+            let (held, ms) = step.rsplit_once(':').ok_or_else(|| anyhow!("step {step:?} isn't WHAT:MS"))?;
             let ms = ms.parse().with_context(|| format!("step {step:?}: bad milliseconds"))?;
-            let buttons = if buttons == "-" { Vec::new() } else { parse_buttons(buttons)? };
-            Ok(proto::InputStep { buttons, ms })
+            let mut parsed = proto::InputStep { ms, ..Default::default() };
+            for part in held.split('+').filter(|p| !p.is_empty() && *p != "-") {
+                match part.split_once('=') {
+                    Some(("l" | "ls", v)) => parsed.left = Some(parse_stick(v)?),
+                    Some(("r" | "rs", v)) => parsed.right = Some(parse_stick(v)?),
+                    Some(("touch" | "t", v)) => parsed.touch = Some(parse_point(v)?),
+                    Some((k, _)) => anyhow::bail!("step {step:?}: unknown {k:?}= (l=, r= or touch=)"),
+                    None => parsed.buttons.extend(parse_buttons(part)?),
+                }
+            }
+            Ok(parsed)
         })
         .collect()
+}
+
+/// `0,1` (straight up) or `-0.5,0` → stick units.
+fn parse_stick(v: &str) -> Result<(i32, i32)> {
+    let (x, y) = v.split_once(',').ok_or_else(|| anyhow!("stick {v:?} isn't X,Y"))?;
+    let axis = |a: &str| -> Result<i32> {
+        let f: f64 = a.trim().parse().with_context(|| format!("stick axis {a:?}"))?;
+        if !(-1.0..=1.0).contains(&f) {
+            anyhow::bail!("stick axis {a:?} is outside -1..1");
+        }
+        Ok((f * f64::from(proto::STICK_MAX)).round() as i32)
+    };
+    Ok((axis(x)?, axis(y)?))
+}
+
+/// `640,360` → a touch screen point (0-1279, 0-719).
+fn parse_point(v: &str) -> Result<(u16, u16)> {
+    let (x, y) = v.split_once(',').ok_or_else(|| anyhow!("touch point {v:?} isn't X,Y"))?;
+    let (x, y): (u16, u16) = (x.trim().parse()?, y.trim().parse()?);
+    if x > 1279 || y > 719 {
+        anyhow::bail!("touch point {v:?} is off the 1280x720 screen");
+    }
+    Ok((x, y))
 }
 
 pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {

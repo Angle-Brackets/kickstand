@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
 use proto::{
-    App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_INPUT_MS, MAX_INPUT_STEPS, PROTOCOL_VERSION, Request,
+    App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_INPUT_MS, MAX_INPUT_STEPS, PROTOCOL_VERSION, STICK_MAX, Request,
     Response, SysmoduleStatus, crc32,
 };
 use services::power::MAX_PAYLOAD_SIZE;
@@ -397,7 +397,17 @@ fn input(steps: &[InputStep]) -> Response {
         let msg = format!("need 1-{MAX_INPUT_STEPS} steps lasting at most {MAX_INPUT_MS} ms in all");
         return Response::error(ErrorKind::BadRequest, msg);
     }
-    let steps: Vec<(u64, u32)> = steps.iter().map(|s| (s.buttons.iter().fold(0, |bits, b| bits | b.bit()), s.ms)).collect();
+    let clamp = |(x, y): (i32, i32)| [x.clamp(-STICK_MAX, STICK_MAX), y.clamp(-STICK_MAX, STICK_MAX)];
+    let steps: Vec<services::hid::Step> = steps
+        .iter()
+        .map(|s| services::hid::Step {
+            buttons: s.buttons.iter().fold(0, |bits, b| bits | b.bit()),
+            left: s.left.map_or([0, 0], clamp),
+            right: s.right.map_or([0, 0], clamp),
+            touch: s.touch.map(|(x, y)| (u32::from(x.min(1279)), u32::from(y.min(719)))),
+            ms: s.ms,
+        })
+        .collect();
     crate::log!("input: {} steps, {total} ms", steps.len());
     match services::hid::play(&steps) {
         Ok(()) => Response::Ok,

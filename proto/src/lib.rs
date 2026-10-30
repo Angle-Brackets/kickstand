@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -162,12 +162,20 @@ pub enum Request {
     ListApps { max: u16 },
 }
 
-/// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause) for `ms`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct InputStep {
     pub buttons: Vec<Button>,
     pub ms: u32,
+    /// Left stick (x right, y up), each -[`STICK_MAX`]..=[`STICK_MAX`]; `None` is centred.
+    pub left: Option<(i32, i32)>,
+    pub right: Option<(i32, i32)>,
+    /// A finger on the touch screen at (x, y) in its 1280x720 space.
+    pub touch: Option<(u16, u16)>,
 }
+
+/// A stick pushed all the way.
+pub const STICK_MAX: i32 = 0x7FFF;
 
 pub const MAX_INPUT_STEPS: usize = 64;
 /// Keeps an [`Request::Input`] call under the client's 30 s reply timeout.

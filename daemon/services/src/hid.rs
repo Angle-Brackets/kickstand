@@ -44,6 +44,21 @@ pub struct State {
     pub pad: [u8; 3],
 }
 
+/// `HidTouchState`.
+#[derive(Copy, Clone, Default)]
+#[repr(C)]
+pub struct TouchState {
+    pub delta_time: u64,
+    pub attributes: u32,
+    pub finger_id: u32,
+    pub x: u32,
+    pub y: u32,
+    pub diameter_x: u32,
+    pub diameter_y: u32,
+    pub rotation_angle: u32,
+    pub reserved: u32,
+}
+
 /// The input of `hiddbgSetHdlsState` on 12.0+.
 #[derive(nx_derive::Request, nx_derive::Response, Copy, Clone, Default)]
 #[repr(C)]
@@ -55,6 +70,11 @@ pub struct SetStateArgs {
 #[nx_derive::ipc_trait]
 pub trait HidDbgInterface {
     /// `hiddbgAttachHdlsWorkBuffer`: returns the HDLS session id.
+    /// `hiddbgSetTouchScreenAutoPilotState`: the touch screen reports these touches until unset.
+    #[ipc_rid(11)]
+    fn set_touch_screen_auto_pilot_state(&self, states: sf::InMapAliasBuffer<TouchState>);
+    #[ipc_rid(12)]
+    fn unset_touch_screen_auto_pilot_state(&self);
     #[ipc_rid(324)]
     fn attach_hdls_work_buffer(&self, size: u64, tmem: sf::CopyHandle) -> u64;
     #[ipc_rid(325)]
@@ -83,6 +103,22 @@ impl service::IService for HidDbgService {
     fn post_initialize(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+/// `HidTouchAttribute_Start`.
+const TOUCH_START: u32 = 1 << 0;
+/// A fingertip, in touch screen pixels.
+const TOUCH_DIAMETER: u32 = 15;
+
+/// One step of [`play`]: held buttons (`HidNpadButton` bits), stick positions ([x, y], ±0x7FFF), an
+/// optional touch, for `ms`.
+#[derive(Copy, Clone, Default)]
+pub struct Step {
+    pub buttons: u64,
+    pub left: [i32; 2],
+    pub right: [i32; 2],
+    pub touch: Option<(u32, u32)>,
+    pub ms: u32,
 }
 
 /// `HidDeviceType_FullKey3`: a Pro Controller.
@@ -126,9 +162,39 @@ impl VirtualController {
 
     /// Sets which buttons are held (`HidNpadButton` bits), sticks centred.
     pub fn set_buttons(&mut self, buttons: u64) -> Result<()> {
-        let state = State { battery_level: BATTERY_FULL, flags: POWERED, buttons, ..Default::default() };
+        self.set_state(&Step { buttons, ..Default::default() })
+    }
+
+    /// Sets the buttons and sticks of `step` (not its touch).
+    pub fn set_state(&mut self, step: &Step) -> Result<()> {
+        let state = State {
+            battery_level: BATTERY_FULL,
+            flags: POWERED,
+            buttons: step.buttons,
+            stick_l: step.left,
+            stick_r: step.right,
+            ..Default::default()
+        };
         let Some(handle) = self.handle else { unreachable!("attach returned without a device") };
         self.srv.set_hdls_state(SetStateArgs { handle, state })
+    }
+
+    /// Puts one finger on the touch screen at (x, y), or lifts it. `first` marks the touch's start.
+    pub fn set_touch(&mut self, at: Option<(u32, u32)>, first: bool) -> Result<()> {
+        match at {
+            Some((x, y)) => {
+                let touch = TouchState {
+                    attributes: if first { TOUCH_START } else { 0 },
+                    x,
+                    y,
+                    diameter_x: TOUCH_DIAMETER,
+                    diameter_y: TOUCH_DIAMETER,
+                    ..Default::default()
+                };
+                self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[touch]))
+            }
+            None => self.srv.unset_touch_screen_auto_pilot_state(),
+        }
     }
 }
 
@@ -154,20 +220,32 @@ const GAP_NS: i64 = 150_000_000;
 /// attached.
 static PRESSING: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
 
-/// Attaches a virtual controller, then for each `(buttons, ms)` step holds exactly `buttons` for `ms`
-/// (an empty step is a pause), and releases everything before detaching. A button in consecutive steps
-/// stays held across them, e.g. R through a press of A and the loading that follows.
-pub fn play(steps: &[(u64, u32)]) -> Result<()> {
+/// Attaches a virtual controller, then holds each step's buttons, sticks and touch for its time (an empty
+/// step is a pause), and releases everything before detaching. A button in consecutive steps stays held
+/// across them, e.g. R through a press of A and the loading that follows.
+pub fn play(steps: &[Step]) -> Result<()> {
     let _one_at_a_time = PRESSING.lock();
     let mut pad = VirtualController::attach()?;
     let _ = svc::sleep_thread(SETTLE_NS);
-    for &(buttons, ms) in steps {
-        pad.set_buttons(buttons)?;
-        let _ = svc::sleep_thread(i64::from(ms) * 1_000_000);
+    let mut touching = None;
+    let result = (|| {
+        for step in steps {
+            pad.set_state(step)?;
+            if step.touch != touching {
+                pad.set_touch(step.touch, touching.is_none())?;
+                touching = step.touch;
+            }
+            let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
+        }
+        Ok(())
+    })();
+    // Never leave a finger down or a button held, even after an error.
+    if touching.is_some() {
+        let _ = pad.set_touch(None, false);
     }
-    pad.set_buttons(0)?;
+    let _ = pad.set_buttons(0);
     let _ = svc::sleep_thread(GAP_NS);
-    Ok(())
+    result
 }
 
 /// Attaches a virtual controller, presses `buttons` together `times` times (holding each `hold_ms`), and
