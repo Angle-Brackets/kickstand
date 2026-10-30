@@ -11,6 +11,7 @@ mod mock;
 mod nxlink;
 mod symbolize;
 mod tools;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -146,6 +147,16 @@ enum Command {
         /// Also save Atmosphère's screenshot of the crash here.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+    },
+    /// Serve a page showing the console's screen live, for a person to follow along.
+    Watch {
+        #[arg(long, default_value_t = 8790)]
+        http_port: u16,
+        /// 0.0.0.0 to watch from another device on the network.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        #[arg(long, default_value_t = 4)]
+        fps: u32,
     },
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 30 minutes.
@@ -351,6 +362,7 @@ async fn main() -> Result<()> {
                 println!("{i:>3}  {:016x}  {}", app.id, app.name);
             }
         }
+        Command::Watch { http_port, bind, fps } => watch::serve(client.clone(), &bind, http_port, fps).await?,
         Command::Launch { title, user } => {
             let (app, notes) = launch::launch_title(&client, &title, user).await?;
             for note in &notes {
