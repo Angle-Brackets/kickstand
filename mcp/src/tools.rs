@@ -176,6 +176,20 @@ pub struct RunNroArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct TestBuildArgs {
+    /// A project from ~/.config/kickstand/projects.json (e.g. "paperboat").
+    pub project: String,
+    /// Run the files as they are, without building (default false).
+    pub skip_build: Option<bool>,
+    /// Arguments for the NRO (default: the project's).
+    pub args: Option<Vec<String>>,
+    /// Watch it for this many seconds if nothing happens (default 60, at most 300).
+    pub seconds: Option<u64>,
+    /// Seconds without output before the screen is checked for a hang (default 20).
+    pub quiet_seconds: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct SuperviseArgs {
     /// Stop watching after this many seconds if nothing happens (default 60, at most 300).
     pub seconds: Option<u64>,
@@ -600,6 +614,43 @@ impl Tools {
             anyhow::Ok(CallToolResult::success(content))
         };
         result.await.unwrap_or_else(fail)
+    }
+
+    #[tool(description = "Build, deploy, run and watch a project in one call (projects are set up in ~/.config/kickstand/projects.json; list them with the projects tool): runs its build command on this PC (a failure returns the end of the build log), checks the NRO was made from the ELF, sends it to its place on the SD card and runs it with full memory, then watches it like supervise. Returns the build result, what happened (exited, crashed with a symbolized report, ended, fatal, looks hung with backtraces, or still running), the output's last lines and a screenshot when there is one. Closes whatever runs first: don't use it while the user is playing. Its output stays readable with nro_output, and memory tools use its ELF afterwards.")]
+    async fn test_build(&self, Parameters(args): Parameters<TestBuildArgs>) -> CallToolResult {
+        let result = async {
+            let project = crate::project::get(&args.project)?;
+            let settings = crate::watchdog::Settings {
+                max: std::time::Duration::from_secs(args.seconds.unwrap_or(60).min(300)),
+                quiet: std::time::Duration::from_secs(args.quiet_seconds.unwrap_or(20).max(1)),
+                reboot_on_fatal: true,
+            };
+            let run = crate::project::test(&self.client, &project, args.skip_build.unwrap_or(false), args.args, &self.output, &settings).await?;
+            if let Some(handle) = run.collector
+                && let Some(old) = self.collector.lock().unwrap().replace(handle)
+            {
+                old.abort();
+            }
+            *self.elf.lock().unwrap() = Some((run.elf.0, Some(run.elf.1)));
+            let mut content = vec![ContentBlock::text(run.text)];
+            if let Some(jpeg) = run.screenshot {
+                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+            }
+            anyhow::Ok(content)
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "The projects test_build knows (from ~/.config/kickstand/projects.json): name, folder, build command, NRO and where it goes on the SD card.")]
+    async fn projects(&self) -> CallToolResult {
+        let result = async {
+            let mut out = String::new();
+            for (name, p) in crate::project::load_all()? {
+                writeln!(out, "{name}: {} (build: {}; {} -> {})", p.dir.display(), p.build.as_deref().unwrap_or("none"), p.nro.display(), p.dest)?;
+            }
+            anyhow::Ok(if out.is_empty() { "no projects".to_string() } else { out })
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Watch the running homebrew (after run_nro) until something happens, and say what: EXITED (with its last output), CRASHED (a new crash report for it, symbolized, with Atmosphère's screenshot), FATAL (the console stopped; rebooted into hekate entry 1 unless reboot_on_fatal is false), LOOKS HUNG (no output for quiet_seconds and a screen frozen for 5 s more: every thread's backtrace and a screenshot), or STILL RUNNING when seconds run out. Use it after starting a build to test, instead of polling status.")]

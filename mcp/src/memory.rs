@@ -126,6 +126,13 @@ fn kind(state: u32) -> &'static str {
     KINDS.get((state & 0xFF) as usize).copied().unwrap_or("?")
 }
 
+/// An ELF's GNU build id, if it has one (what its NRO's header carries at 0x40).
+pub fn build_id(elf: &[u8]) -> Result<Option<Vec<u8>>> {
+    use object::Object;
+    let file = object::File::parse(elf).context("parsing the ELF")?;
+    Ok(file.build_id().ok().flatten().map(<[u8]>::to_vec))
+}
+
 /// The NRO's symbol table, by name (and demangled name) and by address.
 pub struct Symbols {
     /// The ELF's GNU build id, if it has one.
@@ -159,7 +166,7 @@ impl Symbols {
             bail!("{} has no symbols", elf.display());
         }
         sorted.sort();
-        let build_id = file.build_id().ok().flatten().map(<[u8]>::to_vec);
+        let build_id = build_id(&data)?;
         Ok(Symbols { build_id, by_name, sorted })
     }
 

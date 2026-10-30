@@ -46,13 +46,14 @@ tools never set it.
 ## MCP tools
 | Area | Tools |
 | - | - |
-| Run homebrew | `run_nro` (send a local build or pick one on the SD card; opens hbmenu in applet mode from the Album, or with `mode: full` in a game's place with full memory; starts NetLoader, streams stdout), `nro_output`, `open_hbmenu`, `close_app` |
+| Develop | `test_build` (one call: build a project from `~/.config/kickstand/projects.json`, check the NRO against its ELF, deploy, run with full memory, watch; returns the outcome, last output and a screenshot), `projects` |
+| Run homebrew | `run_nro` (send a local build or pick one on the SD card; full memory by default, through Atmosphère's override for the host title, no button held; `mode: applet` for small tools; starts NetLoader, streams stdout), `nro_output`, `supervise` (watch until it exits, crashes, ends, fatals or looks hung), `open_hbmenu`, `close_app` (the Album is closed with HOME, never terminated) |
 | Games | `list_apps`, `launch_title` |
 | See | `screenshot` (scaled or cropped to save tokens), `record_gif` (returns a contact sheet) |
 | Play | `press`, `input` (timed steps: buttons held across steps, analog sticks, touch) |
-| Debug | `crash_reports`, `crash_report` (Atmosphère reports summarized, fatal records decoded, the crash screenshot), `symbolize` (addr2line on the PC; `run_nro` output is symbolized live with `elf`), `memory_map`, `read_memory`, `write_memory` (address expressions with ELF symbols and pointer chains; writes to homebrew only) |
+| Debug | `crash_reports`, `crash_report` (Atmosphère reports summarized, fatal records decoded, the crash screenshot), `symbolize` (addr2line on the PC; `run_nro` output is symbolized live with `elf`), `threads` (every thread's backtrace, symbolized with source lines), `memory_map`, `read_memory`, `write_memory` (address expressions with ELF symbols and pointer chains; writes to homebrew only; warns when the ELF isn't the running build) |
 | Files | `list_dir`, `stat`, `read_file`, `download`, `upload`, `delete` |
-| Console | `status` (what runs, lock screen after a reboot, keep-awake, a small screenshot), `ping`, `resources`, `keep_awake`, `sysmodule`, `hekate_entries`, `reboot` (warm reboot into hekate: an entry, UMS or the menu; needs `confirm`) |
+| Console | `status` (what runs, a fatal error screen, lock screen after a reboot, keep-awake, a small screenshot), `ping`, `resources`, `keep_awake`, `sysmodule` (install restarts onto the new build in about 11 s, no reboot), `hekate_entries`, `reboot` (warm reboot into hekate: an entry, UMS or the menu; needs `confirm`) |
 
 The CLI has the same features (`kickstand --help`), plus `kickstand watch`: a page showing the screen
 live and what's running, so a person can follow the agent (`--bind 0.0.0.0` for a phone on the network).

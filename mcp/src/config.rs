@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-fn config_dir() -> Result<PathBuf> {
+pub fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir).join("kickstand"));
     }

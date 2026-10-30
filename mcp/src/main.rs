@@ -10,6 +10,7 @@ mod launch;
 mod memory;
 mod mock;
 mod nxlink;
+mod project;
 mod symbolize;
 mod tools;
 mod watch;
@@ -181,6 +182,27 @@ enum Command {
         #[arg(long)]
         module: Option<String>,
     },
+    /// Build, deploy, run and watch a project from ~/.config/kickstand/projects.json, e.g. `{"paperboat":
+    /// {"dir": "...", "build": "cmake --build build-switch --target Paperboat_nro", "nro":
+    /// "build-switch/paperboat.nro", "elf": "build-switch/Paperboat.elf", "dest":
+    /// "/switch/paperboat/paperboat.nro"}}` (nro and elf relative to dir; optional "args", "module").
+    Test {
+        project: String,
+        #[arg(long)]
+        no_build: bool,
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+        #[arg(long, default_value_t = 20)]
+        quiet: u64,
+        /// Save the screenshot (crash or hang) here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Arguments for the NRO, after `--` (default: the project's).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// List the projects in ~/.config/kickstand/projects.json.
+    Projects,
     /// Watch the running homebrew until it exits, crashes, takes the console down (fatal: reboots into hekate
     /// entry 1 unless --no-reboot) or hangs (an unchanged screen for --quiet s + 5 s: thread backtraces), or
     /// --seconds pass.
@@ -519,6 +541,26 @@ async fn main() -> Result<()> {
             println!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures);
             if let Some(out) = out {
                 std::fs::write(&out, &waited.jpeg)?;
+            }
+        }
+        Command::Test { project, no_build, seconds, quiet, out, args } => {
+            let settings = watchdog::Settings {
+                max: std::time::Duration::from_secs(seconds),
+                quiet: std::time::Duration::from_secs(quiet.max(1)),
+                reboot_on_fatal: true,
+            };
+            let output = Arc::new(std::sync::Mutex::new(launch::OutputLog::default()));
+            let args = (!args.is_empty()).then_some(args);
+            let run = project::test(&client, &project::get(&project)?, no_build, args, &output, &settings).await?;
+            println!("{}", run.text);
+            if let (Some(out), Some(jpeg)) = (out, run.screenshot) {
+                std::fs::write(&out, jpeg)?;
+                println!("screenshot: {}", out.display());
+            }
+        }
+        Command::Projects => {
+            for (name, p) in project::load_all()? {
+                println!("{name}: {} (build: {}; {} -> {})", p.dir.display(), p.build.as_deref().unwrap_or("none"), p.nro.display(), p.dest);
             }
         }
         Command::Supervise { seconds, quiet, elf, no_reboot, out } => {
