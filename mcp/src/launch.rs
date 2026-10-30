@@ -8,6 +8,7 @@
 //! Running an NRO then goes through hbmenu's NetLoader ([`run_nro`]): an NRO from this PC is sent as is;
 //! one already on the SD card is opened by sending the Kickstand NRO with `--open <path>`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -16,6 +17,11 @@ use tokio::net::TcpStream;
 
 use crate::client::{Client, check_path};
 use crate::{config, nxlink};
+
+/// The pid of the hbloader process last seen showing hbmenu (0: none known): set when [`open_hbmenu`]
+/// opens it or an NRO [`run_nro`] started closes its stdout (it exited, back to hbmenu), cleared when an NRO
+/// is sent. Lets [`run_nro`] press Y straight away instead of reopening hbmenu.
+static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
 
 /// Shortest wait for the home menu to come back after an application closes.
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
@@ -64,6 +70,7 @@ pub async fn open_hbmenu(client: &Client) -> Result<Opened> {
         let label = if expected.name.is_empty() { format!("{:016x}", expected.id) } else { expected.name.clone() };
         match try_tile(client, tile).await? {
             Some(app) if app.hbl == Some(true) => {
+                HBMENU_PID.store(app.pid, Ordering::Relaxed);
                 let host = apps.iter().find(|a| a.id == app.program_id).cloned().unwrap_or(AppEntry { id: app.program_id, name: String::new() });
                 config::save_host_title(host.id, &host.name)?;
                 notes.push(format!("hbmenu opened through {label} (tile {tile})"));
@@ -83,14 +90,18 @@ pub async fn open_hbmenu(client: &Client) -> Result<Opened> {
     bail!("no title on the home menu's row opened hbmenu:\n- {}", notes.join("\n- "))
 }
 
-/// Starts tile `tile` of the home menu's row with R held; returns the application that started, if any.
-async fn try_tile(client: &Client, tile: usize) -> Result<Option<App>> {
-    // HOME on the home menu selects the first tile.
+/// Selects tile `tile` of the home menu's row: HOME on the home menu selects the first tile.
+async fn select_tile(client: &Client, tile: usize) -> Result<()> {
     let mut steps = vec![step(&[Button::Home], 100), step(&[], 1200)];
     for _ in 0..tile {
         steps.extend([step(&[Button::Right], 80), step(&[], 150)]);
     }
-    client.input(steps).await?;
+    client.input(steps).await
+}
+
+/// Starts tile `tile` of the home menu's row with R held; returns the application that started, if any.
+async fn try_tile(client: &Client, tile: usize) -> Result<Option<App>> {
+    select_tile(client, tile).await?;
     // Start it, holding R long enough to cover the process starting. A title that asks who is playing
     // only starts once that's answered, so nothing is running yet: confirm the first user, still on R.
     let launch = vec![step(&[Button::R], 300), step(&[Button::R, Button::A], 150), step(&[Button::R], 6000)];
@@ -100,6 +111,58 @@ async fn try_tile(client: &Client, tile: usize) -> Result<Option<App>> {
     }
     client.input(launch).await?;
     wait_for_app(client).await
+}
+
+/// Starts an installed title from the home menu's row, as the user would: `query` is its id (hex) or part
+/// of its name; `user` picks the account if the title asks who is playing (0 = the first). Closes the
+/// running application first.
+pub async fn launch_title(client: &Client, query: &str, user: usize) -> Result<(AppEntry, Vec<String>)> {
+    let apps = client.list_apps(HOME_MENU_TILES as u16).await?;
+    let id = u64::from_str_radix(query.trim_start_matches("0x"), 16).ok().filter(|_| query.len() >= 16);
+    let lower = query.to_lowercase();
+    let matches: Vec<usize> = (0..apps.len())
+        .filter(|&i| Some(apps[i].id) == id || (!lower.is_empty() && apps[i].name.to_lowercase().contains(&lower)))
+        .collect();
+    let tile = match matches.as_slice() {
+        [tile] => *tile,
+        [] => bail!(
+            "no title on the home menu's row matches {query:?} (only the first {HOME_MENU_TILES} can be started this way): {}",
+            apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        many => bail!("{query:?} matches several titles: {}", many.iter().map(|&i| apps[i].name.as_str()).collect::<Vec<_>>().join(", ")),
+    };
+    let target = apps[tile].clone();
+    let mut notes = Vec::new();
+    if let Some(app) = client.app_status().await? {
+        if app.program_id == target.id && app.hbl == Some(false) {
+            notes.push(format!("{} was already running; switch to it with HOME then A", target.name));
+            return Ok((target, notes));
+        }
+        close(client, &app).await?;
+        notes.push(format!("closed the running application {:016x}", app.program_id));
+    }
+    select_tile(client, tile).await?;
+    client.input(vec![step(&[Button::A], 100), step(&[], 2500)]).await?;
+    if client.app_status().await?.is_none() {
+        // Who is playing? The picker starts on the first user.
+        let mut steps = Vec::new();
+        for _ in 0..user {
+            steps.extend([step(&[Button::Right], 80), step(&[], 150)]);
+        }
+        steps.push(step(&[Button::A], 100));
+        client.input(steps).await?;
+    }
+    match wait_for_app(client).await? {
+        Some(app) if app.program_id == target.id => {
+            notes.push(format!("started {} (pid {})", target.name, app.pid));
+            Ok((target, notes))
+        }
+        Some(app) => bail!("expected {} to start, but {:016x} did", target.name, app.program_id),
+        None => {
+            dismiss_dialogs(client).await?;
+            bail!("{} didn't start (it may need its game card, rights or an online check)", target.name)
+        }
+    }
 }
 
 /// Backs out of what a title that didn't start leaves behind. Nintendo Switch Online, for one, chains
@@ -141,6 +204,8 @@ async fn close(client: &Client, app: &App) -> Result<()> {
 const LAUNCHER: &str = "/switch/kickstand/kickstand.nro";
 /// How long NetLoader gets to start listening after Y.
 const NETLOADER_WAIT: Duration = Duration::from_secs(15);
+/// The same when hbmenu should already be up.
+const NETLOADER_FAST_WAIT: Duration = Duration::from_secs(5);
 /// How long the NRO gets to connect its stdout after it's sent.
 const OUTPUT_WAIT: Duration = Duration::from_secs(10);
 
@@ -153,6 +218,8 @@ pub enum Program {
 
 pub struct Started {
     pub notes: Vec<String>,
+    /// The hbloader process running the NRO; it shows hbmenu again once the NRO exits.
+    pub pid: u64,
     /// The NRO's stdout, if it connected one (libnx's nxlink stdio, or the `nxlink` crate).
     pub output: Option<TcpStream>,
 }
@@ -181,28 +248,55 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>) -> Re
     };
 
     let mut notes = Vec::new();
-    // hbmenu can't be told apart from an NRO, so start from a fresh one.
-    if let Some(app) = client.app_status().await?
-        && app.hbl == Some(true)
-    {
-        close(client, &app).await?;
-        notes.push("closed the running hbloader (hbmenu or an NRO)".into());
-    }
-    notes.extend(open_hbmenu(client).await?.notes);
-
     let output = nxlink::OutputListener::bind().await?;
-    let sock = start_netloader(client).await?;
+    // hbmenu can't be told apart from an NRO, so only a process known to show hbmenu is used as is.
+    let current = client.app_status().await?;
+    let mut sock = None;
+    if let Some(app) = &current
+        && app.hbl == Some(true)
+        && app.pid == HBMENU_PID.load(Ordering::Relaxed)
+    {
+        match start_netloader(client, NETLOADER_FAST_WAIT).await {
+            Ok(s) => {
+                notes.push("hbmenu was already open".into());
+                sock = Some(s);
+            }
+            Err(_) => notes.push("hbmenu didn't answer as expected; reopening it".into()),
+        }
+    }
+    let sock = match sock {
+        Some(sock) => sock,
+        None => {
+            if let Some(app) = client.app_status().await?
+                && app.hbl == Some(true)
+            {
+                close(client, &app).await?;
+                notes.push("closed the running hbloader (hbmenu or an NRO)".into());
+            }
+            notes.extend(open_hbmenu(client).await?.notes);
+            start_netloader(client, NETLOADER_WAIT).await?
+        }
+    };
+    HBMENU_PID.store(0, Ordering::Relaxed);
     nxlink::send(sock, &nro, &dest, &args).await?;
     notes.push(format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()));
+    let pid = client.app_status().await?.map_or(0, |a| a.pid);
     let output = output.accept(OUTPUT_WAIT).await?;
     if output.is_none() {
         notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
     }
-    Ok(Started { notes, output })
+    Ok(Started { notes, pid, output })
+}
+
+/// Notes that the NRO in process `pid` exited (its stdout closed), so that process shows hbmenu again.
+pub fn nro_exited(pid: u64) {
+    if pid != 0 {
+        HBMENU_PID.store(pid, Ordering::Relaxed);
+    }
 }
 
 /// Presses Y in hbmenu until NetLoader accepts a connection (hbmenu may still be loading at first).
-async fn start_netloader(client: &Client) -> Result<TcpStream> {
+async fn start_netloader(client: &Client, wait: Duration) -> Result<TcpStream> {
     let start = tokio::time::Instant::now();
     let mut pressed_at = None;
     loop {
@@ -212,7 +306,7 @@ async fn start_netloader(client: &Client) -> Result<TcpStream> {
         }
         match nxlink::connect(client.host()).await {
             Ok(sock) => return Ok(sock),
-            Err(e) if start.elapsed() > NETLOADER_WAIT => {
+            Err(e) if start.elapsed() > wait => {
                 return Err(e).context("hbmenu's NetLoader didn't start listening after Y");
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
@@ -240,6 +334,7 @@ impl OutputLog {
         log: &std::sync::Arc<std::sync::Mutex<OutputLog>>,
         stream: TcpStream,
         symbols: Option<crate::symbolize::Shared>,
+        pid: u64,
     ) -> tokio::task::JoinHandle<()> {
         *log.lock().unwrap() = OutputLog { open: true, ..Default::default() };
         let log = log.clone();
@@ -249,6 +344,7 @@ impl OutputLog {
                 log.lock().unwrap().push(&line);
             }
             log.lock().unwrap().open = false;
+            nro_exited(pid);
         })
     }
 

@@ -96,6 +96,13 @@ enum Command {
         #[arg(long, default_value_t = proto::HOME_MENU_TILES as u16)]
         max: u16,
     },
+    /// Start an installed title from the home menu: TITLE is its id or part of its name.
+    Launch {
+        title: String,
+        /// Which user to pick if it asks (0 = the first).
+        #[arg(long, default_value_t = 0)]
+        user: usize,
+    },
     /// Open hbmenu with full memory by starting a title with R held: the saved host title, or the first
     /// one on the home menu's row that works. Closes any running title first.
     Hbmenu,
@@ -343,6 +350,13 @@ async fn main() -> Result<()> {
             for (i, app) in client.list_apps(max).await?.iter().enumerate() {
                 println!("{i:>3}  {:016x}  {}", app.id, app.name);
             }
+        }
+        Command::Launch { title, user } => {
+            let (app, notes) = launch::launch_title(&client, &title, user).await?;
+            for note in &notes {
+                println!("{note}");
+            }
+            println!("{} ({:016x}) is running", app.name, app.id);
         }
         Command::Hbmenu => {
             let opened = launch::open_hbmenu(&client).await?;

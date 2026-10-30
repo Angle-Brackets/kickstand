@@ -197,6 +197,14 @@ pub struct NroOutputArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct LaunchTitleArgs {
+    /// The title's id (16 hex digits) or part of its name, as list_apps shows them.
+    pub title: String,
+    /// Which user account to pick if the title asks who is playing (0 = the first, default).
+    pub user: Option<usize>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ListAppsArgs {
     /// How many to list (default 12, the home menu's row; at most 64).
     pub max: Option<u16>,
@@ -345,6 +353,15 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
+    #[tool(description = "Start an installed game (title) from the home menu, as a player would: finds its tile (only the home menu's row of 12 most recent titles), presses A and answers the user picker. Closes whatever application is running first, so ask before closing a game the user is playing. Game cards must be inserted; digital titles may need an online check this console can't pass. Then play with input and screenshot.")]
+    async fn launch_title(&self, Parameters(args): Parameters<LaunchTitleArgs>) -> CallToolResult {
+        let result = async {
+            let (app, notes) = crate::launch::launch_title(&self.client, &args.title, args.user.unwrap_or(0)).await?;
+            anyhow::Ok(format!("{}\n{} ({:016x}) is running", notes.join("\n"), app.name, app.id))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
     #[tool(description = "Open hbmenu with full memory, the way to run homebrew. Starts a title from the home menu with R held so Atmosphère runs hbloader in its place: the host title that worked before, or else each title on the home menu's row in turn (closing any that start as the game) until one works, then remembers it. Closes whatever application is running first, so ask before using it while the user plays. Takes 20 s or more per title tried. If no title works, relay the error to the user: they may need to launch a title holding R themselves.")]
     async fn open_hbmenu(&self) -> CallToolResult {
         let result = async {
@@ -376,7 +393,7 @@ impl Tools {
             let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default()).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {
-                let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols);
+                let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols, started.pid);
                 if let Some(old) = self.collector.lock().unwrap().replace(handle) {
                     old.abort();
                 }
