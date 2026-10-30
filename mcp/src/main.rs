@@ -5,9 +5,11 @@
 mod capture;
 mod client;
 mod config;
+mod crash;
 mod launch;
 mod mock;
 mod nxlink;
+mod symbolize;
 mod tools;
 
 use std::path::PathBuf;
@@ -104,9 +106,39 @@ enum Command {
         /// Where a local NRO goes on the SD card (default /switch/kickstand/<file name>).
         #[arg(long)]
         dest: Option<String>,
+        /// The NRO's ELF, to symbolize `<module>+0x...` backtrace addresses in its output.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        /// The module name its backtraces use (default: the ELF's file stem).
+        #[arg(long)]
+        module: Option<String>,
         /// The NRO's arguments, after `--`.
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Symbolize `<module>+0x<offset>` addresses in TEXT (or stdin) against ELF.
+    Symbolize {
+        elf: PathBuf,
+        text: Option<String>,
+        #[arg(long)]
+        module: Option<String>,
+    },
+    /// List the newest crash reports and fatal records.
+    Crashes {
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// Show a crash report (summarized) or fatal record; NAME as `crashes` lists it.
+    Crash {
+        name: String,
+        /// The crashed module's ELF, to symbolize its addresses.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        module: Option<String>,
+        /// Also save Atmosphère's screenshot of the crash here.
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
     },
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 30 minutes.
@@ -162,6 +194,15 @@ async fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Command::Serve);
 
     match command {
+        Command::Symbolize { elf, text, module } => {
+            let symbols = symbolize::Symbolizer::new(&elf, module.as_deref())?;
+            let text = match text {
+                Some(t) => t,
+                None => std::io::read_to_string(std::io::stdin())?,
+            };
+            print!("{}", symbols.annotate(&text));
+            return Ok(());
+        }
         Command::Token => {
             let (token, path) = config::ensure_token()?;
             println!("token: {token}");
@@ -310,7 +351,21 @@ async fn main() -> Result<()> {
             }
             println!("hbmenu is open (host title {:016x} {})", opened.host.id, opened.host.name);
         }
-        Command::Run { nro, dest, args } => {
+        Command::Crashes { limit } => {
+            for e in crash::list(&client, limit).await? {
+                println!("{}\n    {}", e.path, e.headline);
+            }
+        }
+        Command::Crash { name, elf, module, screenshot } => {
+            let fetched = crash::fetch(&client, &name).await?;
+            let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref())).transpose()?;
+            print!("{}", crash::describe(&fetched, symbols.as_ref())?);
+            if let (Some(path), Some(jpg)) = (screenshot, &fetched.jpg) {
+                std::fs::write(&path, jpg)?;
+                println!("screenshot saved to {}", path.display());
+            }
+        }
+        Command::Run { nro, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
                 Some(path) => launch::Program::Sd(path.to_string()),
                 None => {
@@ -319,12 +374,18 @@ async fn main() -> Result<()> {
                     launch::Program::Local { nro: std::fs::read(&nro).with_context(|| format!("reading {nro}"))?, dest }
                 }
             };
+            let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref()).map(symbolize::Symbolizer::shared)).transpose()?;
             let started = launch::run_nro(&client, program, args).await?;
             for note in &started.notes {
                 eprintln!("{note}");
             }
-            if let Some(mut output) = started.output {
-                tokio::io::copy(&mut output, &mut tokio::io::stdout()).await?;
+            if let Some(output) = started.output {
+                use std::io::Write as _;
+                let mut lines = launch::Lines::new(output, symbols);
+                while let Some(line) = lines.next().await {
+                    print!("{line}");
+                    let _ = std::io::stdout().flush();
+                }
                 eprintln!("(the NRO closed its stdout)");
             }
         }
@@ -347,7 +408,7 @@ async fn main() -> Result<()> {
             client.exit().await?;
             println!("the NRO daemon is exiting");
         }
-        Command::Token | Command::Mock { .. } => unreachable!(),
+        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } => unreachable!(),
     }
     Ok(())
 }

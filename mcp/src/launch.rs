@@ -234,15 +234,19 @@ pub struct OutputLog {
 }
 
 impl OutputLog {
-    /// Collects `stream` into `log` until the NRO closes it (it exited) or a new run replaces it.
-    pub fn collect(log: &std::sync::Arc<std::sync::Mutex<OutputLog>>, mut stream: TcpStream) -> tokio::task::JoinHandle<()> {
+    /// Collects `stream` into `log` a line at a time, symbolizing backtrace addresses when `symbols` is
+    /// given, until the NRO closes it (it exited) or a new run replaces it.
+    pub fn collect(
+        log: &std::sync::Arc<std::sync::Mutex<OutputLog>>,
+        stream: TcpStream,
+        symbols: Option<crate::symbolize::Shared>,
+    ) -> tokio::task::JoinHandle<()> {
         *log.lock().unwrap() = OutputLog { open: true, ..Default::default() };
         let log = log.clone();
         tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0; 4096];
-            while let Ok(n @ 1..) = stream.read(&mut buf).await {
-                log.lock().unwrap().push(&String::from_utf8_lossy(&buf[..n]));
+            let mut lines = Lines::new(stream, symbols);
+            while let Some(line) = lines.next().await {
+                log.lock().unwrap().push(&line);
             }
             log.lock().unwrap().open = false;
         })
@@ -274,5 +278,47 @@ impl OutputLog {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+}
+
+/// An NRO's output as whole lines (so a backtrace address split across reads still matches), each
+/// followed by its symbolized addresses.
+pub struct Lines {
+    stream: TcpStream,
+    symbols: Option<crate::symbolize::Shared>,
+    pending: Vec<u8>,
+    done: bool,
+}
+
+impl Lines {
+    pub fn new(stream: TcpStream, symbols: Option<crate::symbolize::Shared>) -> Self {
+        Lines { stream, symbols, pending: Vec::new(), done: false }
+    }
+
+    /// The next line with its newline (the last may have none), or `None` once the NRO closes its stdout.
+    pub async fn next(&mut self) -> Option<String> {
+        use tokio::io::AsyncReadExt;
+        loop {
+            let line = if let Some(i) = self.pending.iter().position(|&b| b == b'\n') {
+                self.pending.drain(..=i).collect::<Vec<u8>>()
+            } else if self.done {
+                if self.pending.is_empty() {
+                    return None;
+                }
+                std::mem::take(&mut self.pending)
+            } else {
+                let mut buf = [0; 4096];
+                match self.stream.read(&mut buf).await {
+                    Ok(n @ 1..) => self.pending.extend_from_slice(&buf[..n]),
+                    _ => self.done = true,
+                }
+                continue;
+            };
+            let line = String::from_utf8_lossy(&line).into_owned();
+            return Some(match &self.symbols {
+                Some(symbols) => symbols.lock().unwrap().annotate(&line),
+                None => line,
+            });
+        }
     }
 }

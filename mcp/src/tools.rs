@@ -153,6 +153,39 @@ pub struct RunNroArgs {
     /// Seconds to collect output before returning, less if it exits (default 5, max 60); nro_output
     /// reads the rest.
     pub wait_seconds: Option<u32>,
+    /// The NRO's ELF on this PC (with debug info): backtrace addresses in its output, written
+    /// `<module>+0x<offset>`, get their function and source line.
+    pub elf: Option<String>,
+    /// The module name its backtraces use (default: the ELF's file name without .elf).
+    pub module: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SymbolizeArgs {
+    /// The module's ELF on this PC (with debug info).
+    pub elf: String,
+    /// Text containing `<module>+0x<offset>` addresses (a log, a backtrace), or bare hex offsets one per
+    /// line.
+    pub text: String,
+    /// The module name used in the text (default: the ELF's file name without .elf).
+    pub module: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CrashReportsArgs {
+    /// How many to list, newest first (default 5).
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CrashReportArgs {
+    /// A path or file name from crash_reports (e.g. 02637676358_01006fe013472000.log or
+    /// report_52b130e42.bin).
+    pub name: String,
+    /// The crashed module's ELF on this PC, to symbolize `<module> + 0x...` addresses.
+    pub elf: Option<String>,
+    /// The module name the report uses (default: the ELF's file name without .elf).
+    pub module: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -334,10 +367,14 @@ impl Tools {
                 (None, Some(sd)) => crate::launch::Program::Sd(sd),
                 _ => anyhow::bail!("give exactly one of local_path and sd_path"),
             };
+            let symbols = match &args.elf {
+                Some(elf) => Some(crate::symbolize::Symbolizer::new(elf.as_ref(), args.module.as_deref())?.shared()),
+                None => None,
+            };
             let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default()).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {
-                let handle = crate::launch::OutputLog::collect(&self.output, stream);
+                let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols);
                 if let Some(old) = self.collector.lock().unwrap().replace(handle) {
                     old.abort();
                 }
@@ -347,6 +384,54 @@ impl Tools {
             anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Turn `<module>+0x<offset>` addresses in any text (a saved log, a backtrace) into function names and source lines, using the module's ELF on this PC. Bare hex offsets, one per line, work too.")]
+    async fn symbolize(&self, Parameters(args): Parameters<SymbolizeArgs>) -> CallToolResult {
+        let result = (|| {
+            let symbols = crate::symbolize::Symbolizer::new(args.elf.as_ref(), args.module.as_deref())?;
+            let mut out = String::new();
+            for line in args.text.lines() {
+                let bare = line.trim().strip_prefix("0x").unwrap_or(line.trim());
+                match u64::from_str_radix(bare, 16) {
+                    Ok(offset) if !bare.is_empty() => writeln!(out, "{line}\n        -> {}", symbols.lookup(offset))?,
+                    _ => out.push_str(&symbols.annotate(&format!("{line}\n"))),
+                }
+            }
+            anyhow::Ok(out)
+        })();
+        result.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "List the newest crash reports (a process crashed: game, homebrew, or system process) and fatal records (the whole console stopped on Atmosphère's fatal screen), newest first, one line each. Check this after an NRO dies unexpectedly or the console stops answering. Times are the console's clock.")]
+    async fn crash_reports(&self, Parameters(args): Parameters<CrashReportsArgs>) -> CallToolResult {
+        let result = async {
+            let entries = crate::crash::list(&self.client, args.limit.unwrap_or(5)).await?;
+            let mut text = String::new();
+            for e in &entries {
+                writeln!(text, "{}\n    {}", e.path, e.headline)?;
+            }
+            anyhow::Ok(if text.is_empty() { "no crash reports or fatal records".to_string() } else { text })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Read one crash report (summarized: result, process, exception, the crashed thread's registers, backtrace and modules; with elf, its addresses become functions and source lines) or decode a fatal record (program, error, PC, a kernel result in X0). Includes the screenshot Atmosphère saved with the crash, if any. Homebrew NROs appear as raw addresses (hbloader loads them, so Atmosphère can't name them); their own printed backtraces in run_nro output are symbolized instead.")]
+    async fn crash_report(&self, Parameters(args): Parameters<CrashReportArgs>) -> CallToolResult {
+        let result = async {
+            let fetched = crate::crash::fetch(&self.client, &args.name).await?;
+            let symbols = match &args.elf {
+                Some(elf) => Some(crate::symbolize::Symbolizer::new(elf.as_ref(), args.module.as_deref())?),
+                None => None,
+            };
+            let text = crate::crash::describe(&fetched, symbols.as_ref())?;
+            let mut content = vec![ContentBlock::text(text)];
+            if let Some(jpg) = fetched.jpg {
+                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(jpg), "image/jpeg"));
+            }
+            anyhow::Ok(CallToolResult::success(content))
+        };
+        result.await.unwrap_or_else(fail)
     }
 
     #[tool(description = "More stdout from the NRO run_nro last started: what arrived since the last read, and whether it's still running (its stdout open).")]
