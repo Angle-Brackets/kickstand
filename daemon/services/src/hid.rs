@@ -212,7 +212,12 @@ impl VirtualController {
                 self.touch = None;
                 let ended = self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&[report(TOUCH_END, last)]));
                 let _ = svc::sleep_thread(TOUCH_EDGE_NS);
-                ended.and(self.srv.unset_touch_screen_auto_pilot_state())
+                // No fingers, before the real touch screen takes over again: handing over straight from a
+                // touch reads as a cancelled one, so the home menu never saw taps (drags still worked).
+                let none: [TouchState; 0] = [];
+                let lifted = self.srv.set_touch_screen_auto_pilot_state(sf::Buffer::from_array(&none));
+                let _ = svc::sleep_thread(TOUCH_EDGE_NS);
+                ended.and(lifted).and(self.srv.unset_touch_screen_auto_pilot_state())
             }
             (None, None) => Ok(()),
         }
