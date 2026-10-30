@@ -44,20 +44,31 @@ impl Debugged {
     }
 
     /// Up to `max` mapped regions (any permission) in address order, and whether there were more.
+    /// Neighbours with the same type and permission are one region (a busy heap is hundreds of blocks
+    /// otherwise), and executable regions are kept past `max`, so the code (an NRO's header) is always there.
     pub fn mappings(&self, max: usize) -> Result<(Vec<MemoryInfo>, bool)> {
-        let mut out = Vec::new();
+        const EXECUTE: u32 = 4;
+        let mut out: Vec<MemoryInfo> = Vec::new();
+        let mut truncated = false;
         let mut address = 0u64;
         loop {
             let info = self.query(address)?;
             if info.permission != 0 {
-                if out.len() == max {
-                    return Ok((out, true));
+                let full = out.len() >= max;
+                match out.last_mut() {
+                    Some(last)
+                        if last.base_address + last.size == info.base_address
+                            && (last.state, last.permission) == (info.state, info.permission) =>
+                    {
+                        last.size += info.size;
+                    }
+                    _ if full && info.permission & EXECUTE == 0 => truncated = true,
+                    _ => out.push(info),
                 }
-                out.push(info);
             }
             address = info.base_address.wrapping_add(info.size);
             if address == 0 || info.size == 0 {
-                return Ok((out, false));
+                return Ok((out, truncated));
             }
         }
     }

@@ -20,21 +20,23 @@ pub const MAX_READ: usize = 1 << 20;
 pub struct Layout {
     pub map: MemoryMap,
     pub nro: Option<(u64, u64)>,
+    /// The NRO header's module id (0x40): the ELF's GNU build id, zero-padded, when the build had one.
+    pub build_id: Option<[u8; 0x20]>,
 }
 
 impl Layout {
     pub async fn fetch(client: &Client) -> Result<Self> {
         let map = client.memory_map().await?;
-        let nro = match map.regions.iter().find(|r| r.nro) {
-            // The header: 0x18 size (text + ro + data), 0x38 bss size.
+        let (nro, build_id) = match map.regions.iter().find(|r| r.nro) {
+            // The header: 0x18 size (text + ro + data), 0x38 bss size, 0x40 module id.
             Some(region) => {
-                let header = client.read_memory(region.base, 0x40).await?;
+                let header = client.read_memory(region.base, 0x60).await?;
                 let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap()) as u64;
-                Some((region.base, word(0x18) + word(0x38)))
+                (Some((region.base, word(0x18) + word(0x38))), header[0x40..0x60].try_into().ok())
             }
-            None => None,
+            None => (None, None),
         };
-        Ok(Layout { map, nro })
+        Ok(Layout { map, nro, build_id })
     }
 
     fn nro_base(&self) -> Result<u64> {
@@ -52,6 +54,21 @@ impl Layout {
             let _ = if within == 0 { write!(out, " {name}") } else { write!(out, " {name}+{within:#x}") };
         }
         Some(out)
+    }
+
+    /// A warning when `symbols` come from a different build than the running NRO, so their addresses would
+    /// be wrong. Builds without a GNU build id (Rust NROs from cargo-nx) can't be checked.
+    pub fn mismatch(&self, symbols: Option<&Symbols>) -> Option<String> {
+        let (running, elf) = (self.build_id?, symbols?.build_id.as_deref()?);
+        let matches = elf.len() <= running.len() && running[..elf.len()] == *elf && running[elf.len()..].iter().all(|&b| b == 0);
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        (!matches).then(|| {
+            format!(
+                "warning: the ELF is from another build than the running NRO (build id {} vs {}): symbols and nro+offsets may point at the wrong place\n",
+                hex(elf),
+                hex(running.split(|&b| b == 0).next().unwrap_or(&running))
+            )
+        })
     }
 
     pub fn render(&self, symbols: Option<&Symbols>) -> String {
@@ -111,6 +128,8 @@ fn kind(state: u32) -> &'static str {
 
 /// The NRO's symbol table, by name (and demangled name) and by address.
 pub struct Symbols {
+    /// The ELF's GNU build id, if it has one.
+    build_id: Option<Vec<u8>>,
     by_name: HashMap<String, (u64, u64)>,
     /// (address, size, name), sorted by address.
     sorted: Vec<(u64, u64, String)>,
@@ -124,7 +143,8 @@ impl Symbols {
         let mut by_name = HashMap::new();
         let mut sorted = Vec::new();
         for sym in file.symbols() {
-            let (Ok(name), true) = (sym.name(), matches!(sym.kind(), SymbolKind::Data | SymbolKind::Text | SymbolKind::Tls)) else {
+            // Not TLS: those addresses are offsets into each thread's TLS block, not into the NRO.
+            let (Ok(name), true) = (sym.name(), matches!(sym.kind(), SymbolKind::Data | SymbolKind::Text)) else {
                 continue;
             };
             if name.is_empty() || sym.is_undefined() {
@@ -139,7 +159,8 @@ impl Symbols {
             bail!("{} has no symbols", elf.display());
         }
         sorted.sort();
-        Ok(Symbols { by_name, sorted })
+        let build_id = file.build_id().ok().flatten().map(<[u8]>::to_vec);
+        Ok(Symbols { build_id, by_name, sorted })
     }
 
     pub fn get(&self, name: &str) -> Option<(u64, u64)> {
@@ -376,7 +397,9 @@ async fn target(client: &Client) -> Result<&'static str> {
 /// The application's memory map, as text.
 pub async fn map(client: &Client, elf: &Elf) -> Result<String> {
     let which = target(client).await?;
-    Ok(format!("in {which}: {}", Layout::fetch(client).await?.render(elf.symbols.as_ref())))
+    let layout = Layout::fetch(client).await?;
+    let warning = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
+    Ok(format!("{warning}in {which}: {}", layout.render(elf.symbols.as_ref())))
 }
 
 /// Reads `len` bytes at the address `expr` and shows them as `format` (`len` 0: one value, or 256 bytes
@@ -392,7 +415,8 @@ pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Fo
         n => n.min(MAX_READ),
     };
     let data = client.read_memory(address, len).await?;
-    let mut out = format!("{len} bytes at {address:#x}");
+    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
+    let _ = write!(out, "{len} bytes at {address:#x}");
     if let Some(at) = layout.describe(address, elf.symbols.as_ref()) {
         let _ = write!(out, " ({at})");
     }
@@ -411,7 +435,8 @@ pub async fn poke(client: &Client, elf: &Elf, expr: &str, value: &str, format: F
     client.write_memory(address, &data).await?;
     let after = client.read_memory(address, data.len()).await?;
     let shown = if format == Format::Str { Format::Hex } else { format };
-    let mut out = format!("wrote {} bytes at {address:#x}", data.len());
+    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
+    let _ = write!(out, "wrote {} bytes at {address:#x}", data.len());
     if let Some(at) = layout.describe(address, elf.symbols.as_ref()) {
         let _ = write!(out, " ({at})");
     }
@@ -422,4 +447,29 @@ pub async fn poke(client: &Client, elf: &Elf, expr: &str, value: &str, format: F
         render(&after, address, shown, &layout, None).split_once(' ').map_or("", |(_, v)| v).trim_start_matches(':'),
     );
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_ids_are_compared() {
+        let app = proto::App { pid: 1, program_id: 2, hbl: Some(true) };
+        let mut running = [0u8; 0x20];
+        running[..3].copy_from_slice(&[1, 2, 3]);
+        let layout = |build_id| Layout {
+            map: MemoryMap { app: app.clone(), heap: None, regions: Vec::new(), truncated: false },
+            nro: Some((0x800_0000, 0x1000)),
+            build_id,
+        };
+        let symbols = |id: Option<Vec<u8>>| Symbols { build_id: id, by_name: HashMap::new(), sorted: Vec::new() };
+        assert_eq!(layout(Some(running)).mismatch(Some(&symbols(Some(vec![1, 2, 3])))), None);
+        let warning = layout(Some(running)).mismatch(Some(&symbols(Some(vec![1, 2, 4])))).unwrap();
+        assert!(warning.contains("010204 vs 010203"), "{warning}");
+        // Nothing to compare: no build id in the ELF, or no ELF.
+        assert_eq!(layout(Some(running)).mismatch(Some(&symbols(None))), None);
+        assert_eq!(layout(Some(running)).mismatch(None), None);
+        assert_eq!(layout(None).mismatch(Some(&symbols(Some(vec![1])))), None);
+    }
 }

@@ -160,7 +160,7 @@ enum Command {
         #[arg(long)]
         screenshot: Option<PathBuf>,
     },
-    /// Wait until the screen changes ("change") or stops changing ("still"), then save it to FILE.
+    /// Wait until the screen changes ("change") or stops changing ("still"), then save it with --out.
     Wait {
         #[arg(default_value = "change")]
         until: String,
