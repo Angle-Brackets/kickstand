@@ -2,7 +2,8 @@
 //! The "an agent is working" indicator: a 40x40 Kickstand icon on a vi:m managed layer above everything,
 //! next to the home menu's clock, shown while the keep-awake lease runs. It's only on the Default and LCD
 //! layer stacks, so screenshots and recordings don't include it. The GPU context and layer are made the
-//! first time a lease starts, then kept and shown or hidden.
+//! first time a lease starts, then kept. Hiding draws a transparent frame: SetLayerVisibility succeeds on
+//! 23.0.1 but leaves a managed layer on screen.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -20,7 +21,7 @@ use nx::thread;
 
 /// In vi's layer space, which is 1920x1080 whatever the output (so about 27 px on the 720p panel).
 const SIZE: u32 = 40;
-/// The swing icon at 40x40, straight RGBA (`assets/logo/gen_tray.py`).
+/// The swing icon at 40x40, premultiplied RGBA as the compositor blends it (`assets/logo/gen_tray.py`).
 const ICON: &[u8; (SIZE * SIZE * 4) as usize] = include_bytes!("tray-icon.rgba");
 const POLL_NS: i64 = 500_000_000;
 /// vi isn't ready for layers early in boot (2114-0006 at 10 s), so don't try before this uptime.
@@ -38,7 +39,10 @@ pub fn start() {
 }
 
 fn run() {
+    let icon: Vec<RGBA8> = ICON.chunks_exact(4).map(|p| RGBA8::new_scaled(p[0], p[1], p[2], p[3])).collect();
+    let blank = alloc::vec![RGBA8::new_scaled(0, 0, 0, 0); icon.len()];
     let mut layer: Option<(Canvas, (u16, u16))> = None;
+    // What the layer shows now; a new layer starts blank.
     let mut shown = false;
     loop {
         let want = awake::remaining_ms() > 0;
@@ -50,10 +54,7 @@ fn run() {
         }
         if want && layer.is_none() && daemon_core::uptime_ms() >= EARLIEST_MS {
             match create(pos) {
-                Ok(canvas) => {
-                    layer = Some((canvas, pos));
-                    shown = true;
-                }
+                Ok(canvas) => layer = Some((canvas, pos)),
                 Err(rc) => {
                     log!("indicator: couldn't set up the layer: {rc}");
                     let _ = svc::sleep_thread(RETRY_NS);
@@ -64,9 +65,9 @@ fn run() {
         if let Some((canvas, _)) = layer.as_mut()
             && want != shown
         {
-            match canvas.surface.set_visible(want) {
+            match canvas.render_prepared_buffer(if want { &icon } else { &blank }) {
                 Ok(()) => shown = want,
-                Err(rc) => log!("indicator: set_visible({want}) failed: {rc}"),
+                Err(rc) => log!("indicator: drawing ({want}) failed: {rc}"),
             }
         }
         let _ = svc::sleep_thread(POLL_NS);
@@ -95,8 +96,6 @@ fn create((x, y): (u16, u16)) -> Result<Canvas> {
     canvas.surface.push_layer_stack(LayerStackId::Default)?;
     // Handheld mode's stack; harmless if this firmware doesn't need it.
     let _ = canvas.surface.push_layer_stack(LayerStackId::Lcd);
-    let pixels: Vec<RGBA8> = ICON.chunks_exact(4).map(|p| RGBA8::new_scaled(p[0], p[1], p[2], p[3])).collect();
-    canvas.render_prepared_buffer(&pixels)?;
     log!("indicator: layer at ({x}, {y})");
     Ok(canvas)
 }
