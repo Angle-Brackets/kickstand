@@ -142,14 +142,24 @@ pub struct ScreenshotArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct RecordGifArgs {
-    /// Where to save the GIF on this PC.
-    pub local_path: String,
+    /// Where to save the GIF on this PC (default: ~/Pictures/kickstand/gif-<unix time>.gif).
+    pub local_path: Option<String>,
     /// How long to record (default 3, max 30).
     pub seconds: Option<f64>,
     /// Target frames per second (default 5, max 10); the real rate is lower if capturing can't keep up.
     pub fps: Option<u32>,
     /// GIF width in pixels (default 640; the console's screen is 1280).
     pub width: Option<u32>,
+}
+
+/// `~/Pictures/kickstand/<ext>-<unix time>.<ext>`, creating the folder: where captures go when the agent
+/// doesn't say, so the user knows where to look.
+fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME isn't set; pass local_path"))?;
+    let dir = std::path::Path::new(&home).join("Pictures/kickstand");
+    std::fs::create_dir_all(&dir)?;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    Ok(dir.join(format!("{ext}-{secs}.{ext}")))
 }
 
 /// What `keep_awake` renews with no arguments: the daemon's per-request lease.
@@ -225,7 +235,7 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Record the Switch's screen as a looping GIF (from repeated screenshots, a few frames a second) saved on this PC, e.g. to show the user an animation or a bug. Returns a contact sheet of up to 6 evenly spaced frames so you can see the motion yourself.")]
+    #[tool(description = "Record the Switch's screen as a looping GIF (from repeated screenshots, a few frames a second) saved on this PC (by default in ~/Pictures/kickstand/), e.g. to show the user an animation or a bug. Returns a contact sheet of up to 6 evenly spaced frames so you can see the motion yourself.")]
     async fn record_gif(&self, Parameters(args): Parameters<RecordGifArgs>) -> CallToolResult {
         let result = async {
             let seconds = args.seconds.unwrap_or(3.0);
@@ -237,9 +247,13 @@ impl Tools {
                 anyhow::Ok((crate::capture::gif(&shots, width)?, crate::capture::contact_sheet(&shots, 6)?))
             })
             .await??;
-            tokio::fs::write(&args.local_path, &gif).await?;
+            let path = match args.local_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => default_capture_path("gif")?,
+            };
+            tokio::fs::write(&path, &gif).await?;
             let fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
-            let text = format!("saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below", args.local_path, gif.len() / 1024);
+            let text = format!("saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below", path.display(), gif.len() / 1024);
             let b64 = base64::engine::general_purpose::STANDARD.encode(&sheet);
             anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
         };
