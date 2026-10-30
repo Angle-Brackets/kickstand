@@ -4,12 +4,14 @@
 //!   consistent (no game involved; a running game stays suspended), but homebrew gets a few hundred MB of
 //!   memory. For starting the Kickstand NRO and small tools only: games (PaperBoat, TTYDRecomp) never run
 //!   here (the user's rule), and [`run_nro`] refuses them.
-//! - **Full memory** (what [`run_nro`] uses by default): launch a title from the home menu while holding R, which Atmosphère turns into
-//!   hbloader with the title's memory. Not every title works (ones that check online rights, game cards that
+//! - **Full memory** (what [`run_nro`] uses by default): Atmosphère starts hbloader, with the title's
+//!   memory, in place of a title launched from the home menu. A person holds R for that; the virtual
+//!   controller's R wasn't seen reliably, so the daemon instead arms an entry in Atmosphère's override config
+//!   for that one title just before pressing A and disarms it once the process exists
+//!   ([`Client::hbl_override`]). Not every title works (ones that check online rights, game cards that
 //!   aren't inserted), and only the home menu's row can do it, not "All Software". So the first time, try
 //!   each tile of the row in order; remember the one that worked (the host title, in
-//!   `~/.config/kickstand/host-title`) and go straight to it afterwards. The R hold has been unreliable with
-//!   the virtual controller (see `context/AGENT_LOG.md`).
+//!   `~/.config/kickstand/host-title`) and go straight to it afterwards.
 //!
 //! Running an NRO then goes through hbmenu's NetLoader ([`run_nro`]): an NRO from this PC is sent as is;
 //! one already on the SD card is opened by sending the Kickstand NRO with `--open <path>`.
@@ -149,7 +151,7 @@ async fn open_full(client: &Client) -> Result<Opened> {
     for tile in order {
         let expected = &apps[tile];
         let label = if expected.name.is_empty() { format!("{:016x}", expected.id) } else { expected.name.clone() };
-        match try_tile(client, tile).await? {
+        match try_tile(client, tile, expected.id, &mut notes).await? {
             Some(app) if app.hbl == Some(true) => {
                 HBMENU_PID.store(app.pid, Ordering::Relaxed);
                 let host = apps.iter().find(|a| a.id == app.program_id).cloned().unwrap_or(AppEntry { id: app.program_id, name: String::new() });
@@ -180,13 +182,40 @@ async fn select_tile(client: &Client, tile: usize) -> Result<()> {
     client.input(steps).await
 }
 
-/// Starts tile `tile` of the home menu's row with R held; returns the application that started, if any.
-async fn try_tile(client: &Client, tile: usize) -> Result<Option<App>> {
+/// Starts tile `tile` (title `id`) of the home menu's row as hbloader; returns the application that
+/// started, if any.
+async fn try_tile(client: &Client, tile: usize, id: u64, notes: &mut Vec<String>) -> Result<Option<App>> {
+    if !client.hbl_override(id).await? {
+        notes.push("the sysmodule predates protocol 20, so R is held instead (unreliable): update it".into());
+        return try_tile_holding_r(client, tile).await;
+    }
+    let started = start_tile(client, tile).await;
+    // pm reads the config when it creates the process, so the title can go back to starting as itself.
+    let disarmed = client.hbl_override(0).await.context("disarming the hbl override");
+    let app = started?;
+    disarmed?;
+    Ok(app)
+}
+
+/// Starts tile `tile` of the home menu's row; returns the application that started, if any. A title that
+/// asks who is playing only starts once that's answered, and the picker starts on the first user. Right
+/// after boot the picker can take a few seconds to appear and swallow a press, so press again while
+/// nothing has started.
+async fn start_tile(client: &Client, tile: usize) -> Result<Option<App>> {
     select_tile(client, tile).await?;
-    // Start it, holding R long enough to cover the process starting. A title that asks who is playing
-    // only starts once that's answered, so nothing is running yet: confirm the first user, still on R.
-    // Right after boot the picker can take a few seconds to appear and swallow that press, so try a
-    // third time.
+    for _ in 0..3 {
+        client.input(vec![step(&[Button::A], 100), step(&[], 2500)]).await?;
+        if let Some(app) = client.app_status().await? {
+            return Ok(Some(app));
+        }
+    }
+    wait_for_app(client).await
+}
+
+/// [`try_tile`] for a daemon without [`Client::hbl_override`]: R held through the launch.
+async fn try_tile_holding_r(client: &Client, tile: usize) -> Result<Option<App>> {
+    select_tile(client, tile).await?;
+    // Holding R long enough to cover the process starting, and through the user picker.
     let launch = vec![step(&[Button::R], 300), step(&[Button::R, Button::A], 150), step(&[Button::R], 6000)];
     for _ in 0..2 {
         client.input(launch.clone()).await?;

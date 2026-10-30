@@ -423,12 +423,17 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
+    #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the console is stuck on a fatal error screen (then reboot it), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
     async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> CallToolResult {
         let result = async {
             let status = self.client.status().await?;
-            let mut content = vec![ContentBlock::text(crate::client::describe_status(&status))];
-            if args.screenshot.unwrap_or(true) {
+            let fatal = self.client.fatal().await?;
+            let mut text = crate::client::describe_status(&status);
+            if let Some(fatal) = &fatal {
+                text = format!("{fatal}\n{text}");
+            }
+            let mut content = vec![ContentBlock::text(text)];
+            if args.screenshot.unwrap_or(true) && fatal.is_none() {
                 let jpeg = self.client.screenshot().await?;
                 let width = args.width.unwrap_or(480);
                 let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, None, Some(width))).await??;
@@ -480,7 +485,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Open hbmenu, where homebrew runs. mode \"applet\" (default): the home menu's Album button, which Atmosphère runs hbmenu in: quick, no game involved (a running game stays suspended), but only a few hundred MB of memory, so it's for starting the Kickstand NRO or small tools, never games. mode \"full\": a title started with R held, so hbloader runs in its place with the console's full memory, which games need; closes whatever application runs (ask before closing a game the user is playing), tries the host title that worked before or else each title on the home menu's row, 20 s or more each. If no title works, relay the error: the user may need to launch a title holding R themselves.")]
+    #[tool(description = "Open hbmenu, where homebrew runs. mode \"applet\" (default): the home menu's Album button, which Atmosphère runs hbmenu in: quick, no game involved (a running game stays suspended), but only a few hundred MB of memory, so it's for starting the Kickstand NRO or small tools, never games. mode \"full\": hbloader started in place of a title (the daemon arms Atmosphère's override config for that one launch, so no button needs holding), with the console's full memory, which games need; closes whatever application runs (ask before closing a game the user is playing), tries the host title that worked before or else each title on the home menu's row, 20 s or more each. If no title works, relay the error: the user may need to launch a title holding R themselves (with the override armed, R gives the game instead).")]
     async fn open_hbmenu(&self, Parameters(args): Parameters<OpenHbmenuArgs>) -> CallToolResult {
         let result = async {
             let mode = crate::launch::Mode::parse(args.mode.as_deref(), crate::launch::Mode::Applet)?;

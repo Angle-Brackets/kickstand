@@ -111,7 +111,7 @@ enum Command {
         user: usize,
     },
     /// Open hbmenu in applet mode (the home menu's Album button), or with --full, with full memory by
-    /// starting a title with R held (the saved host title, or the first on the home menu's row that works;
+    /// starting hbloader in place of a title (the saved host title, or the first on the home menu's row that works;
     /// closes any running title first).
     Hbmenu {
         #[arg(long)]
@@ -405,7 +405,12 @@ async fn main() -> Result<()> {
             client.input(client::parse_steps(&steps)?).await?;
             println!("played");
         }
-        Command::Status => println!("{}", client::describe_status(&client.status().await?)),
+        Command::Status => {
+            if let Some(fatal) = client.fatal().await? {
+                println!("{fatal}");
+            }
+            println!("{}", client::describe_status(&client.status().await?));
+        }
         Command::App => {
             match client.app_status().await? {
                 Some(app) => println!("application: {}", client::describe_app(&app)),

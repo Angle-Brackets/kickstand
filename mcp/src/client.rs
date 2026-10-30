@@ -314,6 +314,39 @@ impl Client {
         }
     }
 
+    /// What the console's fatal error screen is about, if it's on one: the newest Atmosphère fatal report
+    /// since the daemon started, with what to do. `None` too from a daemon older than protocol 20.
+    pub async fn fatal(&self) -> Result<Option<String>> {
+        let entries = match self.request(Request::FatalReports).await? {
+            Response::Dir { entries, .. } => entries,
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => return Ok(None),
+            other => return Err(unexpected(other)),
+        };
+        let Some(newest) = entries.last() else { return Ok(None) };
+        let path = format!("/atmosphere/fatal_reports/{}", newest.name);
+        let (data, _) = self.read(&path, 0, 1024).await?;
+        let text = String::from_utf8_lossy(&data);
+        let field = |name: &str| text.lines().find_map(|l| l.trim().strip_prefix(name)).map_or("?", str::trim).to_string();
+        Ok(Some(format!(
+            "FATAL ERROR: {} ({}) crashed with {}. The console is stuck on Atmosphère's error screen until it \
+             reboots (screenshots fail meanwhile): reboot into hekate (the reboot tool, or `kickstand reboot 1 --yes`), \
+             and the sysmodule gets past the lock screen afterwards. Report: {path}",
+            field("Process Name:"),
+            field("Program ID:"),
+            field("Result:")
+        )))
+    }
+
+    /// Arms the daemon's entry in Atmosphère's override config so launching `program_id` starts hbloader
+    /// without R held (0 disarms it). `false` if the daemon predates it (protocol 20).
+    pub async fn hbl_override(&self, program_id: u64) -> Result<bool> {
+        match self.request(Request::HblOverride { program_id }).await? {
+            Response::Ok => Ok(true),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Ok(false),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Points this connection's memory requests at the Album's process (`applet`) or the application.
     pub async fn memory_target(&self, applet: bool) -> Result<()> {
         expect(self.request(Request::MemoryTarget { applet }).await?, |r| matches!(r, Response::Ok)).map(|_| ())

@@ -26,6 +26,7 @@
 extern crate alloc;
 
 pub mod crc32;
+pub mod hbl;
 pub mod path;
 
 use alloc::string::String;
@@ -87,7 +88,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -205,6 +206,14 @@ pub enum Request {
     MemoryTarget { applet: bool },
     /// (19) Where the console is, in one call. Answers [`Response::Status`].
     Status,
+    /// (20) Arms Kickstand's entry in Atmosphère's `override_config.ini` ([`hbl`]) so launching
+    /// `program_id` starts hbloader without R held (and the game itself with R held); 0 disarms it.
+    /// Answers [`Response::Ok`].
+    HblOverride { program_id: u64 },
+    /// (20) Atmosphère fatal reports written since the daemon started (`/atmosphere/fatal_reports`): any
+    /// means the console is on the fatal error screen, which only a reboot leaves. Answers
+    /// [`Response::Dir`].
+    FatalReports,
 }
 
 /// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
@@ -596,6 +605,8 @@ mod tests {
                 Request::CloseApplet => 31,
                 Request::MemoryTarget { .. } => 32,
                 Request::Status => 33,
+                Request::HblOverride { .. } => 34,
+                Request::FatalReports => 35,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -656,6 +667,8 @@ mod tests {
             Request::CloseApplet,
             Request::MemoryTarget { applet: true },
             Request::Status,
+            Request::HblOverride { program_id: 0 },
+            Request::FatalReports,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");

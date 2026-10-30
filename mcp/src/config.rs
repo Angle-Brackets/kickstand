@@ -3,7 +3,7 @@
 //!
 //! - host: `--host`, then `$SWITCH_IP`, then `~/.config/kickstand/host`
 //! - token: `$KICKSTAND_TOKEN`, then `~/.config/kickstand/token` (created by `kickstand token`)
-//! - host title (the title that opens hbmenu when launched with R held): `~/.config/kickstand/host-title`,
+//! - host title (the title Atmosphère starts hbmenu in place of, with full memory): `~/.config/kickstand/host-title`,
 //!   written by `kickstand hbmenu` as `<hex id> <name>`
 
 use std::path::PathBuf;

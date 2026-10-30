@@ -129,7 +129,8 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
             Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
-            Request::Press { .. } | Request::Input { .. } => Response::Ok,
+            Request::Press { .. } | Request::Input { .. } | Request::HblOverride { .. } => Response::Ok,
+            Request::FatalReports => Response::Dir { entries: Vec::new(), truncated: false },
             Request::AppStatus | Request::CloseApp => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
             Request::AppletStatus | Request::CloseApplet => Response::App(None),

@@ -27,6 +27,10 @@ pub const HEKATE_INI: &str = "/bootloader/hekate_ipl.ini";
 /// before `/switch/kickstand/` existed. Writable so they can be cleaned up.
 const OWN_FILES: &[&str] = &["/switch/kickstand.nro", "/switch/kickstand-hello.nro"];
 
+/// Atmosphère's override config. Not under a write root: only [`crate::Request::HblOverride`] changes it,
+/// and only Kickstand's own entry ([`crate::hbl`]).
+pub const OVERRIDE_CONFIG: &str = "/atmosphere/config/override_config.ini";
+
 /// Where the NRO daemon is installed for launching from hbmenu.
 pub const NRO_PATH: &str = "/switch/kickstand/kickstand.nro";
 

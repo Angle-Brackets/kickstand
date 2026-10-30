@@ -121,6 +121,11 @@ impl<'a> Session<'a> {
             },
             Request::CloseApplet => close_applet(),
             Request::Status => status(),
+            Request::FatalReports => Response::Dir { entries: crate::fatal::since_start(), truncated: false },
+            Request::HblOverride { program_id } => match crate::hbl::set(program_id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            },
             Request::MemoryTarget { applet } => {
                 self.memory_applet = applet;
                 Response::Ok
