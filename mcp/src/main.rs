@@ -2,6 +2,7 @@
 //! kickstand: an MCP server (stdio) for the daemon on the Switch, plus a few CLI commands for using
 //! the daemon by hand.
 
+mod capture;
 mod client;
 mod config;
 mod mock;
@@ -82,6 +83,20 @@ enum Command {
     /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
     /// reports what's left. Every request already keeps it on for 30 minutes.
     KeepAwake { minutes: Option<u32> },
+    /// Save a screenshot of the console (JPEG).
+    Screenshot { local: PathBuf },
+    /// Record the screen as a looping GIF from repeated screenshots.
+    Gif {
+        local: PathBuf,
+        #[arg(long, default_value_t = 3.0)]
+        seconds: f64,
+        /// Target frame rate; capturing is slower than this at high rates.
+        #[arg(long, default_value_t = 5)]
+        fps: u32,
+        /// Frame width in pixels (the console's is 1280).
+        #[arg(long, default_value_t = 640)]
+        width: u32,
+    },
     /// Debug: move the "agent working" indicator to X, Y (1920x1080 layer space), until the next boot.
     #[command(hide = true)]
     IndicatorAt { x: u16, y: u16 },
@@ -242,6 +257,18 @@ async fn main() -> Result<()> {
             };
             client.press(buttons, times, hold_ms).await?;
             println!("pressed");
+        }
+        Command::Screenshot { local } => {
+            let jpeg = client.screenshot().await?;
+            std::fs::write(&local, &jpeg)?;
+            println!("saved {} ({} bytes)", local.display(), jpeg.len());
+        }
+        Command::Gif { local, seconds, fps, width } => {
+            let shots = capture::record(&client, seconds, fps).await?;
+            let gif = tokio::task::spawn_blocking(move || capture::gif(&shots, width).map(|g| (g, shots.len())));
+            let (gif, frames) = gif.await??;
+            std::fs::write(&local, &gif)?;
+            println!("saved {} ({frames} frames, {} bytes)", local.display(), gif.len());
         }
         Command::IndicatorAt { x, y } => client.indicator_position(x, y).await?,
         Command::KeepAwake { minutes } => println!("{}", describe_keep_awake(client.keep_awake(minutes).await?)),

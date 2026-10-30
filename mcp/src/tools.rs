@@ -134,6 +134,24 @@ pub struct KeepAwakeArgs {
     pub minutes: Option<u32>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotArgs {
+    /// Also save the JPEG to this path on this PC.
+    pub local_path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecordGifArgs {
+    /// Where to save the GIF on this PC.
+    pub local_path: String,
+    /// How long to record (default 3, max 30).
+    pub seconds: Option<f64>,
+    /// Target frames per second (default 5, max 10); the real rate is lower if capturing can't keep up.
+    pub fps: Option<u32>,
+    /// GIF width in pixels (default 640; the console's screen is 1280).
+    pub width: Option<u32>,
+}
+
 /// What `keep_awake` renews with no arguments: the daemon's per-request lease.
 const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
@@ -190,6 +208,42 @@ impl Tools {
             anyhow::Ok(if s == 0 { "keep awake is off".to_string() } else { format!("screen stays on for {}m {}s", s / 60, s % 60) })
         };
         result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Take a screenshot of the Switch's screen and look at it (JPEG, 1280x720). The kickstand indicator isn't in it. Optionally saves it on this PC.")]
+    async fn screenshot(&self, Parameters(args): Parameters<ScreenshotArgs>) -> CallToolResult {
+        let result = async {
+            let jpeg = self.client.screenshot().await?;
+            let mut text = format!("screenshot: {} bytes", jpeg.len());
+            if let Some(path) = &args.local_path {
+                tokio::fs::write(path, &jpeg).await?;
+                write!(text, ", saved to {path}")?;
+            }
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Record the Switch's screen as a looping GIF (from repeated screenshots, a few frames a second) saved on this PC, e.g. to show the user an animation or a bug. Returns a contact sheet of up to 6 evenly spaced frames so you can see the motion yourself.")]
+    async fn record_gif(&self, Parameters(args): Parameters<RecordGifArgs>) -> CallToolResult {
+        let result = async {
+            let seconds = args.seconds.unwrap_or(3.0);
+            let width = args.width.unwrap_or(640).clamp(64, 1280);
+            let shots = crate::capture::record(&self.client, seconds, args.fps.unwrap_or(5)).await?;
+            let span = shots.last().map_or(0.0, |s| s.at.as_secs_f64());
+            let frames = shots.len();
+            let (gif, sheet) = tokio::task::spawn_blocking(move || {
+                anyhow::Ok((crate::capture::gif(&shots, width)?, crate::capture::contact_sheet(&shots, 6)?))
+            })
+            .await??;
+            tokio::fs::write(&args.local_path, &gif).await?;
+            let fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
+            let text = format!("saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below", args.local_path, gif.len() / 1024);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&sheet);
+            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
     #[tool(description = "List a directory on the Switch's SD card. Keys, NAND backups and /Nintendo are not readable.")]

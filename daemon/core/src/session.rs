@@ -30,6 +30,8 @@ pub struct Session<'a> {
     authed: bool,
     upload: Option<Upload>,
     after_reply: Option<AfterReply>,
+    /// The last screenshot's JPEG, until the next one or the end of the connection.
+    screenshot: Option<alloc::vec::Vec<u8>>,
 }
 
 /// Something to do once the current reply has been sent.
@@ -45,7 +47,7 @@ pub enum AfterReply {
 impl<'a> Session<'a> {
     /// `token` is the shared secret clients must present; with `None` every Hello is refused.
     pub fn new(token: Option<&'a str>, kind: DaemonKind) -> Self {
-        Session { token, kind, authed: false, upload: None, after_reply: None }
+        Session { token, kind, authed: false, upload: None, after_reply: None, screenshot: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -97,6 +99,11 @@ impl<'a> Session<'a> {
             Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
             Request::KeepAwake { minutes } => keep_awake(minutes),
+            Request::Screenshot => self.screenshot(),
+            Request::ScreenshotRead { offset, len } => match &self.screenshot {
+                Some(jpeg) => chunk(jpeg, offset, len),
+                None => Response::error(ErrorKind::BadRequest, "no screenshot taken on this connection"),
+            },
             Request::IndicatorPosition { x, y } => {
                 crate::tray::set_position((x, y));
                 Response::Ok
@@ -304,6 +311,23 @@ impl<'a> Session<'a> {
         }
     }
 
+    fn screenshot(&mut self) -> Response {
+        // Free the last one first: the heap has room for one capture buffer, not two.
+        self.screenshot = None;
+        let mut buf = vec![0u8; services::caps::JPEG_BUFFER_SIZE];
+        match services::caps::capture_jpeg(&mut buf) {
+            Ok(size) if size <= buf.len() => {
+                buf.truncate(size);
+                buf.shrink_to_fit();
+                let first = chunk(&buf, 0, proto::MAX_CHUNK as u32);
+                self.screenshot = Some(buf);
+                first
+            }
+            Ok(size) => Response::error(ErrorKind::System, format!("caps:sc reported a {size} byte JPEG")),
+            Err(rc) => system_error("capturing the screen (caps:sc)", rc),
+        }
+    }
+
     fn abort_upload(&mut self) {
         if self.upload.take().is_some() {
             let _ = sd::remove_if_exists(STAGING_FILE);
@@ -315,6 +339,13 @@ impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.abort_upload();
     }
+}
+
+/// `len` bytes (at most [`proto::MAX_CHUNK`]) of `data` from `offset`, as [`Response::Data`].
+fn chunk(data: &[u8], offset: u64, len: u32) -> Response {
+    let start = (offset as usize).min(data.len());
+    let end = start.saturating_add((len as usize).min(proto::MAX_CHUNK)).min(data.len());
+    Response::Data { data: data[start..end].to_vec(), file_size: data.len() as u64 }
 }
 
 /// Longest hold [`Request::Press`] accepts; with [`MAX_PRESSES`] it keeps the call under the client's 30 s

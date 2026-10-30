@@ -90,9 +90,32 @@ impl Client {
             offset: at,
             len: want.min(proto::MAX_CHUNK as u64) as u32,
         };
+        self.read_chunks(read_at(offset, len), read_at, offset, len, path).await
+    }
+
+    /// Captures the screen; returns the JPEG (the kickstand indicator isn't in it).
+    pub async fn screenshot(&self) -> Result<Vec<u8>> {
+        let read_at = |at: u64, want: u64| Request::ScreenshotRead {
+            offset: at,
+            len: want.min(proto::MAX_CHUNK as u64) as u32,
+        };
+        // One connection for the capture and its reads: the daemon keeps the JPEG per connection.
+        Ok(self.read_chunks(Request::Screenshot, read_at, 0, u64::MAX, "the screenshot").await?.0)
+    }
+
+    /// Sends `first` (which answers with the first chunk and the total size), then pipelines `read_at`
+    /// requests for the rest of `offset..offset + len`. `what` names the data in errors.
+    async fn read_chunks(
+        &self,
+        first: Request,
+        read_at: impl Fn(u64, u64) -> Request,
+        offset: u64,
+        len: u64,
+        what: &str,
+    ) -> Result<(Vec<u8>, u64)> {
         let mut guard = self.conn.lock().await;
-        // The first chunk tells us the file's size; the rest are pipelined.
-        let (mut out, file_size) = match self.request_locked(&mut guard, read_at(offset, len)).await? {
+        // The first chunk tells us the total size; the rest are pipelined.
+        let (mut out, file_size) = match self.request_locked(&mut guard, first).await? {
             Response::Data { data, file_size } => (data, file_size),
             other => return Err(unexpected(other)),
         };
@@ -111,7 +134,7 @@ impl Client {
                 let want = in_flight.pop_front().unwrap();
                 match recv(conn).await? {
                     Response::Data { data, .. } if data.len() as u64 == want => out.extend_from_slice(&data),
-                    Response::Data { .. } => return Err(anyhow!("{path} changed size while being read")),
+                    Response::Data { .. } => return Err(anyhow!("{what} changed size while being read")),
                     other => return Err(unexpected(other)),
                 }
             }

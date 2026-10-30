@@ -16,9 +16,11 @@ use nx::diag::log::lm::LmLogger;
 use nx::{svc, util};
 
 nx::rrt0_define_module_name!("sys-kickstand");
-// A sysmodule must pick its own heap; the NRO default would take all free memory. 4 MiB covers the
-// socket transfer memory (~0.6 MiB), two frame buffers and fs sessions.
-nx::alloc_set_default_heap_size!(0x40_0000);
+// A sysmodule must pick its own heap; the NRO default would take all free memory. 6 MiB covers the
+// socket transfer memory (~0.6 MiB), two frame buffers, fs sessions, the indicator's GPU memory (~0.3 MiB)
+// and a screenshot's 512 KiB capture buffer. It comes out of the pool all system processes share (15.5 MB
+// free with 4 MiB here).
+nx::alloc_set_default_heap_size!(0x60_0000);
 nx::rrt0_initialize_heap!();
 
 #[unsafe(no_mangle)]

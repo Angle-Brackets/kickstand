@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod caps;
 pub mod hid;
 pub mod idle;
 pub mod pm;
