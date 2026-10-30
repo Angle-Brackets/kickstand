@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod crash;
 mod launch;
+mod link;
 mod memory;
 mod mock;
 mod nxlink;
@@ -45,6 +46,14 @@ enum Command {
     Serve,
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
+    /// Add Kickstand to Claude Code or Claude Desktop ("code" or "desktop"); without one, show where it's
+    /// linked.
+    Link {
+        app: Option<String>,
+        /// Take it out instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// List the Switches running Kickstand on this network.
     Discover {
         /// Probe this address instead of broadcasting.
@@ -365,6 +374,26 @@ async fn main() -> Result<()> {
             let console = mock::Console { root, tokens: std::sync::Mutex::new(tokens), pair_code };
             return mock::serve_console(listener, Arc::new(console)).await;
         }
+        Command::Link { app, remove } => {
+            let Some(app) = app else {
+                for app in link::App::ALL {
+                    let state = match link::state(app) {
+                        link::State::Missing => "not installed".to_string(),
+                        link::State::NotLinked => "not linked".to_string(),
+                        link::State::Linked { command } => format!("linked ({command})"),
+                    };
+                    println!("{}: {state}", app.name());
+                }
+                return Ok(());
+            };
+            let app = match app.to_ascii_lowercase().as_str() {
+                "code" | "claude-code" => link::App::ClaudeCode,
+                "desktop" | "claude-desktop" => link::App::ClaudeDesktop,
+                other => anyhow::bail!("{other:?}: say \"code\" (Claude Code) or \"desktop\" (Claude Desktop)"),
+            };
+            println!("{}", if remove { link::unlink(app)? } else { link::link(app)? });
+            return Ok(());
+        }
         Command::Discover { to } => {
             let to = match to {
                 Some(host) => Some(format!("{host}:{}", proto::discovery::PORT).parse().context("--to takes an IPv4 address")?),
@@ -678,7 +707,7 @@ async fn main() -> Result<()> {
             client.exit().await?;
             println!("the NRO daemon is exiting");
         }
-        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } | Command::Discover { .. } | Command::Pair { .. } => {
+        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } | Command::Discover { .. } | Command::Pair { .. } | Command::Link { .. } => {
             unreachable!()
         }
     }

@@ -45,7 +45,7 @@ Then install the background service:
 target/release/kickstand sysmodule install daemon/target/aarch64-nintendo-switch-freestanding/release/sys-kickstand.nsp
 target/release/kickstand sysmodule handover      # start the sysmodule; the NRO exits
 target/release/kickstand put daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro /switch/kickstand/kickstand.nro
-claude mcp add kickstand -- "$PWD/target/release/kickstand" serve
+target/release/kickstand link code                # adds it to Claude Code ("desktop": Claude Desktop)
 ```
 Starting the sysmodule at boot (`boot2.flag`) is left to the user (`kickstand sysmodule enable`); the MCP
 tools never set it.
