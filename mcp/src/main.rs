@@ -79,9 +79,9 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         hold_ms: u32,
     },
-    /// Keep the screen on: "on" stops dimming and auto-sleep (also after reboots), "off" undoes it, no
-    /// argument reports it.
-    KeepAwake { state: Option<OnOff> },
+    /// Keep the screen on for MINUTES (max 480) with no requests coming in; 0 ends it now, no argument
+    /// reports what's left. Every request already keeps it on for 5 minutes.
+    KeepAwake { minutes: Option<u32> },
     /// Resource limit usage of the daemon's group (for the sysmodule: all system processes)
     Resources,
     /// Warm-reboot into hekate: TARGET is "menu", "ums", or a hekate entry name or number. Without
@@ -94,12 +94,6 @@ enum Command {
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
     Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum OnOff {
-    On,
-    Off,
 }
 
 #[derive(Subcommand)]
@@ -246,10 +240,7 @@ async fn main() -> Result<()> {
             client.press(buttons, times, hold_ms).await?;
             println!("pressed");
         }
-        Command::KeepAwake { state } => {
-            let on = client.keep_awake(state.map(|s| matches!(s, OnOff::On))).await?;
-            println!("keep awake: {}", if on { "on" } else { "off" });
-        }
+        Command::KeepAwake { minutes } => println!("{}", describe_keep_awake(client.keep_awake(minutes).await?)),
         Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
         Command::Exit => {
             client.exit().await?;
@@ -262,3 +253,10 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+fn describe_keep_awake(remaining_s: u64) -> String {
+    match remaining_s {
+        0 => "keep awake: off (the console's own dim and sleep timers apply)".into(),
+        s => format!("keep awake: {}m {}s left", s / 60, s % 60),
+    }
+}

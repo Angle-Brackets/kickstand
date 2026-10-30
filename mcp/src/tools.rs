@@ -129,9 +129,8 @@ pub struct PressArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct KeepAwakeArgs {
-    /// true keeps the screen on (no dimming, no auto-sleep, also after reboots); false restores normal
-    /// sleep; leave out to just ask.
-    pub on: Option<bool>,
+    /// Keep the screen on for this many minutes from now (max 480); 0 ends it now; leave out to just ask.
+    pub minutes: Option<u32>,
 }
 
 fn ok(text: String) -> CallToolResult {
@@ -169,7 +168,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen after a reboot (b three times; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. You can't see the screen yet, so say what you pressed.")]
+    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen (b three times; after an agent reboot to an entry the sysmodule does this itself; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. You can't see the screen yet, so say what you pressed.")]
     async fn press(&self, Parameters(args): Parameters<PressArgs>) -> CallToolResult {
         let result = async {
             let buttons = crate::client::parse_buttons(&args.buttons)?;
@@ -180,11 +179,11 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Keep the Switch's screen on while working unattended: stops dimming and auto-sleep by reporting user activity, and stays on across reboots (so the lock screen doesn't time out either) until turned off. Changes no system settings. It can't wake a console that is already asleep.")]
+    #[tool(description = "Keep the Switch's screen on (no dimming or auto-sleep) for a stretch with no other tool calls, e.g. while watching a game run. Every tool call already keeps it on for 5 minutes, after which the console's own timers apply again to save battery; call with minutes: 0 when done with a long stretch. Not kept across reboots; after a reboot to an entry, the sysmodule gets past the lock screen itself. Changes no system settings. It can't wake a console that is already asleep.")]
     async fn keep_awake(&self, Parameters(args): Parameters<KeepAwakeArgs>) -> CallToolResult {
         let result = async {
-            let on = self.client.keep_awake(args.on).await?;
-            anyhow::Ok(format!("keep awake is {}", if on { "on" } else { "off" }))
+            let s = self.client.keep_awake(args.minutes).await?;
+            anyhow::Ok(if s == 0 { "keep awake is off".to_string() } else { format!("screen stays on for {}m {}s", s / 60, s % 60) })
         };
         result.await.map_or_else(fail, ok)
     }

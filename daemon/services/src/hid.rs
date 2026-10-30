@@ -150,9 +150,14 @@ const SETTLE_NS: i64 = 1_000_000_000;
 /// Between a release and the next press.
 const GAP_NS: i64 = 150_000_000;
 
+/// One press sequence at a time (a client's and the boot unlock's), so only one virtual controller is ever
+/// attached.
+static PRESSING: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
+
 /// Attaches a virtual controller, presses `buttons` together `times` times (holding each `hold_ms`), and
 /// detaches it again.
 pub fn press(buttons: u64, times: u32, hold_ms: u32) -> Result<()> {
+    let _one_at_a_time = PRESSING.lock();
     let mut pad = VirtualController::attach()?;
     let _ = svc::sleep_thread(SETTLE_NS);
     for _ in 0..times {

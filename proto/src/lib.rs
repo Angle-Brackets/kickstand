@@ -72,7 +72,7 @@ pub mod hekate {
 }
 
 /// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -133,10 +133,11 @@ pub enum Request {
     /// attached for the call (about a second to settle, then the presses) and detached after. The lock
     /// screen wants the same button three times.
     Press { buttons: Vec<Button>, times: u8, hold_ms: u32 },
-    /// Keeps the screen from dimming and the console from auto-sleeping (by reporting user activity to
-    /// `idle:sys` every 20 s), saved across reboots in [`path::KEEP_AWAKE_FLAG`]. `None` only asks.
-    /// Answers [`Response::KeepAwake`].
-    KeepAwake { on: Option<bool> },
+    /// Keeps the screen from dimming and the console from auto-sleeping (reporting user activity to
+    /// `idle:sys` every 20 s) for `minutes` from now, at most 8 hours. Every request already keeps it awake
+    /// for 5 minutes, so this is for long stretches without requests (watching a game run). `Some(0)` ends
+    /// the lease; `None` only asks. Not saved: a reboot ends it. Answers [`Response::KeepAwake`].
+    KeepAwake { minutes: Option<u32> },
 }
 
 /// A controller button, for [`Request::Press`].
@@ -248,7 +249,8 @@ pub enum Response {
     Deleted { path: String, was_dir: bool },
     Sysmodule(SysmoduleStatus),
     Resources(Resources),
-    KeepAwake { on: bool },
+    /// Seconds left on the keep-awake lease, 0 if none.
+    KeepAwake { remaining_s: u64 },
     Error(Error),
 }
 

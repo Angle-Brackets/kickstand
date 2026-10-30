@@ -57,6 +57,20 @@ impl<'a> Session<'a> {
         match req {
             Request::Hello { version, token } => self.hello(version, &token),
             _ if !self.authed => Response::error(ErrorKind::Unauthorized, "send Hello with the token first"),
+            req => {
+                // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
+                // may be ending the lease.)
+                if !matches!(req, Request::KeepAwake { .. }) {
+                    crate::awake::extend(crate::awake::ACTIVITY_LEASE_MS);
+                }
+                self.handle_authed(req)
+            }
+        }
+    }
+
+    fn handle_authed(&mut self, req: Request) -> Response {
+        match req {
+            Request::Hello { .. } => unreachable!("handled above"),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: crate::uptime_ms() },
             Request::ListDir { path } => self.list_dir(&path),
             Request::Stat { path } => match path::check_read(&path) {
@@ -82,10 +96,7 @@ impl<'a> Session<'a> {
             Request::RebootToHekate { target } => self.reboot_to_hekate(target),
             Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
-            Request::KeepAwake { on } => match on.map(crate::awake::set) {
-                Some(Err(e)) => Response::Error(e),
-                _ => Response::KeepAwake { on: crate::awake::is_on() },
-            },
+            Request::KeepAwake { minutes } => keep_awake(minutes),
             Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
@@ -257,6 +268,12 @@ impl<'a> Session<'a> {
             DaemonKind::Nro => install_hekate(target).map(|()| AfterReply::Reboot),
             DaemonKind::Sysmodule => build_hekate(target).map(AfterReply::RebootDirect),
         };
+        // Booting straight back into an entry: have the sysmodule get past the lock screen when it's up.
+        // (After the menu or UMS, whoever picks what boots next is at the console.)
+        let next = next.and_then(|next| match target {
+            HekateTarget::Entry(_) => crate::awake::mark_agent_reboot().map(|()| next).map_err(Response::Error),
+            _ => Ok(next),
+        });
         match next {
             Ok(next) => {
                 crate::log!("rebooting to hekate: {target:?}");
@@ -301,6 +318,15 @@ impl Drop for Session<'_> {
 const MAX_HOLD_MS: u32 = 2_000;
 /// Most presses in one [`Request::Press`].
 const MAX_PRESSES: u8 = 10;
+
+fn keep_awake(minutes: Option<u32>) -> Response {
+    match minutes {
+        Some(0) => crate::awake::clear(),
+        Some(m) => crate::awake::extend((u64::from(m) * 60_000).min(crate::awake::MAX_LEASE_MS)),
+        None => {}
+    }
+    Response::KeepAwake { remaining_s: crate::awake::remaining_ms() / 1000 }
+}
 
 fn press(buttons: &[Button], times: u8, hold_ms: u32) -> Response {
     if buttons.is_empty() || times == 0 || times > MAX_PRESSES || hold_ms == 0 || hold_ms > MAX_HOLD_MS {

@@ -102,7 +102,7 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
             }
             Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
             Request::Press { .. } => Response::Ok,
-            Request::KeepAwake { on } => Response::KeepAwake { on: on.unwrap_or(false) },
+            Request::KeepAwake { minutes } => Response::KeepAwake { remaining_s: u64::from(minutes.unwrap_or(0)) * 60 },
             Request::Resources => Response::Resources(proto::Resources {
                 limits: vec![proto::ResourceUsage { name: "memory".into(), current: 1 << 20, peak: 1 << 20, limit: 8 << 20 }],
                 process_used: 1 << 20,

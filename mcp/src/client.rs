@@ -215,10 +215,10 @@ impl Client {
         expect(self.request(Request::Press { buttons, times, hold_ms }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
-    /// Turns keep-awake on or off (or with `None` just asks); returns whether it's on.
-    pub async fn keep_awake(&self, on: Option<bool>) -> Result<bool> {
-        match self.request(Request::KeepAwake { on }).await? {
-            Response::KeepAwake { on } => Ok(on),
+    /// Keeps the console awake for `minutes` (0 ends it; `None` just asks); returns the seconds left.
+    pub async fn keep_awake(&self, minutes: Option<u32>) -> Result<u64> {
+        match self.request(Request::KeepAwake { minutes }).await? {
+            Response::KeepAwake { remaining_s } => Ok(remaining_s),
             other => Err(unexpected(other)),
         }
     }

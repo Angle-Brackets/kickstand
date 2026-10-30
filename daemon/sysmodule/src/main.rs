@@ -27,6 +27,7 @@ fn main() {
     log!("kickstand daemon {} (sysmodule) starting", daemon_core::VERSION);
 
     daemon_core::awake::start();
+    daemon_core::awake::unlock_after_agent_reboot();
     let token = daemon_core::read_token_file();
     if token.is_none() {
         log!("no token in {}: every client will be refused", proto::path::TOKEN_PATH);

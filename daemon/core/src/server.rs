@@ -158,8 +158,10 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
                 let _ = svc::sleep_thread(500_000_000);
                 if let Err(rc) = services::power::reboot_to_payload() {
                     log!("reboot to payload failed: {rc}");
-                    // Don't leave the power menu's Restart pointed at our boot config.
+                    // Don't leave the power menu's Restart pointed at our boot config, or the next boot
+                    // (the user's) looking like the agent's.
                     let _ = crate::session::install_hekate(proto::HekateTarget::Menu);
+                    crate::awake::unmark_agent_reboot();
                 }
                 return;
             }
@@ -167,6 +169,7 @@ fn serve(stream: &TcpStream, config: &Config, frame: &mut Vec<u8>) {
                 let _ = svc::sleep_thread(500_000_000);
                 if let Err((step, err)) = services::power::reboot_to_payload_direct(&payload) {
                     log!("reboot to payload failed while {step}: {err:#x}");
+                    crate::awake::unmark_agent_reboot();
                 }
                 return;
             }
