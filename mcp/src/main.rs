@@ -10,6 +10,7 @@ mod launch;
 mod memory;
 mod mock;
 mod nxlink;
+mod pairing;
 mod project;
 mod symbolize;
 mod tools;
@@ -44,6 +45,15 @@ enum Command {
     Serve,
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
+    /// List the Switches running Kickstand on this network.
+    Discover {
+        /// Probe this address instead of broadcasting.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Pair with the Switch showing CODE (open Kickstand from hbmenu on it to see the code), and use it from
+    /// now on. Finds it on the network unless --host is given.
+    Pair { code: String },
     /// Check the daemon answers.
     Ping,
     /// List a directory on the SD card.
@@ -292,7 +302,14 @@ enum Command {
     },
     /// Serve a local directory as a fake SD card, for testing without the console.
     #[command(hide = true)]
-    Mock { root: PathBuf, #[arg(long, default_value = "127.0.0.1")] bind: String },
+    Mock {
+        root: PathBuf,
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Act as a console showing this pairing code.
+        #[arg(long)]
+        pair_code: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -336,14 +353,43 @@ async fn main() -> Result<()> {
             let (token, path) = config::ensure_token()?;
             println!("token: {token}");
             println!("saved in {}", path.display());
-            println!("on the SD card it goes in {} (just the token, one line)", proto::path::TOKEN_PATH);
+            println!("`kickstand pair <code>` sends it to a Switch; by hand, add it as a line of {} on the SD card", proto::path::TOKEN_PATH);
             return Ok(());
         }
-        Command::Mock { root, bind } => {
-            let token = config::load_token()?;
+        Command::Mock { root, bind, pair_code } => {
+            let tokens = config::load_token().ok().into_iter().collect();
             let listener = tokio::net::TcpListener::bind((bind.as_str(), cli.port)).await?;
-            eprintln!("mock daemon serving {} on {}", root.display(), listener.local_addr()?);
-            return mock::serve(listener, root, token).await;
+            let probes = tokio::net::UdpSocket::bind((bind.as_str(), proto::discovery::PORT)).await?;
+            eprintln!("mock daemon serving {} on {} (discovery on UDP {})", root.display(), listener.local_addr()?, probes.local_addr()?);
+            tokio::spawn(mock::answer_probes(probes, cli.port, pair_code.is_some()));
+            let console = mock::Console { root, tokens: std::sync::Mutex::new(tokens), pair_code };
+            return mock::serve_console(listener, Arc::new(console)).await;
+        }
+        Command::Discover { to } => {
+            let to = match to {
+                Some(host) => Some(format!("{host}:{}", proto::discovery::PORT).parse().context("--to takes an IPv4 address")?),
+                None => None,
+            };
+            let found = pairing::discover(pairing::DISCOVER_WAIT, to).await?;
+            if found.is_empty() {
+                println!("no Switch running Kickstand answered (is it on the same network as this PC?)");
+            }
+            for f in found {
+                let a = &f.announce;
+                let kind = match a.kind {
+                    proto::DaemonKind::Sysmodule => "background service",
+                    proto::DaemonKind::Nro => "on-screen app",
+                };
+                let pairing = if a.pairing { ", showing a pairing code" } else { "" };
+                println!("{}: Kickstand {} ({kind}, protocol {}){pairing}", f.describe(), a.daemon_version, a.protocol);
+            }
+            return Ok(());
+        }
+        Command::Pair { code } => {
+            let host = pairing::pick(cli.host.as_deref(), cli.port).await?;
+            let info = pairing::pair(&host, cli.port, &code).await?;
+            println!("paired with the Switch at {host} (Kickstand {}); this PC uses it from now on", info.version);
+            return Ok(());
         }
         _ => {}
     }
@@ -632,7 +678,9 @@ async fn main() -> Result<()> {
             client.exit().await?;
             println!("the NRO daemon is exiting");
         }
-        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } => unreachable!(),
+        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } | Command::Discover { .. } | Command::Pair { .. } => {
+            unreachable!()
+        }
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 //! Where the Switch's address and the shared token come from.
 //!
 //! - host: `--host`, then `$SWITCH_IP`, then `~/.config/kickstand/host`
-//! - token: `$KICKSTAND_TOKEN`, then `~/.config/kickstand/token` (created by `kickstand token`)
+//! - token: `$KICKSTAND_TOKEN`, then `~/.config/kickstand/token` (created by `kickstand pair` or `kickstand token`)
 //! - host title (the title Atmosphère starts hbmenu in place of, with full memory): `~/.config/kickstand/host-title`,
 //!   written by `kickstand hbmenu` as `<hex id> <name>`
 
@@ -27,6 +27,14 @@ pub fn host(arg: Option<String>) -> Result<String> {
         Ok(h) if !h.trim().is_empty() => Ok(h.trim().to_string()),
         _ => bail!("no Switch address: pass --host, set SWITCH_IP, or write it to {}", path.display()),
     }
+}
+
+/// Makes `host` the console to use (`~/.config/kickstand/host`).
+pub fn save_host(host: &str) -> Result<()> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("host"), format!("{host}\n"))?;
+    Ok(())
 }
 
 pub fn load_token() -> Result<String> {

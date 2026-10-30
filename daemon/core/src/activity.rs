@@ -46,7 +46,7 @@ pub fn clients() -> Vec<Client> {
 
 fn describe(req: &Request) -> &'static str {
     match req {
-        Request::Hello { .. } => "connecting",
+        Request::Hello { .. } | Request::Pair { .. } => "connecting",
         Request::Ping { .. } | Request::Status | Request::AppStatus | Request::AppletStatus | Request::FatalReports => {
             "checking on the console"
         }

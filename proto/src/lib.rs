@@ -26,8 +26,10 @@
 extern crate alloc;
 
 pub mod crc32;
+pub mod discovery;
 pub mod hbl;
 pub mod path;
+pub mod tokens;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -88,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -217,6 +219,24 @@ pub enum Request {
     /// (20) Pauses the running application (or with [`Request::MemoryTarget`], the applet) for a moment
     /// and returns each thread's registers and frame-pointer backtrace. Answers [`Response::Threads`].
     Threads,
+    /// (21) In place of [`Request::Hello`] on a PC that has no token for this console yet: `code` is the
+    /// pairing code the console shows ([`PAIR_CODE_LEN`] digits), and `token` the PC's own token, which
+    /// the console then accepts from now on. Only the on-console screen (the NRO) pairs, as only it shows
+    /// a code. Answers [`Response::Hello`], and the connection is authenticated as after Hello.
+    Pair { version: u32, code: String, token: String },
+}
+
+/// Digits in a pairing code.
+pub const PAIR_CODE_LEN: usize = 6;
+/// Wrong codes in a row after which the console shows a new one.
+pub const PAIR_MAX_TRIES: u32 = 5;
+/// Most tokens a console keeps (one per paired PC).
+pub const MAX_TOKENS: usize = 16;
+
+/// Whether `token` may be stored: 16 to 128 ASCII letters, digits, `-` or `_` (one per line in
+/// [`path::TOKEN_PATH`]).
+pub fn valid_token(token: &str) -> bool {
+    (16..=128).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
@@ -630,6 +650,7 @@ mod tests {
                 Request::HblOverride { .. } => 34,
                 Request::FatalReports => 35,
                 Request::Threads => 36,
+                Request::Pair { .. } => 37,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -694,6 +715,7 @@ mod tests {
             Request::HblOverride { program_id: 0 },
             Request::FatalReports,
             Request::Threads,
+            Request::Pair { version: 0, code: s(), token: s() },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");

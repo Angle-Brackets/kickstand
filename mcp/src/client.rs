@@ -18,7 +18,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// ~1.5 MB/s over Wi-Fi; keeping several queued overlaps the network with the console's SD access.
 const PIPELINE_DEPTH: usize = 4;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DaemonInfo {
     pub version: String,
     /// The daemon's [`PROTOCOL_VERSION`].
@@ -207,10 +207,24 @@ impl Client {
         }
     }
 
-    /// Installs the sysmodule (`exefs.nsp`) and this client's token, which the sysmodule reads at start.
-    /// Doesn't create `boot2.flag`, so it won't start at boot.
+    /// Installs the sysmodule (`exefs.nsp`) and makes sure the token file, which it reads at start, has this
+    /// client's token (other paired PCs' tokens stay). Doesn't create `boot2.flag`, so it won't start at boot.
     pub async fn install_sysmodule(&self, nsp: &[u8]) -> Result<UploadStats> {
-        self.upload(proto::path::TOKEN_PATH, format!("{}\n", self.token).as_bytes()).await?;
+        let path = proto::path::TOKEN_PATH;
+        let existing = match self.read(path, 0, 16 * 1024).await {
+            Ok((data, _)) => String::from_utf8(data).with_context(|| format!("{path} isn't text"))?,
+            Err(e) if format!("{e:#}").contains("NotFound") => String::new(),
+            Err(e) => return Err(e.context(format!("reading {path}"))),
+        };
+        // Tokens older than the pairing rules are kept as they were.
+        let updated = match proto::tokens::add(&existing, &self.token, "installed the sysmodule") {
+            Ok(updated) => updated,
+            Err(_) if proto::tokens::parse(&existing).contains(&self.token.as_str()) => None,
+            Err(e) => bail!("can't add this PC's token to {path}: {e:?}"),
+        };
+        if let Some(text) = updated {
+            self.upload(path, text.as_bytes()).await?;
+        }
         self.upload(proto::path::SYSMODULE_NSP, nsp).await
     }
 
@@ -510,14 +524,43 @@ impl Client {
     }
 
     async fn connect(&self) -> Result<Conn> {
+        self.connect_with(Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() }).await
+    }
+
+    /// Pairs this PC with the console: `code` is the pairing code on its screen, and this client's token
+    /// becomes one the console accepts. The connection stays open, authenticated.
+    pub async fn pair(&self, code: &str) -> Result<DaemonInfo> {
+        let mut guard = self.conn.lock().await;
+        let pair = Request::Pair { version: PROTOCOL_VERSION, code: code.trim().replace(' ', ""), token: self.token.clone() };
+        let conn = self.connect_with(pair).await.map_err(|e| {
+            let text = format!("{e:#}");
+            if text.contains("Unsupported") {
+                anyhow!(
+                    "the console isn't pairing: open Kickstand from hbmenu on the Switch (its screen shows the code), and update Kickstand there if it's older than this ({text})"
+                )
+            } else if text.contains("Unauthorized") {
+                anyhow!(
+                    "wrong pairing code: check the one on the Switch's screen (after {} wrong codes it shows a new one)",
+                    proto::PAIR_MAX_TRIES
+                )
+            } else {
+                e
+            }
+        })?;
+        let info = conn.info.clone();
+        *guard = Some(conn);
+        Ok(info)
+    }
+
+    /// Connects and sends `first` (Hello or Pair), which the daemon answers with its Hello.
+    async fn connect_with(&self, first: Request) -> Result<Conn> {
         let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&self.addr))
             .await
             .map_err(|_| anyhow!("timed out connecting to the daemon at {}", self.addr))?
             .with_context(|| format!("connecting to the daemon at {}", self.addr))?;
         stream.set_nodelay(true)?;
         let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro } };
-        let hello = Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() };
-        match round_trip(&mut conn, &hello).await? {
+        match round_trip(&mut conn, &first).await? {
             Response::Hello { version, .. } if !proto::compatible(version) => Err(anyhow!(
                 "the daemon speaks protocol {version}, older than {} (the oldest this client talks to): install a newer sysmodule",
                 proto::MIN_COMPATIBLE_VERSION

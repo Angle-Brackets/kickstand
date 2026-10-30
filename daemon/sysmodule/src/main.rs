@@ -40,20 +40,17 @@ fn main() {
     daemon_core::awake::unlock_after_agent_reboot();
     daemon_core::hbl::disarm_leftover();
     indicator::start();
-    let token = daemon_core::read_token_file();
-    if token.is_none() {
-        log!("no token in {}: every client will be refused", proto::path::TOKEN_PATH);
+    if daemon_core::tokens::load(None) == 0 {
+        log!("no tokens in {}: pair a PC through the Kickstand NRO", proto::path::TOKEN_PATH);
     }
     while let Err(rc) = server::init_sockets(DaemonKind::Sysmodule) {
         log!("socket init failed: {rc}; retrying");
         let _ = svc::sleep_thread(5_000_000_000);
     }
     // Client threads borrow the config for as long as the process lives.
-    let token = token.map(|t| &*alloc::boxed::Box::leak(t.into_boxed_str()));
     server::run(alloc::boxed::Box::leak(alloc::boxed::Box::new(Config {
         kind: DaemonKind::Sysmodule,
         port: proto::DEFAULT_PORT,
-        token,
         idle_timeout_ms: 120_000,
         stop: None,
     })));

@@ -11,9 +11,11 @@ pub mod awake;
 pub mod fatal;
 pub mod hbl;
 pub mod log;
+pub mod pairing;
 pub mod sd;
 pub mod server;
 pub mod session;
+pub mod tokens;
 pub mod tray;
 
 pub use proto::DaemonKind;
@@ -39,9 +41,3 @@ pub fn sd_mount() -> nx::result::Result<()> {
     sd::mount()
 }
 
-/// Reads the shared token from [`proto::path::TOKEN_PATH`], ignoring surrounding whitespace.
-pub fn read_token_file() -> Option<alloc::string::String> {
-    let (data, _) = sd::read(proto::path::TOKEN_PATH, 0, 256).ok()?;
-    let token = core::str::from_utf8(&data).ok()?.trim();
-    (!token.is_empty()).then(|| alloc::string::String::from(token))
-}

@@ -47,7 +47,8 @@ pub const STAGING_DIR: &str = "/kickstand/staging";
 /// screen. A boot without it (the user's own) is left alone.
 pub const AGENT_REBOOT_FLAG: &str = "/kickstand/agent-reboot.flag";
 
-/// Where the daemon reads its shared token from.
+/// The tokens the daemon accepts, one per line (blank lines and `#` comments ignored): written by hand
+/// or by pairing ([`crate::Request::Pair`]).
 pub const TOKEN_PATH: &str = "/kickstand/token.txt";
 
 /// Top-level directories that are never read: NAND images and backups, and Nintendo's own content.

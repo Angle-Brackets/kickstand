@@ -34,10 +34,14 @@ cd daemon && cargo nx build --release -p kickstand-nro   # kickstand.nro (first 
 ```
 
 ## Set up
+Copy `kickstand.nro` to `/switch/kickstand/` on the SD card and open it from hbmenu. Its screen shows a
+pairing code; on a PC on the same Wi-Fi:
 ```sh
-target/release/kickstand token                  # create the shared token (~/.config/kickstand/token)
-echo 192.168.x.y > ~/.config/kickstand/host     # or pass --host / set SWITCH_IP
-scripts/run-daemon-nro.sh                        # first time: start the NRO daemon through hbmenu's NetLoader
+target/release/kickstand discover               # the Switches running Kickstand on this network
+target/release/kickstand pair 482913            # finds the one showing a code, pairs, saves its address
+```
+Then install the background service:
+```sh
 target/release/kickstand sysmodule install daemon/target/aarch64-nintendo-switch-freestanding/release/sys-kickstand.nsp
 target/release/kickstand sysmodule handover      # start the sysmodule; the NRO exits
 target/release/kickstand put daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro /switch/kickstand/kickstand.nro

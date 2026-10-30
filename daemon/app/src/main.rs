@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The daemon as an NRO. Start it with nxlink, passing the token as an argument:
-//! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`. Press + on the console to exit.
-//! Without `--token` it uses `/kickstand/token.txt` like the sysmodule does. A client's `Exit` request
-//! also ends it. The screen shows whether an agent is connected and what it's doing, how to reach the
+//! The daemon as an NRO, opened from hbmenu (or nxlink, which can add a token:
+//! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`). It accepts the tokens in
+//! `/kickstand/token.txt` like the sysmodule, and pairs new PCs with the code it shows. Press + on the
+//! console to exit; a client's `Exit` request also ends it. The screen shows whether an agent is connected and what it's doing, how to reach the
 //! console, and the daemon's log. Leaving with + restarts the sysmodule it stopped (or one set to start at
 //! boot), so the console isn't left without Kickstand.
 //!
@@ -46,11 +46,10 @@ fn main() {
     }
     // No keep-awake thread here: it never ends, and hbloader would keep running it after this NRO exits.
 
-    let token = token_arg().or_else(daemon_core::read_token_file);
-    let has_token = token.is_some();
-    if token.is_none() {
-        log!("no token: pass --token <t> or create {}", proto::path::TOKEN_PATH);
+    if daemon_core::tokens::load(token_arg().as_deref()) == 0 {
+        log!("not paired with any PC yet");
     }
+    daemon_core::pairing::start();
     log!("kickstand daemon {} (NRO)", daemon_core::VERSION);
     // The sysmodule would hold the port; this NRO takes over until a client asks for a handover.
     let mut stopped_sysmodule = false;
@@ -69,18 +68,16 @@ fn main() {
         .stack_size(0x10000)
         .spawn(move || {
             // Client threads borrow the config; it lives until the process exits.
-            let token = token.map(|t| &*alloc::boxed::Box::leak(t.into_boxed_str()));
             server::run(alloc::boxed::Box::leak(alloc::boxed::Box::new(Config {
                 kind: DaemonKind::Nro,
                 port: proto::DEFAULT_PORT,
-                token,
                 idle_timeout_ms: 120_000,
                 stop: Some(&STOP),
             })))
         })
         .unwrap();
 
-    if run_screen(has_token) {
+    if run_screen() {
         log!("+ pressed");
         if stopped_sysmodule || BOOT2.load(Ordering::Relaxed) {
             daemon_core::HANDOVER_REQUESTED.store(true, Ordering::Relaxed);
@@ -126,7 +123,7 @@ fn token_arg() -> Option<String> {
 static BOOT2: AtomicBool = AtomicBool::new(false);
 
 /// Shows the status screen until + is pressed (true) or a client asks the daemon to exit.
-fn run_screen(has_token: bool) -> bool {
+fn run_screen() -> bool {
     let styles = hid::NpadStyleTag::FullKey()
         | hid::NpadStyleTag::Handheld()
         | hid::NpadStyleTag::JoyDual()
@@ -134,7 +131,7 @@ fn run_screen(has_token: bool) -> bool {
         | hid::NpadStyleTag::JoyRight();
     let ctx = input::Context::new(styles, 1).unwrap();
     let mut players = [ctx.get_player(hid::NpadIdType::No1), ctx.get_player(hid::NpadIdType::Handheld)];
-    let mut screen = screen::Screen::new(has_token);
+    let mut screen = screen::Screen::new();
     while !STOP.load(Ordering::Relaxed) {
         let mut down = hid::NpadButton::from(0);
         for p in &mut players {

@@ -11,8 +11,9 @@ use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use nx::result::Result;
-use nx::socket::net::traits::SocketCommon;
+use nx::socket::net::traits::{Pollable, SocketCommon};
 use nx::socket::net::{TcpListener, TcpStream, UdpSocket, poll};
+use proto::discovery;
 use nx::socket::{BsdServiceConfig, BsdSrvkind, Paralellism, PollFlags};
 use nx::svc;
 use nx::thread;
@@ -24,8 +25,6 @@ use crate::session::{AfterReply, Session};
 pub struct Config<'a> {
     pub kind: DaemonKind,
     pub port: u16,
-    /// Shared secret clients must send in Hello. `None` refuses every client.
-    pub token: Option<&'a str>,
     /// Drop a client that sends nothing for this long, so a vanished PC can't hold the only slot.
     pub idle_timeout_ms: i32,
     /// When set, the server returns soon after this becomes true (the NRO build's exit button), and sets
@@ -161,6 +160,7 @@ pub fn run(config: &'static Config<'static>) {
             }
         }
     }
+    let nickname = nickname();
     while !stopped(config) {
         let listener = match TcpListener::bind(Ipv4Addr::UNSPECIFIED, config.port) {
             Ok(l) => l,
@@ -176,10 +176,20 @@ pub fn run(config: &'static Config<'static>) {
             Some(ip) => log!("listening on {ip}:{}", config.port),
             None => log!("listening on port {} (no network address yet)", config.port),
         }
+        // Without it the console just can't be found; connecting by address still works.
+        let probes = UdpSocket::bind(Ipv4Addr::UNSPECIFIED, Some(discovery::PORT))
+            .map_err(|rc| log!("discovery off: binding UDP {} failed: {rc}", discovery::PORT))
+            .ok();
         loop {
-            match wait_readable(&listener, None, config) {
-                Ok(true) => {}
-                Ok(false) => break,
+            match wait_client_or_probe(&listener, probes.as_ref(), config) {
+                Ok(Some(Ready::Client)) => {}
+                Ok(Some(Ready::Probe)) => {
+                    if let Some(probes) = &probes {
+                        answer_probe(probes, config, &nickname);
+                    }
+                    continue;
+                }
+                Ok(None) => break,
                 Err(rc) => {
                     log!("poll on listener failed: {rc}");
                     break;
@@ -220,7 +230,7 @@ fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
     while !stopped(config) {
         let Some((stream, who)) = mailbox.take(timeout_ns) else { continue };
         crate::activity::connected(slot, who.0);
-        serve(&stream, config, slot);
+        serve(&stream, config, slot, who.0);
         crate::activity::disconnected(slot);
         drop(stream);
         log!("client {}:{} disconnected", who.0, who.1);
@@ -228,8 +238,8 @@ fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
     }
 }
 
-fn serve(stream: &TcpStream, config: &Config, slot: usize) {
-    let mut session = Session::new(config.token, config.kind, slot);
+fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
+    let mut session = Session::new(config.kind, slot, who);
     let mut frame = Vec::new();
     loop {
         match wait_readable(stream, Some(config.idle_timeout_ms), config) {
@@ -298,6 +308,62 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize) {
 }
 
 /// Waits until `fd` is readable. Returns `Ok(false)` on timeout or when the server is stopping.
+enum Ready {
+    Client,
+    Probe,
+}
+
+/// Waits for a connection on `listener` or a datagram on `probes`; `None` once the server is stopping.
+fn wait_client_or_probe(listener: &TcpListener, probes: Option<&UdpSocket>, config: &Config) -> Result<Option<Ready>> {
+    let mut fds = alloc::vec![(RawFd(listener.get_poll_fd()), PollFlags::PollIn())];
+    fds.extend(probes.map(|p| (RawFd(p.get_poll_fd()), PollFlags::PollIn())));
+    let step = config.stop.is_some().then_some(STOP_CHECK_MS);
+    loop {
+        if stopped(config) {
+            return Ok(None);
+        }
+        let mut ready = poll(&fds, step)?.map(|(i, _)| i).collect::<Vec<_>>();
+        // A waiting client first; the probe is still there next time.
+        ready.sort_unstable();
+        match ready.first() {
+            Some(0) => return Ok(Some(Ready::Client)),
+            Some(_) => return Ok(Some(Ready::Probe)),
+            None => {}
+        }
+    }
+}
+
+/// Answers one discovery probe ([`proto::discovery`]) with where and what this daemon is.
+fn answer_probe(probes: &UdpSocket, config: &Config, nickname: &str) {
+    let mut buf = [0u8; discovery::MAX_DATAGRAM];
+    let Ok((len, ip, port)) = probes.recv_from(&mut buf) else { return };
+    let Some(probe) = discovery::decode_probe(&buf[..len]) else { return };
+    let announce = discovery::Announce {
+        nonce: probe.nonce,
+        protocol: proto::PROTOCOL_VERSION,
+        daemon_version: alloc::string::String::from(crate::VERSION),
+        kind: config.kind,
+        port: config.port,
+        nickname: alloc::string::String::from(nickname),
+        pairing: crate::pairing::code().is_some(),
+    };
+    if let Err(rc) = probes.send_to(&discovery::encode_announce(&announce), (ip, port)) {
+        log!("answering a discovery probe from {ip} failed: {rc}");
+    }
+}
+
+/// The console's nickname, cut to what an announce carries.
+fn nickname() -> alloc::string::String {
+    let mut name = services::set::nickname().unwrap_or_else(|rc| {
+        log!("no console nickname ({rc})");
+        alloc::string::String::new()
+    });
+    while name.len() > discovery::MAX_NICKNAME {
+        name.pop();
+    }
+    name
+}
+
 fn wait_readable<P: nx::socket::net::traits::Pollable>(
     fd: &P,
     timeout_ms: Option<i32>,

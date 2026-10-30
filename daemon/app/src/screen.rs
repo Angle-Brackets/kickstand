@@ -80,7 +80,6 @@ pub struct Screen {
     /// `None` if the display couldn't be set up; the daemon still runs, just without a picture.
     canvas: Option<CanvasManager<RGBA8>>,
     fonts: Option<Fonts>,
-    has_token: bool,
     log: VecDeque<String>,
     /// Lines scrolled back from the newest.
     scroll: usize,
@@ -90,7 +89,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(has_token: bool) -> Self {
+    pub fn new() -> Self {
         // With vi:m the layer can join the screenshot stack, so the agent's screenshots show this screen too.
         let canvas = layer(gpu::ViServiceKind::Manager)
             .map(|mut c| {
@@ -111,7 +110,6 @@ impl Screen {
         Screen {
             canvas,
             fonts,
-            has_token,
             log: VecDeque::new(),
             scroll: 0,
             checks: Checks::default(),
@@ -162,7 +160,8 @@ impl Screen {
         };
         let view = View {
             fonts: self.fonts.as_ref(),
-            has_token: self.has_token,
+            has_token: daemon_core::tokens::any(),
+            pair_code: daemon_core::pairing::code(),
             checks: &self.checks,
             clients: activity::clients(),
             log: &self.log,
@@ -202,6 +201,8 @@ fn load_fonts() -> Result<Fonts, String> {
 struct View<'a> {
     fonts: Option<&'a Fonts>,
     has_token: bool,
+    /// The pairing code, as digits.
+    pair_code: Option<String>,
     checks: &'a Checks,
     clients: Vec<Client>,
     log: &'a VecDeque<String>,
@@ -255,11 +256,17 @@ impl View<'_> {
         } else if !self.has_token {
             (
                 RED,
-                "Not set up yet".into(),
-                alloc::vec![
-                    ("There's no access token, so no agent can connect.".into(), TEXT),
-                    ("On your PC, run  kickstand token  and follow what it says.".into(), MUTED),
-                ],
+                "Pair a PC to start".into(),
+                match &self.pair_code {
+                    Some(code) => alloc::vec![
+                        (format!("Pairing code:  {}", spaced(code)), TEXT),
+                        (format!("On your PC, on the same Wi-Fi, run  kickstand pair {code}"), MUTED),
+                    ],
+                    None => alloc::vec![
+                        ("No PC is paired yet, and pairing isn't available.".into(), TEXT),
+                        (format!("Put a token in {} on the SD card instead.", proto::path::TOKEN_PATH), MUTED),
+                    ],
+                },
             )
         } else if self.checks.ip.is_none() {
             (
@@ -277,7 +284,7 @@ impl View<'_> {
                 "Ready for your agent".into(),
                 alloc::vec![
                     ("Nothing is connected right now.".into(), TEXT),
-                    (format!("Kickstand on your PC connects to {ip}."), MUTED),
+                    (format!("Your PC must be on the same Wi-Fi to reach {ip}."), MUTED),
                 ],
             )
         };
@@ -309,10 +316,12 @@ impl View<'_> {
             (true, false) => ("Installed, off at boot", AMBER),
             (false, _) => ("Not installed", MUTED),
         };
-        let rows: [(&str, String, RGBA8); 4] = [
+        let paired = if self.has_token { ("Paired", GREEN) } else { ("Not yet", AMBER) };
+        let rows: [(&str, String, RGBA8); 5] = [
             ("Address", ip.clone().unwrap_or_else(|| "No network".into()), if ip.is_some() { TEXT } else { AMBER }),
             ("Port", format!("{}", proto::DEFAULT_PORT), TEXT),
-            ("Token", if self.has_token { "Set".into() } else { "Missing".into() }, if self.has_token { GREEN } else { RED }),
+            ("Paired", paired.0.into(), paired.1),
+            ("Pairing code", self.pair_code.as_deref().map_or_else(|| "Off".into(), spaced), TEXT),
             ("Service", service.0.into(), service.1),
         ];
         let mut row_y = y + PAD + 34;
@@ -320,9 +329,6 @@ impl View<'_> {
             p.text(label, 15.0, x + PAD, row_y, MUTED);
             p.text_right(&value, 15.0, x + w - PAD, row_y, color);
             row_y += 36;
-        }
-        if self.checks.installed {
-            p.text("The service is paused while this screen is open.", 11.0, x + PAD, y + h - PAD - 14, MUTED);
         }
     }
 
@@ -363,6 +369,12 @@ impl View<'_> {
         x -= p.button_width(GLYPH_UP, "^", 15.0);
         p.button(GLYPH_UP, "^", 15.0, x, y, TEXT);
     }
+}
+
+/// `482913` as `482 913`, easier to read off the screen.
+fn spaced(code: &str) -> String {
+    let (head, tail) = code.split_at(code.len() / 2);
+    format!("{head} {tail}")
 }
 
 /// A log line's `seconds.millis` since boot as `h:mm:ss`.

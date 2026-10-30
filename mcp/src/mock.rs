@@ -4,6 +4,7 @@
 //! It is not a model of the console's quirks (FS result codes, memory limits, timing).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use proto::path;
@@ -11,11 +12,43 @@ use proto::{DaemonKind, DirEntry, Error, ErrorKind, PROTOCOL_VERSION, Request, R
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// The mock console: its "SD card", the tokens it accepts, and the pairing code its screen shows, if any.
+pub struct Console {
+    pub root: PathBuf,
+    pub tokens: Mutex<Vec<String>>,
+    pub pair_code: Option<String>,
+}
+
+#[cfg(test)]
 pub async fn serve(listener: TcpListener, root: PathBuf, token: String) -> Result<()> {
+    serve_console(listener, Arc::new(Console { root, tokens: Mutex::new(vec![token]), pair_code: None })).await
+}
+
+pub async fn serve_console(listener: TcpListener, console: Arc<Console>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         // One client at a time, like the daemon.
-        let _ = handle(stream, &root, &token).await;
+        let _ = handle(stream, &console).await;
+    }
+}
+
+/// Answers discovery probes on `socket` like the daemon, pointing at TCP `port`.
+pub async fn answer_probes(socket: tokio::net::UdpSocket, port: u16, pairing: bool) -> Result<()> {
+    use proto::discovery;
+    let mut buf = [0u8; discovery::MAX_DATAGRAM];
+    loop {
+        let (len, from) = socket.recv_from(&mut buf).await?;
+        let Some(probe) = discovery::decode_probe(&buf[..len]) else { continue };
+        let announce = discovery::Announce {
+            nonce: probe.nonce,
+            protocol: PROTOCOL_VERSION,
+            daemon_version: "mock".into(),
+            kind: DaemonKind::Nro,
+            port,
+            nickname: "Mock Switch".into(),
+            pairing,
+        };
+        socket.send_to(&discovery::encode_announce(&announce), from).await?;
     }
 }
 
@@ -48,7 +81,8 @@ struct Upload {
     size: u64,
 }
 
-async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
+async fn handle(mut stream: TcpStream, console: &Console) -> Result<()> {
+    let root = console.root.as_path();
     let mut authed = false;
     let mut upload: Option<Upload> = None;
     let mut memory = mock_memory();
@@ -67,13 +101,27 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
             Request::Hello { version, token: t } => {
                 if !proto::compatible(version) {
                     Response::error(ErrorKind::VersionMismatch, "version")
-                } else if t != token {
+                } else if !console.tokens.lock().unwrap().iter().any(|known| proto::tokens::same(known, &t)) {
                     Response::error(ErrorKind::Unauthorized, "wrong token")
                 } else {
                     authed = true;
                     Response::Hello { version: PROTOCOL_VERSION, daemon_version: "mock".into(), kind: DaemonKind::Nro }
                 }
             }
+            Request::Pair { version, code, token } => match &console.pair_code {
+                _ if !proto::compatible(version) => Response::error(ErrorKind::VersionMismatch, "version"),
+                None => Response::error(ErrorKind::Unsupported, "not pairing"),
+                Some(shown) if !proto::tokens::same(shown, &code) => Response::error(ErrorKind::Unauthorized, "wrong code"),
+                Some(_) if !proto::valid_token(&token) => Response::error(ErrorKind::BadRequest, "bad token"),
+                Some(_) => {
+                    let mut tokens = console.tokens.lock().unwrap();
+                    if !tokens.contains(&token) {
+                        tokens.push(token);
+                    }
+                    authed = true;
+                    Response::Hello { version: PROTOCOL_VERSION, daemon_version: "mock".into(), kind: DaemonKind::Nro }
+                }
+            },
             _ if !authed => Response::error(ErrorKind::Unauthorized, "send Hello first"),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },
             Request::ListDir { path } => match path::check_read(&path) {

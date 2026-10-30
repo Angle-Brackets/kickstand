@@ -27,8 +27,7 @@ struct Upload {
     crc: u32,
 }
 
-pub struct Session<'a> {
-    token: Option<&'a str>,
+pub struct Session {
     /// Where this connection stages uploads before renaming them over the target, one file per client
     /// slot so concurrent clients don't collide.
     staging: String,
@@ -42,6 +41,8 @@ pub struct Session<'a> {
     screenshot: Option<alloc::vec::Vec<u8>>,
     /// The server's client slot, for [`crate::activity`].
     slot: usize,
+    /// The client's address, for the log.
+    who: core::net::Ipv4Addr,
 }
 
 /// Something to do once the current reply has been sent.
@@ -54,12 +55,12 @@ pub enum AfterReply {
     RebootDirect(Box<[u8; MAX_PAYLOAD_SIZE]>),
 }
 
-impl<'a> Session<'a> {
-    /// `token` is the shared secret clients must present; with `None` every Hello is refused. `slot`
-    /// (below [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
-    pub fn new(token: Option<&'a str>, kind: DaemonKind, slot: usize) -> Self {
+impl Session {
+    /// Clients present a token from [`crate::tokens`], or pair. `slot` (below
+    /// [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
+    pub fn new(kind: DaemonKind, slot: usize, who: core::net::Ipv4Addr) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { token, kind, slot, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
+        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -70,6 +71,7 @@ impl<'a> Session<'a> {
     pub fn handle(&mut self, req: Request) -> Response {
         match req {
             Request::Hello { version, token } => self.hello(version, &token),
+            Request::Pair { version, code, token } => self.pair(version, &code, &token),
             _ if !self.authed => Response::error(ErrorKind::Unauthorized, "send Hello with the token first"),
             req => {
                 crate::activity::request(self.slot, &req);
@@ -85,7 +87,7 @@ impl<'a> Session<'a> {
 
     fn handle_authed(&mut self, req: Request) -> Response {
         match req {
-            Request::Hello { .. } => unreachable!("handled above"),
+            Request::Hello { .. } | Request::Pair { .. } => unreachable!("handled above"),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: crate::uptime_ms() },
             Request::ListDir { path } => self.list_dir(&path),
             Request::Stat { path } => match path::check_read(&path) {
@@ -152,16 +154,30 @@ impl<'a> Session<'a> {
 
     fn hello(&mut self, version: u32, token: &str) -> Response {
         if !proto::compatible(version) {
-            let msg = format!("client protocol {version} is older than {}, the oldest this daemon (protocol {PROTOCOL_VERSION}) talks to: update the client", proto::MIN_COMPATIBLE_VERSION);
-            return Response::error(ErrorKind::VersionMismatch, msg);
+            return too_old(version);
         }
-        let Some(expected) = self.token else {
-            let msg = format!("no token configured: put one in {}", path::TOKEN_PATH);
+        if !crate::tokens::any() {
+            let msg = format!("this console isn't paired with any PC: open Kickstand from hbmenu on it and pair, or put a token in {}", path::TOKEN_PATH);
             return Response::error(ErrorKind::Unauthorized, msg);
-        };
-        if !constant_time_eq(expected.as_bytes(), token.as_bytes()) {
-            return Response::error(ErrorKind::Unauthorized, "wrong token");
         }
+        if !crate::tokens::accepts(token) {
+            return Response::error(ErrorKind::Unauthorized, "wrong token (pair this PC again)");
+        }
+        self.welcome()
+    }
+
+    fn pair(&mut self, version: u32, code: &str, token: &str) -> Response {
+        if !proto::compatible(version) {
+            return too_old(version);
+        }
+        let who = format!("{}", self.who);
+        match crate::pairing::pair(code, token, &who) {
+            Ok(()) => self.welcome(),
+            Err(e) => Response::Error(e),
+        }
+    }
+
+    fn welcome(&mut self) -> Response {
         self.authed = true;
         Response::Hello { version: PROTOCOL_VERSION, daemon_version: String::from(crate::VERSION), kind: self.kind }
     }
@@ -375,7 +391,7 @@ impl<'a> Session<'a> {
     }
 }
 
-impl Drop for Session<'_> {
+impl Drop for Session {
     fn drop(&mut self) {
         self.abort_upload();
     }
@@ -744,6 +760,10 @@ fn forbidden(e: PathError) -> Response {
     Response::error(kind, e.describe())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+fn too_old(version: u32) -> Response {
+    let msg = format!(
+        "client protocol {version} is older than {}, the oldest this daemon (protocol {PROTOCOL_VERSION}) talks to: update the client",
+        proto::MIN_COMPATIBLE_VERSION
+    );
+    Response::error(ErrorKind::VersionMismatch, msg)
 }

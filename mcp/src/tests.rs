@@ -7,6 +7,11 @@ use crate::client::Client;
 use crate::mock;
 
 async fn start(token: &str) -> (Arc<Client>, std::path::PathBuf) {
+    start_with("tok", token).await
+}
+
+/// A mock accepting `accepted`, and a client presenting `token`.
+async fn start_with(accepted: &str, token: &str) -> (Arc<Client>, std::path::PathBuf) {
     // Tests run in parallel, so each gets its own fake SD card.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -17,7 +22,7 @@ async fn start(token: &str) -> (Arc<Client>, std::path::PathBuf) {
     std::fs::write(root.join("prod.keys"), "secret").unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(mock::serve(listener, root.clone(), "tok".into()));
+    tokio::spawn(mock::serve(listener, root.clone(), accepted.into()));
     (Arc::new(Client::new(addr, token.into())), root)
 }
 
@@ -85,12 +90,20 @@ async fn delete_files_and_dirs() {
 
 #[tokio::test]
 async fn sysmodule_install_and_status() {
-    let (client, root) = start("tok").await;
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let (client, root) = start_with(TOKEN, TOKEN).await;
+    let tokens = root.join(&proto::path::TOKEN_PATH[1..]);
+    std::fs::create_dir_all(tokens.parent().unwrap()).unwrap();
+    std::fs::write(&tokens, "# paired: 10.0.0.2\nfedcba9876543210fedcba9876543210\n").unwrap();
     let status = client.sysmodule(proto::Request::SysmoduleStatus).await.unwrap();
     assert!(!status.installed && !status.boot2 && status.pid.is_none());
     client.install_sysmodule(b"NSP0").await.unwrap();
     assert_eq!(std::fs::read(root.join(&proto::path::SYSMODULE_NSP[1..])).unwrap(), b"NSP0");
-    assert_eq!(std::fs::read_to_string(root.join(&proto::path::TOKEN_PATH[1..])).unwrap(), "tok\n");
+    // Added to the other PC's token, not over it; a second install changes nothing.
+    let expected = format!("# paired: 10.0.0.2\nfedcba9876543210fedcba9876543210\n# paired: installed the sysmodule\n{TOKEN}\n");
+    assert_eq!(std::fs::read_to_string(&tokens).unwrap(), expected);
+    client.install_sysmodule(b"NSP0").await.unwrap();
+    assert_eq!(std::fs::read_to_string(&tokens).unwrap(), expected);
     let status = client.sysmodule(proto::Request::SysmoduleStatus).await.unwrap();
     assert!(status.installed && !status.boot2);
     assert!(client.set_boot2(true).await.unwrap().boot2);
@@ -341,4 +354,52 @@ async fn games_refuse_applet_mode() {
     assert!(err.to_string().contains("full memory only"), "{err}");
     let local = Program::Local { nro: vec![0; 16], dest: "/switch/kickstand/paperboat.nro".into() };
     assert!(run_nro(&client, local, Vec::new(), Mode::Applet).await.is_err());
+}
+
+/// A mock console showing pairing code 123456 and answering probes; returns its daemon and probe addresses.
+async fn start_pairing() -> (String, std::net::SocketAddr) {
+    let root = std::env::temp_dir().join(format!("kickstand-pair-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probes = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let probe_addr = probes.local_addr().unwrap();
+    tokio::spawn(mock::answer_probes(probes, port, true));
+    let console = mock::Console { root, tokens: std::sync::Mutex::new(vec!["tok".into()]), pair_code: Some("123456".into()) };
+    tokio::spawn(mock::serve_console(listener, Arc::new(console)));
+    (format!("127.0.0.1:{port}"), probe_addr)
+}
+
+#[tokio::test]
+async fn discovers_the_console() {
+    let (addr, probe_addr) = start_pairing().await;
+    let found = crate::pairing::discover(std::time::Duration::from_millis(300), Some(probe_addr)).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].addr.to_string(), addr);
+    assert!(found[0].announce.pairing);
+    assert_eq!(found[0].describe(), "Mock Switch (127.0.0.1)");
+}
+
+#[tokio::test]
+async fn pairs_with_the_code_then_connects_with_the_token() {
+    let (addr, _) = start_pairing().await;
+    let token = "0123456789abcdef0123456789abcdef";
+
+    let wrong = Client::new(addr.clone(), token.into()).pair("654321").await.unwrap_err();
+    assert!(format!("{wrong:#}").contains("wrong pairing code"), "{wrong:#}");
+    // Not paired, so Hello with the token fails.
+    assert!(Client::new(addr.clone(), token.into()).ping().await.is_err());
+
+    let pairing = Client::new(addr.clone(), token.into());
+    pairing.pair("123 456").await.unwrap();
+    pairing.ping().await.unwrap();
+    drop(pairing);
+    Client::new(addr, token.into()).ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn pairing_needs_the_screen() {
+    let (client, _root) = start("tok").await;
+    let err = client.pair("123456").await.unwrap_err();
+    assert!(format!("{err:#}").contains("isn't pairing"), "{err:#}");
 }
