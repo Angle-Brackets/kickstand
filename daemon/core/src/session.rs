@@ -121,6 +121,7 @@ impl<'a> Session<'a> {
             },
             Request::CloseApplet => close_applet(),
             Request::Status => status(),
+            Request::Threads => threads(self.memory_applet),
             Request::FatalReports => Response::Dir { entries: crate::fatal::since_start(), truncated: false },
             Request::HblOverride { program_id } => match crate::hbl::set(program_id) {
                 Ok(()) => Response::Ok,
@@ -548,6 +549,48 @@ fn memory_map(applet: bool) -> Response {
         }
     }
     Response::Memory(MemoryMap { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, heap, regions, truncated })
+}
+
+/// Pauses the process just long enough to read every thread's registers and walk its frame pointers.
+fn threads(applet: bool) -> Response {
+    let (app, process) = match running_app(applet).and_then(|app| Ok((attach(app.pid)?, app))) {
+        Ok((process, app)) => (app, process),
+        Err(response) => return response,
+    };
+    if let Err(rc) = process.pause() {
+        return system_error("pausing the process", rc);
+    }
+    let ids = match process.threads(proto::MAX_THREADS) {
+        Ok(ids) => ids,
+        Err(rc) => return system_error("listing the threads", rc),
+    };
+    let word = |address: u64| {
+        let mut bytes = [0u8; 8];
+        process.read(address, &mut bytes).ok().map(|()| u64::from_le_bytes(bytes))
+    };
+    let mut threads = Vec::new();
+    for id in ids {
+        // A thread can end between the list and this.
+        let Ok(regs) = process.registers(id) else { continue };
+        // Each frame record is (the caller's fp, the return address); the stack grows down, so a caller's
+        // record is always higher.
+        let mut frames = Vec::new();
+        let mut fp = regs.fp;
+        while frames.len() < proto::MAX_FRAMES && fp != 0 && fp % 8 == 0 {
+            let (Some(next), Some(ret)) = (word(fp), word(fp + 8)) else { break };
+            if ret == 0 {
+                break;
+            }
+            frames.push(ret);
+            if next <= fp {
+                break;
+            }
+            fp = next;
+        }
+        threads.push(proto::ThreadInfo { id, pc: regs.pc, lr: regs.lr, sp: regs.sp, fp: regs.fp, frames });
+    }
+    drop(process);
+    Response::Threads { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, threads }
 }
 
 fn read_memory(applet: bool, address: u64, len: usize) -> Response {

@@ -589,6 +589,15 @@ impl Tools {
         result.await.unwrap_or_else(fail)
     }
 
+    #[tool(description = "Every thread's backtrace in the running homebrew: the daemon pauses it for a moment, reads each thread's registers and follows its frame pointers; addresses are named from the NRO's ELF, with source lines when it has DWARF. Use it when the homebrew hangs or stalls (a thread blocked in a wait, a lock, a GPU fence, or spinning), or to see what it's doing. The ELF must be the build that's running (a warning says when it isn't).")]
+    async fn threads(&self, Parameters(args): Parameters<MemoryMapArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, None)?;
+            crate::memory::threads(&self.client, &elf).await
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
     #[tool(description = "The running application's memory map: each region's range, size, permissions and kind, and where the homebrew's NRO is (nro+0x… addresses and the ELF's symbols are relative to it). Use it to see what read_memory can reach.")]
     async fn memory_map(&self, Parameters(args): Parameters<MemoryMapArgs>) -> CallToolResult {
         let result = async {

@@ -214,6 +214,9 @@ pub enum Request {
     /// means the console is on the fatal error screen, which only a reboot leaves. Answers
     /// [`Response::Dir`].
     FatalReports,
+    /// (20) Pauses the running application (or with [`Request::MemoryTarget`], the applet) for a moment
+    /// and returns each thread's registers and frame-pointer backtrace. Answers [`Response::Threads`].
+    Threads,
 }
 
 /// One step of [`Request::Input`]: hold exactly `buttons` (none: a pause), the sticks and a touch for `ms`.
@@ -354,6 +357,25 @@ pub enum Response {
     Error(Error),
     /// (19)
     Status(ConsoleStatus),
+    /// (20)
+    Threads { app: App, threads: Vec<ThreadInfo> },
+}
+
+/// Most threads [`Request::Threads`] reports.
+pub const MAX_THREADS: usize = 128;
+/// Most return addresses per thread.
+pub const MAX_FRAMES: usize = 32;
+
+/// One thread in [`Response::Threads`]: where it is (`pc`, and `lr`, which a leaf function hasn't saved
+/// yet) and the return addresses found by following the frame pointers from `fp`, innermost first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThreadInfo {
+    pub id: u64,
+    pub pc: u64,
+    pub lr: u64,
+    pub sp: u64,
+    pub fp: u64,
+    pub frames: Vec<u64>,
 }
 
 /// Answer to [`Request::Status`].
@@ -607,6 +629,7 @@ mod tests {
                 Request::Status => 33,
                 Request::HblOverride { .. } => 34,
                 Request::FatalReports => 35,
+                Request::Threads => 36,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -629,6 +652,7 @@ mod tests {
                 Response::Memory(_) => 15,
                 Response::Error(_) => 16,
                 Response::Status(_) => 17,
+                Response::Threads { .. } => 18,
             }
         }
         let s = || String::from("/a");
@@ -669,6 +693,7 @@ mod tests {
             Request::Status,
             Request::HblOverride { program_id: 0 },
             Request::FatalReports,
+            Request::Threads,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -690,9 +715,10 @@ mod tests {
             Response::KeepAwake { remaining_s: 0 },
             Response::App(None),
             Response::Apps(Vec::new()),
-            Response::Memory(MemoryMap { app, heap: None, regions: Vec::new(), truncated: false }),
+            Response::Memory(MemoryMap { app: app.clone(), heap: None, regions: Vec::new(), truncated: false }),
             Response::error(ErrorKind::Io, s()),
             Response::Status(ConsoleStatus { uptime_ms: 0, unlocking_ms: None, keep_awake_s: 0, application: None, applet: None }),
+            Response::Threads { app: app.clone(), threads: Vec::new() },
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

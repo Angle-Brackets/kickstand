@@ -39,6 +39,8 @@ impl Symbolizer {
                     .function
                     .as_ref()
                     .and_then(|f| f.demangle().ok().map(|n| n.into_owned()))
+                    // Assembly (libnx's svc stubs) has line info but no DWARF function: use the symbol.
+                    .or_else(|| self.loader.find_symbol(offset).map(|n| addr2line::demangle_auto(n.into(), None).into_owned()))
                     .unwrap_or_else(|| "??".to_string());
                 let location = frame
                     .location

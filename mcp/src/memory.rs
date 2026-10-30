@@ -376,13 +376,15 @@ pub fn render(data: &[u8], address: u64, format: Format, layout: &Layout, symbol
 pub struct Elf {
     pub symbols: Option<Symbols>,
     pub module: Option<String>,
+    /// For source lines (DWARF) in backtraces.
+    pub path: Option<std::path::PathBuf>,
 }
 
 impl Elf {
     pub fn load(elf: Option<&Path>, module: Option<&str>) -> Result<Self> {
-        let Some(elf) = elf else { return Ok(Elf { symbols: None, module: module.map(str::to_string) }) };
+        let Some(elf) = elf else { return Ok(Elf { symbols: None, module: module.map(str::to_string), path: None }) };
         let module = module.map(str::to_string).or_else(|| elf.file_stem().map(|s| s.to_string_lossy().into_owned()));
-        Ok(Elf { symbols: Some(Symbols::load(elf)?), module })
+        Ok(Elf { symbols: Some(Symbols::load(elf)?), module, path: Some(elf.to_path_buf()) })
     }
 }
 
@@ -446,6 +448,46 @@ pub async fn poke(client: &Client, elf: &Elf, expr: &str, value: &str, format: F
         render(&before, address, shown, &layout, None).split_once(' ').map_or("", |(_, v)| v).trim_start_matches(':'),
         render(&after, address, shown, &layout, None).split_once(' ').map_or("", |(_, v)| v).trim_start_matches(':'),
     );
+    Ok(out)
+}
+
+/// Every thread's backtrace: the daemon pauses the process for a moment, reads each thread's registers and
+/// follows its frame pointers. Addresses in the NRO are named from the ELF, with source lines when it has
+/// DWARF; return addresses are looked up 4 bytes back, at the call.
+pub async fn threads(client: &Client, elf: &Elf) -> Result<String> {
+    let which = target(client).await?;
+    let layout = Layout::fetch(client).await?;
+    let (app, threads) = client.threads().await?;
+    let symbolizer = match &elf.path {
+        Some(path) => Some(crate::symbolize::Symbolizer::new(path, elf.module.as_deref())?),
+        None => None,
+    };
+    let name = |address: u64, back: u64| -> String {
+        let Some(at) = layout.describe(address, elf.symbols.as_ref()) else { return format!("{address:#x}") };
+        let Some((base, _)) = layout.nro else { return at };
+        match &symbolizer {
+            Some(s) => {
+                let offset = address - base;
+                format!("nro+{offset:#x} {}", s.lookup(offset.saturating_sub(back)))
+            }
+            None => at,
+        }
+    };
+    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
+    let _ = writeln!(out, "{} threads in {which}: {}", threads.len(), crate::client::describe_app(&app));
+    if layout.nro.is_none() {
+        out.push_str("(no NRO found, so addresses aren't named)\n");
+    }
+    for t in &threads {
+        let _ = writeln!(out, "\nthread {:#x} (sp {:#x})", t.id, t.sp);
+        let _ = writeln!(out, "  pc  {}", name(t.pc, 0));
+        if t.frames.first() != Some(&t.lr) {
+            let _ = writeln!(out, "  lr  {}", name(t.lr, 4));
+        }
+        for (i, ret) in t.frames.iter().enumerate() {
+            let _ = writeln!(out, "  #{i:<2} {}", name(*ret, 4));
+        }
+    }
     Ok(out)
 }
 

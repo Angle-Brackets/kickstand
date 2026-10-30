@@ -172,6 +172,14 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Every thread's backtrace in the running homebrew (paused for a moment): where each thread is, named
+    /// from --elf with source lines when it has DWARF. For a hang: which thread waits on what.
+    Threads {
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        module: Option<String>,
+    },
     /// The running application's memory map, and where the homebrew's NRO is in it.
     Memory {
         /// The NRO's ELF, to name what regions start with.
@@ -495,6 +503,9 @@ async fn main() -> Result<()> {
             if let Some(out) = out {
                 std::fs::write(&out, &waited.jpeg)?;
             }
+        }
+        Command::Threads { elf, module } => {
+            print!("{}", memory::threads(&client, &memory::Elf::load(elf.as_deref(), module.as_deref())?).await?)
         }
         Command::Memory { elf } => print!("{}", memory::map(&client, &memory::Elf::load(elf.as_deref(), None)?).await?),
         Command::Peek { address, len, format, elf, module } => {

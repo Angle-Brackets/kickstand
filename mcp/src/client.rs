@@ -406,6 +406,17 @@ impl Client {
 
     /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
     /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
+    /// Every thread of the memory target (see [`Client::memory_target`]), paused for a moment.
+    pub async fn threads(&self) -> Result<(proto::App, Vec<proto::ThreadInfo>)> {
+        match self.request(Request::Threads).await? {
+            Response::Threads { app, threads } => Ok((app, threads)),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => {
+                bail!("the sysmodule predates thread backtraces (protocol 20): update it")
+            }
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Drops the connection, so the next request connects (and says Hello) again: to whichever daemon
     /// serves the port by then.
     pub async fn disconnect(&self) {

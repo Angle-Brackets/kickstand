@@ -28,6 +28,17 @@ pub struct MemoryInfo {
 /// `MemoryType_Normal`: heap.
 pub const STATE_HEAP: u32 = 5;
 
+/// A paused thread's registers.
+pub struct Registers {
+    pub pc: u64,
+    pub lr: u64,
+    pub sp: u64,
+    pub fp: u64,
+}
+
+// libnx's `ThreadContext` is 0x320 bytes; a different size means nx's layout is off.
+const _: () = assert!(core::mem::size_of::<nx::arm::ThreadContext>() == 0x320);
+
 pub struct Debugged(Handle);
 
 impl Debugged {
@@ -71,6 +82,26 @@ impl Debugged {
                 return Ok((out, truncated));
             }
         }
+    }
+
+    /// Stops every thread of the process. Closing the handle (dropping this) lets them run again.
+    pub fn pause(&self) -> Result<()> {
+        svc::break_debug_process(self.0)
+    }
+
+    /// The ids of up to `max` of the process's threads.
+    pub fn threads(&self, max: usize) -> Result<Vec<u64>> {
+        let mut ids = alloc::vec![0u64; max];
+        let n = svc::get_thread_list(self.0, &mut ids)?;
+        ids.truncate(n);
+        Ok(ids)
+    }
+
+    /// Thread `id`'s registers; the process must be paused.
+    pub fn registers(&self, id: u64) -> Result<Registers> {
+        let groups = nx::arm::RegisterGroup::CpuGprs() | nx::arm::RegisterGroup::CpuSprs();
+        let ctx = svc::get_debug_thread_context(self.0, id, groups)?;
+        Ok(Registers { pc: ctx.pc.reg, lr: ctx.lr, sp: ctx.sp, fp: ctx.fp })
     }
 
     pub fn read(&self, address: u64, out: &mut [u8]) -> Result<()> {

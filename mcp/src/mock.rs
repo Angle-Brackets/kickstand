@@ -142,6 +142,17 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
                 application: None,
                 applet: None,
             }),
+            Request::Threads => Response::Threads {
+                app: MOCK_APP,
+                threads: vec![proto::ThreadInfo {
+                    id: 0x5a,
+                    pc: MOCK_NRO + 0x100,
+                    lr: MOCK_NRO + 0x204,
+                    sp: MOCK_HEAP + 0x800,
+                    fp: MOCK_HEAP + 0x810,
+                    frames: vec![MOCK_NRO + 0x204, 0x1234],
+                }],
+            },
             Request::MemoryMap => Response::Memory(proto::MemoryMap {
                 app: MOCK_APP,
                 heap: Some((MOCK_HEAP, 0x1000)),

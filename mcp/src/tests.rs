@@ -278,6 +278,10 @@ async fn memory_addresses_reads_and_writes() {
     let hex = peek(&client, &elf, "nro", 0x20, Format::Hex).await.unwrap();
     assert!(hex.contains("|....") && hex.contains("NRO0"), "{hex}");
     assert!(layout.render(None).contains("<- NRO header"));
+    let threads = crate::memory::threads(&client, &elf).await.unwrap();
+    assert!(threads.contains("thread 0x5a") && threads.contains("pc  nro+0x100"), "{threads}");
+    // lr is the first frame here, so it's shown once; an address outside the NRO stays a number.
+    assert!(!threads.contains("lr ") && threads.contains("#0  nro+0x204") && threads.contains("#1  0x1234"), "{threads}");
 
     let wrote = poke(&client, &elf, "heap+0x14", "-2.25", Format::F32).await.unwrap();
     assert!(wrote.contains("before: 1.5\n") && wrote.contains("after:  -2.25"), "{wrote}");
