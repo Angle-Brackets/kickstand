@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use proto::{App, AppEntry, Button, HOME_MENU_TILES, InputStep};
+use proto::{App, AppEntry, Button, DaemonKind, HOME_MENU_TILES, InputStep};
 use tokio::net::TcpStream;
 
 use crate::client::{Client, check_path};
@@ -456,6 +456,44 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
     }
     Ok(Started { notes, pid, output })
+}
+
+/// How long the Kickstand NRO gets to stop the sysmodule and serve the port itself.
+const NRO_DAEMON_WAIT: Duration = Duration::from_secs(20);
+
+/// Restarts the sysmodule without a reboot, so a newly installed `exefs.nsp` runs: the Kickstand NRO,
+/// started in applet mode, stops the sysmodule as it starts and starts it again on handover, then HOME
+/// closes the Album. `nro` (a newer Kickstand NRO) replaces the one on the SD card on the way, if given.
+pub async fn restart_sysmodule(client: &Client, nro: Option<Vec<u8>>) -> Result<Vec<String>> {
+    let nro = match nro {
+        Some(nro) => nro,
+        None => client.read(LAUNCHER, 0, u64::MAX).await.context("reading the Kickstand NRO")?.0,
+    };
+    let started = run_nro(client, Program::Local { nro, dest: LAUNCHER.into() }, Vec::new(), Mode::Applet).await?;
+    let mut notes = started.notes;
+    drop(started.output);
+    // Until the NRO has stopped it, the old sysmodule may still answer.
+    let start = tokio::time::Instant::now();
+    loop {
+        client.disconnect().await;
+        if client.hello().await.is_ok_and(|info| info.kind == DaemonKind::Nro) {
+            break;
+        }
+        if start.elapsed() > NRO_DAEMON_WAIT {
+            bail!("the Kickstand NRO didn't take over from the sysmodule within {NRO_DAEMON_WAIT:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    notes.push(format!("the Kickstand NRO stopped the sysmodule after {:.1} s", start.elapsed().as_secs_f64()));
+    client.handover().await?;
+    let info = client.hello().await?;
+    notes.push(format!("the sysmodule is back: {} (protocol {})", info.version, info.protocol));
+    // The NRO exited to hbmenu, still in the Album.
+    if let Some(app) = status(client, Mode::Applet).await? {
+        close(client, Mode::Applet, &app).await?;
+        notes.push("closed the Album".into());
+    }
+    Ok(notes)
 }
 
 /// The user's games, which need full memory: anything in their folders, or named after them.

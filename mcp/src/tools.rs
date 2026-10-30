@@ -97,6 +97,11 @@ pub struct SysmoduleArgs {
     pub action: SysmoduleAction,
     /// For install: the sys-kickstand.nsp to upload.
     pub local_path: Option<String>,
+    /// For install: a newer Kickstand NRO (kickstand.nro) to send on the way.
+    pub nro_path: Option<String>,
+    /// For install: restart the sysmodule onto the new build now (default true, about 20 s, through the
+    /// Kickstand NRO in applet mode); false only uploads it.
+    pub restart: Option<bool>,
 }
 
 pub fn describe_target(target: proto::HekateTarget, entries: &[String]) -> String {
@@ -781,7 +786,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Manage the kickstand sysmodule, the always-on daemon: status, install (upload a built .nsp), start, stop, or handover (start it and end the hbmenu NRO daemon). Never enables start-at-boot; that needs the user's go-ahead.")]
+    #[tool(description = "Manage the kickstand sysmodule, the always-on daemon: status, install (upload a built .nsp and restart onto it without a reboot, which opens and closes hbmenu in applet mode; don't do it while the user is using the console), start, stop, or handover (start it and end the hbmenu NRO daemon). Never enables start-at-boot; that needs the user's go-ahead.")]
     async fn sysmodule(&self, Parameters(args): Parameters<SysmoduleArgs>) -> CallToolResult {
         let result = async {
             let status = match args.action {
@@ -794,7 +799,16 @@ impl Tools {
                 SysmoduleAction::Install => {
                     let local = args.local_path.ok_or_else(|| anyhow::anyhow!("install needs local_path"))?;
                     let nsp = tokio::fs::read(&local).await?;
+                    let nro = match args.nro_path {
+                        Some(path) => Some(tokio::fs::read(&path).await.with_context(|| format!("reading {path}"))?),
+                        None => None,
+                    };
                     self.client.install_sysmodule(&nsp).await?;
+                    if args.restart.unwrap_or(true) {
+                        let notes = crate::launch::restart_sysmodule(&self.client, nro).await?;
+                        let status = self.client.sysmodule(proto::Request::SysmoduleStatus).await?;
+                        return anyhow::Ok(format!("{}\n{}", notes.join("\n"), describe(&status)));
+                    }
                     self.client.sysmodule(proto::Request::SysmoduleStatus).await?
                 }
             };

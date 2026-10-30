@@ -251,8 +251,16 @@ enum Command {
 #[derive(Subcommand)]
 enum SysmoduleCmd {
     Status,
-    /// Upload sys-kickstand.nsp and the token (doesn't enable start-at-boot).
-    Install { nsp: PathBuf },
+    /// Upload sys-kickstand.nsp and the token, then restart the sysmodule onto it without a reboot (through
+    /// the Kickstand NRO in applet mode; --nro sends a newer one first). Doesn't enable start-at-boot.
+    Install {
+        nsp: PathBuf,
+        #[arg(long)]
+        nro: Option<PathBuf>,
+        /// Only upload; the new sysmodule runs from the next start or reboot.
+        #[arg(long)]
+        no_restart: bool,
+    },
     Start,
     Stop,
     Handover,
@@ -351,9 +359,15 @@ async fn main() -> Result<()> {
                 SysmoduleCmd::Handover => client.handover().await?,
                 SysmoduleCmd::Enable => client.set_boot2(true).await?,
                 SysmoduleCmd::Disable => client.set_boot2(false).await?,
-                SysmoduleCmd::Install { nsp } => {
+                SysmoduleCmd::Install { nsp, nro, no_restart } => {
                     let data = std::fs::read(&nsp).with_context(|| format!("reading {}", nsp.display()))?;
+                    let nro = nro.map(|p| std::fs::read(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
                     client.install_sysmodule(&data).await?;
+                    if !no_restart {
+                        for note in launch::restart_sysmodule(&client, nro).await? {
+                            println!("{note}");
+                        }
+                    }
                     client.sysmodule(proto::Request::SysmoduleStatus).await?
                 }
             };

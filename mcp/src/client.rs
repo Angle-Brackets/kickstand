@@ -406,6 +406,12 @@ impl Client {
 
     /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
     /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
+    /// Drops the connection, so the next request connects (and says Hello) again: to whichever daemon
+    /// serves the port by then.
+    pub async fn disconnect(&self) {
+        *self.conn.lock().await = None;
+    }
+
     pub async fn handover(&self) -> Result<SysmoduleStatus> {
         if self.hello().await?.kind == DaemonKind::Nro {
             let resp = self.request(Request::Handover).await;
