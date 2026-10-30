@@ -58,16 +58,20 @@ async fn handle(mut stream: TcpStream, root: &Path, token: &str) -> Result<()> {
         let Some(len) = proto::frame_len(prefix) else { return Ok(()) };
         let mut body = vec![0u8; len];
         stream.read_exact(&mut body).await?;
-        let req: Request = proto::decode(&body)?;
+        let Ok(req) = proto::decode::<Request>(&body) else {
+            // Like the daemon: a request from a newer protocol gets an error, and the connection goes on.
+            stream.write_all(&proto::encode(&Response::error(ErrorKind::Unsupported, "unknown request"))?).await?;
+            continue;
+        };
         let resp = match req {
             Request::Hello { version, token: t } => {
-                if version != PROTOCOL_VERSION {
+                if !proto::compatible(version) {
                     Response::error(ErrorKind::VersionMismatch, "version")
                 } else if t != token {
                     Response::error(ErrorKind::Unauthorized, "wrong token")
                 } else {
                     authed = true;
-                    Response::Hello { version, daemon_version: "mock".into(), kind: DaemonKind::Nro }
+                    Response::Hello { version: PROTOCOL_VERSION, daemon_version: "mock".into(), kind: DaemonKind::Nro }
                 }
             }
             _ if !authed => Response::error(ErrorKind::Unauthorized, "send Hello first"),

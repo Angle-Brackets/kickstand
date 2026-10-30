@@ -287,3 +287,37 @@ async fn memory_addresses_reads_and_writes() {
     poke(&client, &elf, "heap+0x40", "hi", Format::Str).await.unwrap();
     assert!(peek(&client, &elf, "heap+0x40", 0, Format::Str).await.unwrap().contains("\"hi\""));
 }
+
+/// A client newer than the daemon: a request appended after the daemon's version gets Unsupported, and
+/// the same connection keeps working; a client older than MIN_COMPATIBLE_VERSION is refused.
+#[tokio::test]
+async fn newer_requests_are_refused_politely() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (client, _root) = start("tok").await;
+    let addr = client.addr().to_string();
+    async fn round_trip(s: &mut tokio::net::TcpStream, body: &[u8]) -> proto::Response {
+        s.write_all(&(body.len() as u32).to_le_bytes()).await.unwrap();
+        s.write_all(body).await.unwrap();
+        let len = s.read_u32_le().await.unwrap() as usize;
+        let mut reply = vec![0; len];
+        s.read_exact(&mut reply).await.unwrap();
+        proto::decode(&reply).unwrap()
+    }
+    let hello = |version| proto::encode(&proto::Request::Hello { version, token: "tok".into() }).unwrap()[4..].to_vec();
+    let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    assert!(matches!(round_trip(&mut s, &hello(proto::PROTOCOL_VERSION + 5)).await, proto::Response::Hello { .. }));
+    // Variant 200 doesn't exist (yet).
+    match round_trip(&mut s, &[200, 1]).await {
+        proto::Response::Error(e) => assert_eq!(e.kind, proto::ErrorKind::Unsupported),
+        other => panic!("{other:?}"),
+    }
+    let ping = proto::encode(&proto::Request::Ping { nonce: 7 }).unwrap()[4..].to_vec();
+    assert!(matches!(round_trip(&mut s, &ping).await, proto::Response::Pong { nonce: 7, .. }));
+    drop(s); // The mock serves one connection at a time.
+
+    let mut old = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    match round_trip(&mut old, &hello(proto::MIN_COMPATIBLE_VERSION - 1)).await {
+        proto::Response::Error(e) => assert_eq!(e.kind, proto::ErrorKind::VersionMismatch),
+        other => panic!("{other:?}"),
+    }
+}

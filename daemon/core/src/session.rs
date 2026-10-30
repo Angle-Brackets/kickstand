@@ -130,8 +130,8 @@ impl<'a> Session<'a> {
     }
 
     fn hello(&mut self, version: u32, token: &str) -> Response {
-        if version != PROTOCOL_VERSION {
-            let msg = format!("daemon speaks protocol {PROTOCOL_VERSION}, client sent {version}");
+        if !proto::compatible(version) {
+            let msg = format!("client protocol {version} is older than {}, the oldest this daemon (protocol {PROTOCOL_VERSION}) talks to: update the client", proto::MIN_COMPATIBLE_VERSION);
             return Response::error(ErrorKind::VersionMismatch, msg);
         }
         let Some(expected) = self.token else {

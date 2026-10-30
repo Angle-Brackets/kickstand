@@ -291,9 +291,9 @@ async fn main() -> Result<()> {
             service.waiting().await?;
         }
         Command::Ping => {
-            let (version, kind) = client.hello().await?;
+            let info = client.hello().await?;
             let (rtt, uptime) = client.ping().await?;
-            println!("daemon {version} ({kind:?}): rtt {:.1} ms, uptime {}s", rtt.as_secs_f64() * 1e3, uptime.as_secs());
+            println!("daemon {} ({:?}, protocol {}): rtt {:.1} ms, uptime {}s", info.version, info.kind, info.protocol, rtt.as_secs_f64() * 1e3, uptime.as_secs());
         }
         Command::Ls { path } => {
             let (entries, truncated) = client.list_dir(&check_path(&path, false)?).await?;

@@ -356,10 +356,13 @@ impl Tools {
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
     async fn ping(&self) -> CallToolResult {
         let result = async {
-            let (version, kind) = self.client.hello().await?;
+            let info = self.client.hello().await?;
             let (rtt, uptime) = self.client.ping().await?;
             anyhow::Ok(format!(
-                "daemon {version} ({kind:?}) at {}: rtt {:.1} ms, console uptime {}s",
+                "daemon {} ({:?}, protocol {}) at {}: rtt {:.1} ms, console uptime {}s",
+                info.version,
+                info.kind,
+                info.protocol,
                 self.client.addr(),
                 rtt.as_secs_f64() * 1000.0,
                 uptime.as_secs()

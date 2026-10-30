@@ -5,6 +5,21 @@
 //! Each [`Request`] gets exactly one [`Response`], in request order, so a client may send several
 //! requests before reading their responses (uploads and reads pipeline chunks this way). The first
 //! request on a connection must be [`Request::Hello`] with the shared token.
+//!
+//! # Compatibility
+//! postcard writes an enum variant as its position and a struct's fields in order, without names. So a
+//! message keeps its encoding only while nothing before or inside it changes, and the rules are:
+//! - Never reorder, remove or change an existing variant of [`Request`] or [`Response`], or any type they
+//!   carry (fields, their order and types, enum variants such as [`ErrorKind`]'s).
+//! - A new feature is a new variant appended at the end of [`Request`] (and of [`Response`] if it needs a
+//!   new reply), with [`PROTOCOL_VERSION`] bumped so each side can tell what the other knows. If an existing
+//!   request needs more data, append a new request instead of changing it.
+//! - A daemon answers a request it can't decode (one appended after its version) with
+//!   [`ErrorKind::Unsupported`] and keeps the connection, so newer clients work with older daemons for
+//!   everything both know. Installing a daemon always works this way, since its requests never change.
+//! - [`MIN_COMPATIBLE_VERSION`] rises only if a rule had to be broken; both sides refuse a peer older than it.
+//!
+//! The tests pin the encoding of the install path and the order of every variant.
 
 #![no_std]
 
@@ -71,8 +86,17 @@ pub mod hekate {
     }
 }
 
-/// Bumped on any incompatible change to [`Request`] or [`Response`].
-pub const PROTOCOL_VERSION: u32 = 16;
+/// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
+pub const PROTOCOL_VERSION: u32 = 17;
+
+/// The oldest revision that still encodes every message the way this one does. Peers from this one up
+/// talk to each other; older ones are refused at [`Request::Hello`].
+pub const MIN_COMPATIBLE_VERSION: u32 = 17;
+
+/// Whether a peer at protocol `version` can be talked to.
+pub fn compatible(version: u32) -> bool {
+    version >= MIN_COMPATIBLE_VERSION
+}
 
 /// TCP port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 28790;
@@ -470,6 +494,158 @@ mod tests {
         let ini = "[config]\nupdater2p=1\n\n[Atmosphere emuMMC]\npkg3=x\n{caption}\n#[comment]\n[Stock]\nstock=1\n";
         assert_eq!(hekate::entries(ini), ["Atmosphere emuMMC", "Stock"]);
         assert!(hekate::entries("[a]\n[b]").is_empty());
+    }
+
+    /// The install path's encoding, byte for byte: any client must be able to install any daemon.
+    #[test]
+    fn install_path_is_frozen() {
+        use alloc::string::ToString;
+        let requests: [(Request, &[u8]); 9] = [
+            (Request::Hello { version: 17, token: "tok".into() }, &[0, 17, 3, b't', b'o', b'k']),
+            (Request::UploadBegin { path: "/a".into(), size: 300 }, &[5, 2, b'/', b'a', 0xAC, 0x02]),
+            (Request::UploadChunk { offset: 0, data: vec![9] }, &[6, 0, 1, 9]),
+            (Request::UploadFinish { crc32: 0x1234_5678 }, &[7, 0xF8, 0xAC, 0xD1, 0x91, 0x01]),
+            (Request::UploadAbort, &[8]),
+            (Request::SysmoduleStatus, &[10]),
+            (Request::SysmoduleStart, &[11]),
+            (Request::Handover, &[14]),
+            (Request::RebootToHekate { target: HekateTarget::Entry(1) }, &[15, 1, 1]),
+        ];
+        for (req, bytes) in requests {
+            assert_eq!(&encode(&req).unwrap()[4..], bytes, "{req:?}");
+        }
+        let responses: [(Response, &[u8]); 7] = [
+            (Response::Ok, &[0]),
+            (Response::Hello { version: 17, daemon_version: "0.1".into(), kind: DaemonKind::Sysmodule }, &[1, 17, 3, b'0', b'.', b'1', 0]),
+            (Response::UploadReady { staging_path: "/s".into() }, &[6, 2, b'/', b's']),
+            (Response::ChunkOk { received: 5 }, &[7, 5]),
+            (Response::UploadDone { path: "/a".into(), size: 300 }, &[8, 2, b'/', b'a', 0xAC, 0x02]),
+            (Response::Sysmodule(SysmoduleStatus { installed: true, boot2: false, pid: Some(130) }), &[10, 1, 0, 1, 0x82, 0x01]),
+            (Response::error(ErrorKind::Unsupported, "x".to_string()), &[16, 9, 1, b'x', 0]),
+        ];
+        for (resp, bytes) in responses {
+            assert_eq!(&encode(&resp).unwrap()[4..], bytes, "{resp:?}");
+        }
+    }
+
+    /// Every variant's position, which is how postcard encodes it. Appending a variant means adding it here
+    /// (the matches won't compile otherwise); moving one fails the test.
+    #[test]
+    fn variants_keep_their_positions() {
+        fn request(r: &Request) -> u8 {
+            match r {
+                Request::Hello { .. } => 0,
+                Request::Ping { .. } => 1,
+                Request::ListDir { .. } => 2,
+                Request::Stat { .. } => 3,
+                Request::ReadFile { .. } => 4,
+                Request::UploadBegin { .. } => 5,
+                Request::UploadChunk { .. } => 6,
+                Request::UploadFinish { .. } => 7,
+                Request::UploadAbort => 8,
+                Request::Delete { .. } => 9,
+                Request::SysmoduleStatus => 10,
+                Request::SysmoduleStart => 11,
+                Request::SysmoduleStop => 12,
+                Request::Exit => 13,
+                Request::Handover => 14,
+                Request::RebootToHekate { .. } => 15,
+                Request::Resources => 16,
+                Request::IramPeek { .. } => 17,
+                Request::Press { .. } => 18,
+                Request::KeepAwake { .. } => 19,
+                Request::IndicatorPosition { .. } => 20,
+                Request::Screenshot => 21,
+                Request::ScreenshotRead { .. } => 22,
+                Request::Input { .. } => 23,
+                Request::AppStatus => 24,
+                Request::CloseApp => 25,
+                Request::ListApps { .. } => 26,
+                Request::MemoryMap => 27,
+                Request::ReadMemory { .. } => 28,
+                Request::WriteMemory { .. } => 29,
+            }
+        }
+        fn response(r: &Response) -> u8 {
+            match r {
+                Response::Ok => 0,
+                Response::Hello { .. } => 1,
+                Response::Pong { .. } => 2,
+                Response::Dir { .. } => 3,
+                Response::Stat(_) => 4,
+                Response::Data { .. } => 5,
+                Response::UploadReady { .. } => 6,
+                Response::ChunkOk { .. } => 7,
+                Response::UploadDone { .. } => 8,
+                Response::Deleted { .. } => 9,
+                Response::Sysmodule(_) => 10,
+                Response::Resources(_) => 11,
+                Response::KeepAwake { .. } => 12,
+                Response::App(_) => 13,
+                Response::Apps(_) => 14,
+                Response::Memory(_) => 15,
+                Response::Error(_) => 16,
+            }
+        }
+        let s = || String::from("/a");
+        let requests = [
+            Request::Hello { version: 0, token: s() },
+            Request::Ping { nonce: 0 },
+            Request::ListDir { path: s() },
+            Request::Stat { path: s() },
+            Request::ReadFile { path: s(), offset: 0, len: 0 },
+            Request::UploadBegin { path: s(), size: 0 },
+            Request::UploadChunk { offset: 0, data: Vec::new() },
+            Request::UploadFinish { crc32: 0 },
+            Request::UploadAbort,
+            Request::Delete { path: s(), recursive: false },
+            Request::SysmoduleStatus,
+            Request::SysmoduleStart,
+            Request::SysmoduleStop,
+            Request::Exit,
+            Request::Handover,
+            Request::RebootToHekate { target: HekateTarget::Menu },
+            Request::Resources,
+            Request::IramPeek { offset: 0 },
+            Request::Press { buttons: Vec::new(), times: 1, hold_ms: 0 },
+            Request::KeepAwake { minutes: None },
+            Request::IndicatorPosition { x: 0, y: 0 },
+            Request::Screenshot,
+            Request::ScreenshotRead { offset: 0, len: 0 },
+            Request::Input { steps: Vec::new() },
+            Request::AppStatus,
+            Request::CloseApp,
+            Request::ListApps { max: 0 },
+            Request::MemoryMap,
+            Request::ReadMemory { address: 0, len: 0 },
+            Request::WriteMemory { address: 0, data: Vec::new() },
+        ];
+        for (i, req) in requests.iter().enumerate() {
+            assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
+        }
+        let app = App { pid: 0, program_id: 0, hbl: None };
+        let responses = [
+            Response::Ok,
+            Response::Hello { version: 0, daemon_version: s(), kind: DaemonKind::Nro },
+            Response::Pong { nonce: 0, uptime_ms: 0 },
+            Response::Dir { entries: Vec::new(), truncated: false },
+            Response::Stat(DirEntry { name: s(), is_dir: false, size: 0 }),
+            Response::Data { data: Vec::new(), file_size: 0 },
+            Response::UploadReady { staging_path: s() },
+            Response::ChunkOk { received: 0 },
+            Response::UploadDone { path: s(), size: 0 },
+            Response::Deleted { path: s(), was_dir: false },
+            Response::Sysmodule(SysmoduleStatus { installed: false, boot2: false, pid: None }),
+            Response::Resources(Resources { limits: Vec::new(), process_used: 0, process_total: 0 }),
+            Response::KeepAwake { remaining_s: 0 },
+            Response::App(None),
+            Response::Apps(Vec::new()),
+            Response::Memory(MemoryMap { app, heap: None, regions: Vec::new(), truncated: false }),
+            Response::error(ErrorKind::Io, s()),
+        ];
+        for (i, resp) in responses.iter().enumerate() {
+            assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");
+        }
     }
 
     #[test]

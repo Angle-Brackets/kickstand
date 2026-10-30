@@ -18,8 +18,11 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// ~1.5 MB/s over Wi-Fi; keeping several queued overlaps the network with the console's SD access.
 const PIPELINE_DEPTH: usize = 4;
 
+#[derive(Clone)]
 pub struct DaemonInfo {
     pub version: String,
+    /// The daemon's [`PROTOCOL_VERSION`].
+    pub protocol: u32,
     pub kind: DaemonKind,
 }
 
@@ -55,10 +58,10 @@ impl Client {
     }
 
     /// Connects (if needed) and returns what the daemon reported in its Hello.
-    pub async fn hello(&self) -> Result<(String, DaemonKind)> {
+    pub async fn hello(&self) -> Result<DaemonInfo> {
         let mut guard = self.conn.lock().await;
         let conn = self.connected(&mut guard).await?;
-        Ok((conn.info.version.clone(), conn.info.kind))
+        Ok(conn.info.clone())
     }
 
     /// Returns the round-trip time and the console's uptime.
@@ -339,16 +342,16 @@ impl Client {
     /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
     /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
     pub async fn handover(&self) -> Result<SysmoduleStatus> {
-        if self.hello().await?.1 == DaemonKind::Nro {
+        if self.hello().await?.kind == DaemonKind::Nro {
             let resp = self.request(Request::Handover).await;
             *self.conn.lock().await = None;
             expect(resp?, |r| matches!(r, Response::Ok))?;
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            match self.hello().await {
-                Ok((_, DaemonKind::Sysmodule)) => return self.sysmodule(Request::SysmoduleStatus).await,
-                Ok((_, DaemonKind::Nro)) => *self.conn.lock().await = None,
+            match self.hello().await.map(|info| info.kind) {
+                Ok(DaemonKind::Sysmodule) => return self.sysmodule(Request::SysmoduleStatus).await,
+                Ok(DaemonKind::Nro) => *self.conn.lock().await = None,
                 Err(_) => {}
             }
             if Instant::now() > deadline {
@@ -430,11 +433,15 @@ impl Client {
             .map_err(|_| anyhow!("timed out connecting to the daemon at {}", self.addr))?
             .with_context(|| format!("connecting to the daemon at {}", self.addr))?;
         stream.set_nodelay(true)?;
-        let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), kind: DaemonKind::Nro } };
+        let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro } };
         let hello = Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() };
         match round_trip(&mut conn, &hello).await? {
-            Response::Hello { daemon_version, kind, .. } => {
-                conn.info = DaemonInfo { version: daemon_version, kind };
+            Response::Hello { version, .. } if !proto::compatible(version) => Err(anyhow!(
+                "the daemon speaks protocol {version}, older than {} (the oldest this client talks to): install a newer sysmodule",
+                proto::MIN_COMPATIBLE_VERSION
+            )),
+            Response::Hello { version, daemon_version, kind } => {
+                conn.info = DaemonInfo { version: daemon_version, protocol: version, kind };
                 Ok(conn)
             }
             other => Err(unexpected(other)),
@@ -462,7 +469,9 @@ async fn recv(conn: &mut Conn) -> Result<Response> {
         let len = proto::frame_len(prefix).ok_or_else(|| anyhow!("daemon sent an oversized frame"))?;
         let mut body = vec![0u8; len];
         conn.stream.read_exact(&mut body).await?;
-        anyhow::Ok(proto::decode::<Response>(&body)?)
+        let reply = proto::decode::<Response>(&body);
+        // Only a reply appended after this client's version would fail here.
+        anyhow::Ok(reply.with_context(|| format!("couldn't read the daemon's reply (daemon protocol {}, this client {PROTOCOL_VERSION}): update the MCP server", conn.info.protocol))?)
     };
     timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon did not reply within {REPLY_TIMEOUT:?}"))?
 }

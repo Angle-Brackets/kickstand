@@ -239,10 +239,12 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize) {
         }
         let resp = match proto::decode::<Request>(&frame) {
             Ok(req) => session.handle(req),
-            Err(_) => {
-                let _ = send(stream, &Response::error(ErrorKind::BadRequest, "undecodable request"));
-                return;
-            }
+            // Most likely a request appended after this daemon's version: say so and carry on (the frame's
+            // length kept us in step).
+            Err(_) => Response::error(
+                ErrorKind::Unsupported,
+                alloc::format!("this daemon (protocol {}) doesn't know that request: update the sysmodule", proto::PROTOCOL_VERSION),
+            ),
         };
         if send(stream, &resp).is_err() {
             return;
