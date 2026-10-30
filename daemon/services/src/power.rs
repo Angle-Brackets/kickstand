@@ -112,6 +112,9 @@ pub const IRAM_SIZE: usize = 0x4_0000;
 pub const IRAM_PAYLOAD_OFFSET: usize = 0x1_0000;
 pub const PAGE_SIZE: usize = 0x1000;
 const SMC_ATMOSPHERE_IRAM_COPY: u64 = 0xF000_0201;
+/// exosphere's own debug pages, which IramCopy refuses (`MemoryRegionPhysicalIramSecureMonitorDebug`).
+/// ams_mitm's ClearIram writes them anyway and ignores the error; we skip them.
+const IRAM_SECMON_DEBUG: core::ops::Range<usize> = 0x3_4000..0x3_8000;
 
 /// One page of ordinary memory, the unit IramCopy works in.
 #[repr(C, align(4096))]
@@ -119,8 +122,12 @@ pub struct Page(pub [u8; PAGE_SIZE]);
 
 /// Copies one page between `page` and IRAM at `offset` (page aligned). Errors are exosphere's SmcResult.
 fn iram_copy(page: &mut Page, offset: usize, to_iram: bool) -> core::result::Result<(), u64> {
-    if !offset.is_multiple_of(PAGE_SIZE) || offset >= IRAM_SIZE {
+    // exosphere maps exactly one page and wants its physical address page aligned.
+    if !offset.is_multiple_of(PAGE_SIZE) || offset >= IRAM_SIZE || IRAM_SECMON_DEBUG.contains(&offset) {
         return Err(u64::MAX);
+    }
+    if !(page.0.as_ptr() as usize).is_multiple_of(PAGE_SIZE) {
+        return Err(u64::MAX - 1);
     }
     let args = [
         SMC_ATMOSPHERE_IRAM_COPY,
@@ -148,7 +155,12 @@ pub fn iram_read(offset: usize, page: &mut Page) -> core::result::Result<(), u64
 /// failed. Sysmodule only.
 pub fn reboot_to_payload_direct(payload: &[u8; MAX_PAYLOAD_SIZE]) -> core::result::Result<(), (&'static str, u64)> {
     let mut page = alloc::boxed::Box::new(Page([0xCC; PAGE_SIZE]));
-    for offset in (0..IRAM_SIZE).step_by(PAGE_SIZE) {
+    // Fail before touching IRAM rather than halfway: IRAM holds live code until the reboot.
+    if !(page.0.as_ptr() as usize).is_multiple_of(PAGE_SIZE) {
+        return Err(("allocating a page-aligned buffer", u64::MAX - 1));
+    }
+    const { assert!(IRAM_PAYLOAD_OFFSET + MAX_PAYLOAD_SIZE <= IRAM_SECMON_DEBUG.start) };
+    for offset in (0..IRAM_SIZE).step_by(PAGE_SIZE).filter(|o| !IRAM_SECMON_DEBUG.contains(o)) {
         iram_copy(&mut page, offset, true).map_err(|e| ("clearing IRAM", e))?;
     }
     for (i, chunk) in payload.chunks(PAGE_SIZE).enumerate() {
