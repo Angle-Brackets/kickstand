@@ -6,11 +6,12 @@
 
 extern crate alloc;
 
+pub mod activity;
 pub mod awake;
 pub mod fatal;
 pub mod hbl;
 pub mod log;
-mod sd;
+pub mod sd;
 pub mod server;
 pub mod session;
 pub mod tray;

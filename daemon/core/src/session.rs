@@ -40,6 +40,8 @@ pub struct Session<'a> {
     after_reply: Option<AfterReply>,
     /// The last screenshot's JPEG, until the next one or the end of the connection.
     screenshot: Option<alloc::vec::Vec<u8>>,
+    /// The server's client slot, for [`crate::activity`].
+    slot: usize,
 }
 
 /// Something to do once the current reply has been sent.
@@ -57,7 +59,7 @@ impl<'a> Session<'a> {
     /// (below [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
     pub fn new(token: Option<&'a str>, kind: DaemonKind, slot: usize) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { token, kind, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
+        Session { token, kind, slot, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -70,6 +72,7 @@ impl<'a> Session<'a> {
             Request::Hello { version, token } => self.hello(version, &token),
             _ if !self.authed => Response::error(ErrorKind::Unauthorized, "send Hello with the token first"),
             req => {
+                crate::activity::request(self.slot, &req);
                 // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
                 // may be ending the lease.)
                 if !matches!(req, Request::KeepAwake { .. }) {

@@ -42,6 +42,8 @@ pub const MAX_CLIENTS: usize = 3;
 const CLIENT_STACK: usize = 0x10000;
 /// Bit n set: client slot n is taken (a client is connected, or its worker didn't start).
 static SLOTS: AtomicU32 = AtomicU32::new(0);
+/// The address the listener last reported (0: none), for [`listening_ip`].
+static LISTENING_IP: AtomicU32 = AtomicU32::new(0);
 
 /// Hands a connection from the accept loop to slot's worker.
 struct Mailbox {
@@ -129,6 +131,15 @@ pub fn console_ip() -> Option<Ipv4Addr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
+/// The console's address as of the listener's last (re)bind: unlike [`console_ip`], it needs no socket,
+/// which other threads may not get while the server's sessions are busy.
+pub fn listening_ip() -> Option<Ipv4Addr> {
+    match LISTENING_IP.load(Ordering::Relaxed) {
+        0 => None,
+        ip => Some(Ipv4Addr::from(ip)),
+    }
+}
+
 fn stopped(config: &Config) -> bool {
     config.stop.is_some_and(|s| s.load(Ordering::Relaxed))
 }
@@ -159,7 +170,9 @@ pub fn run(config: &'static Config<'static>) {
                 continue;
             }
         };
-        match console_ip() {
+        let ip = console_ip();
+        LISTENING_IP.store(ip.map_or(0, u32::from), Ordering::Relaxed);
+        match ip {
             Some(ip) => log!("listening on {ip}:{}", config.port),
             None => log!("listening on port {} (no network address yet)", config.port),
         }
@@ -206,7 +219,9 @@ fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
     let timeout_ns = if config.stop.is_some() { i64::from(STOP_CHECK_MS) * 1_000_000 } else { -1 };
     while !stopped(config) {
         let Some((stream, who)) = mailbox.take(timeout_ns) else { continue };
+        crate::activity::connected(slot, who.0);
         serve(&stream, config, slot);
+        crate::activity::disconnected(slot);
         drop(stream);
         log!("client {}:{} disconnected", who.0, who.1);
         free_slot(slot);

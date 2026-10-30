@@ -11,5 +11,6 @@ pub mod debug;
 pub mod hid;
 pub mod idle;
 pub mod ns;
+pub mod pl;
 pub mod pm;
 pub mod power;

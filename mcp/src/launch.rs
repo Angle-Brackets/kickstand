@@ -80,7 +80,7 @@ async fn status(client: &Client, mode: Mode) -> Result<Option<App>> {
 /// it tried if no title on the row works.
 pub async fn open_hbmenu(client: &Client, mode: Mode) -> Result<Opened> {
     match mode {
-        Mode::Applet => open_applet(client).await,
+        Mode::Applet => open_applet(client, false).await,
         Mode::Full => open_full(client).await,
     }
 }
@@ -88,7 +88,9 @@ pub async fn open_hbmenu(client: &Client, mode: Mode) -> Result<Opened> {
 /// How long the Album gets to show up after A.
 const ALBUM_WAIT: Duration = Duration::from_secs(8);
 
-async fn open_applet(client: &Client) -> Result<Opened> {
+/// `at_home`: the Album was just closed, which leaves the home menu showing with its first tile selected.
+/// HOME then would resume a suspended game instead.
+async fn open_applet(client: &Client, mut at_home: bool) -> Result<Opened> {
     let mut notes = Vec::new();
     if let Some(app) = client.applet_status().await? {
         if app.hbl == Some(true) {
@@ -97,10 +99,12 @@ async fn open_applet(client: &Client) -> Result<Opened> {
         }
         close(client, Mode::Applet, &app).await?;
         notes.push("closed the Album (it was showing pictures, not hbmenu)".into());
+        at_home = true;
     }
     // HOME selects the first tile; Down moves to the leftmost button under the row, and the Album is the
-    // fourth. (The home menu ignores the virtual touch screen.)
-    let mut steps = vec![step(&[Button::Home], 100), step(&[], 1500), step(&[Button::Down], 100), step(&[], 400)];
+    // fourth.
+    let mut steps = if at_home { vec![] } else { vec![step(&[Button::Home], 100), step(&[], 1500)] };
+    steps.extend([step(&[Button::Down], 100), step(&[], 400)]);
     for _ in 0..3 {
         steps.extend([step(&[Button::Right], 80), step(&[], 200)]);
     }
@@ -437,13 +441,19 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     let sock = match sock {
         Some(sock) => sock,
         None => {
+            let mut closed = false;
             if let Some(app) = status(client, mode).await?
                 && app.hbl == Some(true)
             {
                 close(client, mode, &app).await?;
                 notes.push("closed the running hbloader (hbmenu or an NRO)".into());
+                closed = true;
             }
-            notes.extend(open_hbmenu(client, mode).await?.notes);
+            let opened = match mode {
+                Mode::Applet => open_applet(client, closed).await?,
+                Mode::Full => open_full(client).await?,
+            };
+            notes.extend(opened.notes);
             start_netloader(client, NETLOADER_WAIT).await?
         }
     };

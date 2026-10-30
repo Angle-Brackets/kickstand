@@ -146,6 +146,7 @@ dependencies = [
 name = "kickstand-nro"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "daemon-core",
  "kickstand-proto",
  "nx",

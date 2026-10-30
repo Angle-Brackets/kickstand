@@ -2,7 +2,9 @@
 //! The daemon as an NRO. Start it with nxlink, passing the token as an argument:
 //! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`. Press + on the console to exit.
 //! Without `--token` it uses `/kickstand/token.txt` like the sysmodule does. A client's `Exit` request
-//! also ends it. The screen shows the daemon's log (address, clients, requests).
+//! also ends it. The screen shows whether an agent is connected and what it's doing, how to reach the
+//! console, and the daemon's log. Leaving with + restarts the sysmodule it stopped (or one set to start at
+//! boot), so the console isn't left without Kickstand.
 //!
 //! With `--open <nro> [args]` or `--title <id>` it is a launcher instead (see `launcher.rs`).
 
@@ -45,14 +47,19 @@ fn main() {
     // No keep-awake thread here: it never ends, and hbloader would keep running it after this NRO exits.
 
     let token = token_arg().or_else(daemon_core::read_token_file);
+    let has_token = token.is_some();
     if token.is_none() {
         log!("no token: pass --token <t> or create {}", proto::path::TOKEN_PATH);
     }
-    log!("kickstand daemon {} (NRO). Press + to exit, Up/Down to scroll.", daemon_core::VERSION);
+    log!("kickstand daemon {} (NRO)", daemon_core::VERSION);
     // The sysmodule would hold the port; this NRO takes over until a client asks for a handover.
+    let mut stopped_sysmodule = false;
     if services::pm::process_id(proto::path::SYSMODULE_PROGRAM_ID).is_some() {
         match services::pm::terminate_program(proto::path::SYSMODULE_PROGRAM_ID) {
-            Ok(()) => log!("stopped the sysmodule; `kickstand sysmodule handover` restarts it"),
+            Ok(()) => {
+                stopped_sysmodule = true;
+                log!("paused the background service while this screen is open");
+            }
             Err(rc) => log!("couldn't stop the running sysmodule ({rc}); the port may be taken"),
         }
     }
@@ -73,7 +80,12 @@ fn main() {
         })
         .unwrap();
 
-    run_screen();
+    if run_screen(has_token) {
+        log!("+ pressed");
+        if stopped_sysmodule || BOOT2.load(Ordering::Relaxed) {
+            daemon_core::HANDOVER_REQUESTED.store(true, Ordering::Relaxed);
+        }
+    }
     STOP.store(true, Ordering::Relaxed);
     let _ = server.join();
     // The listener is closed now, so the sysmodule can bind the port on its first try.
@@ -110,8 +122,11 @@ fn token_arg() -> Option<String> {
     None
 }
 
-/// Shows the log on screen until + is pressed or a client asks the daemon to exit.
-fn run_screen() {
+/// Whether the sysmodule is installed to start at boot, as the screen last saw.
+static BOOT2: AtomicBool = AtomicBool::new(false);
+
+/// Shows the status screen until + is pressed (true) or a client asks the daemon to exit.
+fn run_screen(has_token: bool) -> bool {
     let styles = hid::NpadStyleTag::FullKey()
         | hid::NpadStyleTag::Handheld()
         | hid::NpadStyleTag::JoyDual()
@@ -119,17 +134,19 @@ fn run_screen() {
         | hid::NpadStyleTag::JoyRight();
     let ctx = input::Context::new(styles, 1).unwrap();
     let mut players = [ctx.get_player(hid::NpadIdType::No1), ctx.get_player(hid::NpadIdType::Handheld)];
-    let mut screen = screen::Screen::new();
+    let mut screen = screen::Screen::new(has_token);
     while !STOP.load(Ordering::Relaxed) {
         let mut down = hid::NpadButton::from(0);
         for p in &mut players {
             down |= p.get_buttons_down();
         }
         if down.contains(hid::NpadButton::Plus()) {
-            return;
+            return true;
         }
         screen.frame(down.contains(hid::NpadButton::Up()), down.contains(hid::NpadButton::Down()));
+        BOOT2.store(screen.starts_at_boot(), Ordering::Relaxed);
     }
+    false
 }
 
 #[panic_handler]

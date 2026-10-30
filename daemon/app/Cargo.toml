@@ -11,7 +11,9 @@ name = "kickstand"
 path = "src/main.rs"
 
 [dependencies]
-nx = { workspace = true, features = ["socket", "fs", "input", "console"] }
+nx = { workspace = true, features = ["socket", "fs", "input", "console", "truetype"] }
+# Measuring text for layout (the same version nx draws with).
+ab_glyph = { version = "0.2.31", default-features = false, features = ["variable-fonts", "libm"] }
 daemon-core.workspace = true
 nxlink.workspace = true
 services.workspace = true

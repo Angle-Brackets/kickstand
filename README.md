@@ -17,6 +17,9 @@ console with a warm reboot into hekate.
 All Rust:
 - `daemon/`: runs on the Switch. Builds as a sysmodule (`daemon/sysmodule`, the normal way) and as an
   hbmenu NRO (`daemon/app`), which also has a launcher mode the MCP uses. Nightly, built with `cargo nx`.
+  Opened from hbmenu, the NRO is Kickstand's status screen: whether an agent is connected and what it's
+  doing, the console's address, token and background service, and the log. + leaves it and hands back to
+  the background service.
 - `mcp/`: the MCP server on the PC (stdio, on `rmcp`), plus a CLI with the same features. Stable Rust.
 - `proto/`: the wire protocol both sides share (no_std + serde/postcard).
 
