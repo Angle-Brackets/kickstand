@@ -88,3 +88,26 @@ pub fn contact_sheet(shots: &[Shot], count: usize) -> Result<Vec<u8>> {
     JpegEncoder::new_with_quality(&mut out, 80).encode_image(&sheet)?;
     Ok(out.into_inner())
 }
+
+/// Crops `jpeg` to `region` (x, y, w, h in the 1280x720 screen) and scales it to `width` pixels wide; the
+/// original if neither is asked for.
+pub fn reframe(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>, width: Option<u32>) -> Result<Vec<u8>> {
+    if region.is_none() && width.is_none() {
+        return Ok(jpeg.to_vec());
+    }
+    let mut img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?.to_rgb8();
+    if let Some((x, y, w, h)) = region {
+        let (iw, ih) = img.dimensions();
+        if x >= iw || y >= ih || w == 0 || h == 0 {
+            anyhow::bail!("region {x},{y},{w},{h} is off the {iw}x{ih} screen");
+        }
+        img = image::imageops::crop_imm(&img, x, y, w.min(iw - x), h.min(ih - y)).to_image();
+    }
+    if let Some(width) = width.filter(|&w| w < img.width()) {
+        let height = (u64::from(img.height()) * u64::from(width) / u64::from(img.width())).max(1) as u32;
+        img = image::imageops::resize(&img, width, height, FilterType::Triangle);
+    }
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img)?;
+    Ok(out)
+}

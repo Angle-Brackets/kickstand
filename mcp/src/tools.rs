@@ -219,8 +219,14 @@ pub struct KeepAwakeArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotArgs {
-    /// Also save the JPEG to this path on this PC.
+    /// Also save the JPEG (full size) to this path on this PC.
     pub local_path: Option<String>,
+    /// Scale the image you get to this many pixels wide (e.g. 640 costs about a quarter of the tokens of
+    /// the full 1280); enough to see what's on screen, not to read small text.
+    pub width: Option<u32>,
+    /// Only this part of the 1280x720 screen, "x,y,w,h" (e.g. a dialog or a status bar, to read it at full
+    /// resolution cheaply).
+    pub region: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -468,15 +474,24 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Take a screenshot of the Switch's screen and look at it (JPEG, 1280x720). The kickstand indicator isn't in it. Optionally saves it on this PC.")]
+    #[tool(description = "Take a screenshot of the Switch's screen and look at it (JPEG, 1280x720). Use width to look at a smaller copy when you only need to see what's on screen, and region to read part of it closely. The kickstand indicator isn't in it. Optionally saves the full image on this PC.")]
     async fn screenshot(&self, Parameters(args): Parameters<ScreenshotArgs>) -> CallToolResult {
         let result = async {
+            let region = match &args.region {
+                Some(r) => {
+                    let n: Vec<u32> = r.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
+                    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
+                    Some((x, y, w, h))
+                }
+                None => None,
+            };
             let jpeg = self.client.screenshot().await?;
             let mut text = format!("screenshot: {} bytes", jpeg.len());
             if let Some(path) = &args.local_path {
                 tokio::fs::write(path, &jpeg).await?;
                 write!(text, ", saved to {path}")?;
             }
+            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, region, args.width)).await??;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
             anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
         };
