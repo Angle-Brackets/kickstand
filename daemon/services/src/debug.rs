@@ -27,6 +27,8 @@ pub struct MemoryInfo {
 
 /// `MemoryType_Normal`: heap.
 pub const STATE_HEAP: u32 = 5;
+/// [`MemoryInfo::permission`]'s execute bit.
+pub const PERM_EXECUTE: u32 = 4;
 
 /// A paused thread's registers.
 pub struct Registers {
@@ -58,7 +60,6 @@ impl Debugged {
     /// Neighbours with the same type and permission are one region (a busy heap is hundreds of blocks
     /// otherwise), and executable regions are kept past `max`, so the code (an NRO's header) is always there.
     pub fn mappings(&self, max: usize) -> Result<(Vec<MemoryInfo>, bool)> {
-        const EXECUTE: u32 = 4;
         let mut out: Vec<MemoryInfo> = Vec::new();
         let mut truncated = false;
         let mut address = 0u64;
@@ -73,7 +74,7 @@ impl Debugged {
                     {
                         last.size += info.size;
                     }
-                    _ if full && info.permission & EXECUTE == 0 => truncated = true,
+                    _ if full && info.permission & PERM_EXECUTE == 0 => truncated = true,
                     _ => out.push(info),
                 }
             }

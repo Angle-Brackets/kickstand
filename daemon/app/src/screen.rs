@@ -74,6 +74,11 @@ impl Checks {
             boot2: sd::stat(SYSMODULE_BOOT2_FLAG).is_ok(),
         }
     }
+
+    /// Whether the background service is installed to start at boot.
+    fn starts_at_boot(&self) -> bool {
+        self.installed && self.boot2
+    }
 }
 
 pub struct Screen {
@@ -120,7 +125,7 @@ impl Screen {
 
     /// Whether the background service should be running once this NRO exits: it's installed to start at boot.
     pub fn starts_at_boot(&self) -> bool {
-        self.checks.installed && self.checks.boot2
+        self.checks.starts_at_boot()
     }
 
     /// Takes new log lines and redraws when something changed (or every [`REFRESH_MS`]); otherwise waits a
@@ -297,7 +302,7 @@ impl View<'_> {
             line_y += if i % 2 == 1 { 44 } else { 32 };
         }
         if self.clients.len() < 2 {
-            let hint = if self.checks.installed && self.checks.boot2 {
+            let hint = if self.checks.starts_at_boot() {
                 "You can leave this screen with +: Kickstand keeps working in the background."
             } else {
                 "Kickstand works only while this screen is open."
@@ -357,7 +362,7 @@ impl View<'_> {
     fn footer<C: Canvas<ColorFormat = RGBA8>>(&self, p: &mut Painter<'_, C>, y: i32) {
         let mut x = MARGIN;
         x += p.button(GLYPH_PLUS, "+", 15.0, x, y, TEXT) + 8;
-        let exit = if self.checks.installed && self.checks.boot2 { "Exit (Kickstand keeps running in the background)" } else { "Exit" };
+        let exit = if self.checks.starts_at_boot() { "Exit (Kickstand keeps running in the background)" } else { "Exit" };
         p.text(exit, 14.0, x, y + 2, TEXT);
 
         let scroll = "Scroll activity";

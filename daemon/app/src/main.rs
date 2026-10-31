@@ -2,9 +2,10 @@
 //! The daemon as an NRO, opened from hbmenu (or nxlink, which can add a token:
 //! `nxlink -s -a <switch-ip> --args "--token <token>" kickstand.nro`). It accepts the tokens in
 //! `/kickstand/token.txt` like the sysmodule, and pairs new PCs with the code it shows. Press + on the
-//! console to exit; a client's `Exit` request also ends it. The screen shows whether an agent is connected and what it's doing, how to reach the
-//! console, and the daemon's log. Leaving with + restarts the sysmodule it stopped (or one set to start at
-//! boot), so the console isn't left without Kickstand.
+//! console to exit; a client's `Exit` request also ends it. The screen shows whether an
+//! agent is connected and what it's doing, how to reach the console, and the daemon's log. Leaving with +
+//! restarts the sysmodule it stopped (or one set to start at boot), so the console isn't left without
+//! Kickstand.
 //!
 //! With `--open <nro> [args]` or `--title <id>` it is a launcher instead (see `launcher.rs`).
 

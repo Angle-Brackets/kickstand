@@ -69,12 +69,12 @@ pub struct SetStateArgs {
 
 #[nx_derive::ipc_trait]
 pub trait HidDbgInterface {
-    /// `hiddbgAttachHdlsWorkBuffer`: returns the HDLS session id.
     /// `hiddbgSetTouchScreenAutoPilotState`: the touch screen reports these touches until unset.
     #[ipc_rid(11)]
     fn set_touch_screen_auto_pilot_state(&self, states: sf::InMapAliasBuffer<TouchState>);
     #[ipc_rid(12)]
     fn unset_touch_screen_auto_pilot_state(&self);
+    /// `hiddbgAttachHdlsWorkBuffer`: returns the HDLS session id.
     #[ipc_rid(324)]
     fn attach_hdls_work_buffer(&self, size: u64, tmem: sf::CopyHandle) -> u64;
     #[ipc_rid(325)]

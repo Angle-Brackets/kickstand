@@ -646,12 +646,11 @@ fn memory_map(applet: bool) -> Response {
         Ok(found) => found,
         Err(rc) => return system_error("listing the mappings", rc),
     };
-    const EXECUTE: u32 = 4;
     let regions: Vec<MemoryRegion> = mappings
         .iter()
         .map(|m| {
             let mut magic = [0u8; 4];
-            let nro = m.permission & EXECUTE != 0 && process.read(m.base_address + 0x10, &mut magic).is_ok() && &magic == b"NRO0";
+            let nro = m.permission & services::debug::PERM_EXECUTE != 0 && process.read(m.base_address + 0x10, &mut magic).is_ok() && &magic == b"NRO0";
             MemoryRegion { base: m.base_address, size: m.size, state: m.state, perm: m.permission, nro }
         })
         .collect();
