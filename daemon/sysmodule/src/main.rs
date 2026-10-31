@@ -40,6 +40,7 @@ fn main() {
     daemon_core::awake::unlock_after_agent_reboot();
     daemon_core::hbl::disarm_leftover();
     indicator::start();
+    daemon_core::start_hold_expiry();
     if daemon_core::tokens::load(None) == 0 {
         log!("no tokens in {}: pair a PC through the Kickstand NRO", proto::path::TOKEN_PATH);
     }

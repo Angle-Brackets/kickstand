@@ -242,45 +242,110 @@ const SETTLE_NS: i64 = 1_000_000_000;
 /// Between a release and the next press.
 const GAP_NS: i64 = 150_000_000;
 
-/// One press sequence at a time (a client's and the boot unlock's), so only one virtual controller is ever
-/// attached.
-static PRESSING: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
+/// The controller [`hold`] keeps attached between requests, with what it holds and until when (uptime
+/// ms). Press sequences take this lock too, so only one virtual controller is ever attached and they run
+/// one at a time (a client's and the boot unlock's).
+static PAD: nx::sync::Mutex<Option<Held>> = nx::sync::Mutex::new(None);
 
-/// Attaches a virtual controller, then holds each step's buttons, sticks and touch for its time (an empty
-/// step is a pause), and releases everything before detaching. A button in consecutive steps stays held
-/// across them, e.g. R through a press of A and the loading that follows.
-pub fn play(steps: &[Step]) -> Result<()> {
-    let _one_at_a_time = PRESSING.lock();
-    let mut pad = VirtualController::attach()?;
-    let _ = svc::sleep_thread(SETTLE_NS);
-    let result = (|| {
-        for step in steps {
-            pad.set_state(step)?;
-            if step.touch != pad.touch {
-                pad.set_touch(step.touch)?;
-            }
-            let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
-        }
-        Ok(())
-    })();
-    // Never leave a finger down or a button held, even after an error.
+struct Held {
+    pad: VirtualController,
+    step: Step,
+    until_ms: u64,
+}
+
+// Only used under `PAD`'s lock; the IPC sessions in it are handles the whole process may use.
+unsafe impl Send for Held {}
+unsafe impl Sync for Held {}
+
+/// Holds `step`'s buttons, sticks and touch (its `ms` is ignored) on a controller kept attached until
+/// `until_ms` (uptime), then [`expire_hold`] releases everything and detaches it. Called again, it
+/// changes what's held and when it ends; an empty step keeps the controller attached, holding nothing, so
+/// presses meanwhile skip the settling time. The first call attaches the controller and waits for it to
+/// settle.
+pub fn hold(step: &Step, until_ms: u64) -> Result<()> {
+    let mut held = PAD.lock();
+    if held.is_none() {
+        let pad = VirtualController::attach()?;
+        let _ = svc::sleep_thread(SETTLE_NS);
+        *held = Some(Held { pad, step: Step::default(), until_ms });
+    }
+    let Some(held) = held.as_mut() else { unreachable!("attached above") };
+    held.until_ms = until_ms;
+    held.step = *step;
+    apply(&mut held.pad, step)
+}
+
+/// Releases and detaches the held controller now, if there is one.
+pub fn release_hold() {
+    if let Some(mut held) = PAD.lock().take() {
+        release(&mut held.pad);
+    }
+}
+
+/// Releases and detaches the held controller once its time is up. Call it a few times a second.
+pub fn expire_hold(now_ms: u64) {
+    let mut held = PAD.lock();
+    if held.as_ref().is_some_and(|h| now_ms >= h.until_ms)
+        && let Some(mut h) = held.take()
+    {
+        release(&mut h.pad);
+    }
+}
+
+fn apply(pad: &mut VirtualController, step: &Step) -> Result<()> {
+    pad.set_state(step)?;
+    if step.touch != pad.touch {
+        pad.set_touch(step.touch)?;
+    }
+    Ok(())
+}
+
+/// Never leaves a finger down or a button held.
+fn release(pad: &mut VirtualController) {
     let _ = pad.set_touch(None);
     let _ = pad.set_buttons(0);
     let _ = svc::sleep_thread(GAP_NS);
+}
+
+/// Runs `f` on the held controller (then holds its step again), or on one attached for the call.
+fn with_pad(f: impl FnOnce(&mut VirtualController) -> Result<()>) -> Result<()> {
+    let mut held = PAD.lock();
+    if let Some(held) = held.as_mut() {
+        let result = f(&mut held.pad);
+        let _ = svc::sleep_thread(GAP_NS);
+        return result.and(apply(&mut held.pad, &held.step));
+    }
+    let mut pad = VirtualController::attach()?;
+    let _ = svc::sleep_thread(SETTLE_NS);
+    let result = f(&mut pad);
+    release(&mut pad);
     result
 }
 
-/// Attaches a virtual controller, presses `buttons` together `times` times (holding each `hold_ms`), and
-/// detaches it again.
+/// Holds each step's buttons, sticks and touch for its time (an empty step is a pause), then releases
+/// everything. A button in consecutive steps stays held across them, e.g. R through a press of A and the
+/// loading that follows. Uses the held controller if there is one, else attaches one for the call.
+pub fn play(steps: &[Step]) -> Result<()> {
+    with_pad(|pad| {
+        for step in steps {
+            apply(pad, step)?;
+            let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
+        }
+        let _ = pad.set_touch(None);
+        pad.set_buttons(0)
+    })
+}
+
+/// Presses `buttons` together `times` times, holding each `hold_ms`, on the held controller or one
+/// attached for the call.
 pub fn press(buttons: u64, times: u32, hold_ms: u32) -> Result<()> {
-    let _one_at_a_time = PRESSING.lock();
-    let mut pad = VirtualController::attach()?;
-    let _ = svc::sleep_thread(SETTLE_NS);
-    for _ in 0..times {
-        pad.set_buttons(buttons)?;
-        let _ = svc::sleep_thread(i64::from(hold_ms) * 1_000_000);
-        pad.set_buttons(0)?;
-        let _ = svc::sleep_thread(GAP_NS);
-    }
-    Ok(())
+    with_pad(|pad| {
+        for _ in 0..times {
+            pad.set_buttons(buttons)?;
+            let _ = svc::sleep_thread(i64::from(hold_ms) * 1_000_000);
+            pad.set_buttons(0)?;
+            let _ = svc::sleep_thread(GAP_NS);
+        }
+        Ok(())
+    })
 }

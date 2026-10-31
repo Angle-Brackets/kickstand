@@ -52,6 +52,12 @@ impl Client {
         &self.addr
     }
 
+    /// A client for the same console with a connection of its own, for work alongside this one's (frames
+    /// captured while this one holds buttons).
+    pub fn another(&self) -> Client {
+        Client::new(self.addr.clone(), self.token.clone())
+    }
+
     /// The console's address without the port.
     pub fn host(&self) -> &str {
         self.addr.rsplit_once(':').map_or(&self.addr, |(host, _)| host)
@@ -275,6 +281,16 @@ impl Client {
     /// Plays timed button steps on one virtual controller ([`Request::Input`]).
     pub async fn input(&self, steps: Vec<proto::InputStep>) -> Result<()> {
         expect(self.request(Request::Input { steps }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+    }
+
+    /// Holds `step` for `step.ms` on a controller that stays attached meanwhile (see [`Request::Hold`]);
+    /// `false` from a daemon older than protocol 23.
+    pub async fn hold(&self, step: proto::InputStep) -> Result<bool> {
+        match self.request(Request::Hold { step }).await? {
+            Response::Ok => Ok(true),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Ok(false),
+            other => Err(unexpected(other)),
+        }
     }
 
     /// The running application, if any.

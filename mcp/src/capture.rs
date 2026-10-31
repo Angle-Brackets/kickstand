@@ -92,10 +92,18 @@ pub fn contact_sheet(shots: &[Shot], count: usize) -> Result<Vec<u8>> {
 /// Crops `jpeg` to `region` (x, y, w, h in the 1280x720 screen) and scales it to `width` pixels wide; the
 /// original if neither is asked for.
 pub fn reframe(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>, width: Option<u32>) -> Result<Vec<u8>> {
-    if region.is_none() && width.is_none() {
+    frame(jpeg, region, width, false)
+}
+
+/// [`reframe`], with a coordinate grid drawn over it first if `grid`.
+pub fn frame(jpeg: &[u8], region: Option<Region>, width: Option<u32>, grid: bool) -> Result<Vec<u8>> {
+    if region.is_none() && width.is_none() && !grid {
         return Ok(jpeg.to_vec());
     }
     let mut img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?.to_rgb8();
+    if grid {
+        draw_grid(&mut img, region.unwrap_or((0, 0, SCREEN.0, SCREEN.1)));
+    }
     if let Some((x, y, w, h)) = region {
         let (iw, ih) = img.dimensions();
         if x >= iw || y >= ih || w == 0 || h == 0 {
@@ -110,6 +118,85 @@ pub fn reframe(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>, width: Option<
     let mut out = Vec::new();
     JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img)?;
     Ok(out)
+}
+
+/// x, y, width, height in the 1280x720 screen.
+pub type Region = (u32, u32, u32, u32);
+
+pub const SCREEN: (u32, u32) = (1280, 720);
+
+/// Grid lines every this many screen pixels.
+const GRID: u32 = 100;
+
+/// Lines every [`GRID`] pixels, labelled with their screen coordinate along the top and left of `area`
+/// (the part of the screen that will be shown), so positions can be read off instead of guessed.
+fn draw_grid(img: &mut RgbImage, area: Region) {
+    let (w, h) = img.dimensions();
+    let tint = |p: &mut image::Rgb<u8>| {
+        let [r, g, b] = p.0;
+        p.0 = [((u16::from(r) + 0xFF) / 2) as u8, ((u16::from(g) + 0x45) / 2) as u8, ((u16::from(b) + 0x54) / 2) as u8];
+    };
+    for x in (GRID..w).step_by(GRID as usize) {
+        for y in 0..h {
+            tint(img.get_pixel_mut(x, y));
+        }
+    }
+    for y in (GRID..h).step_by(GRID as usize) {
+        for x in 0..w {
+            tint(img.get_pixel_mut(x, y));
+        }
+    }
+    let (ax, ay, aw, ah) = area;
+    let first = |from: u32| from.div_ceil(GRID).max(1) * GRID;
+    for x in (first(ax)..(ax + aw).min(w)).step_by(GRID as usize) {
+        label(img, x + 3, ay + 3, x);
+    }
+    for y in (first(ay)..(ay + ah).min(h)).step_by(GRID as usize) {
+        label(img, ax + 3, y + 3, y);
+    }
+}
+
+/// `value` in a 3x5 pixel font at 4x, white on a dark box, with its top-left at (x, y).
+fn label(img: &mut RgbImage, x: u32, y: u32, value: u32) {
+    const DIGITS: [[u8; 5]; 10] = [
+        [7, 5, 5, 5, 7],
+        [2, 6, 2, 2, 7],
+        [7, 1, 7, 4, 7],
+        [7, 1, 7, 1, 7],
+        [5, 5, 7, 1, 1],
+        [7, 4, 7, 1, 7],
+        [7, 4, 7, 5, 7],
+        [7, 1, 1, 1, 1],
+        [7, 5, 7, 5, 7],
+        [7, 5, 7, 1, 7],
+    ];
+    const S: u32 = 4;
+    let text = value.to_string();
+    let (bw, bh) = (text.len() as u32 * 4 * S + S, 5 * S + 2 * S);
+    let (w, h) = img.dimensions();
+    for py in y..(y + bh).min(h) {
+        for px in x..(x + bw).min(w) {
+            img.put_pixel(px, py, image::Rgb([0x15, 0x17, 0x1C]));
+        }
+    }
+    for (i, ch) in text.bytes().enumerate() {
+        let glyph = DIGITS[usize::from(ch - b'0')];
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (4 >> col) == 0 {
+                    continue;
+                }
+                for dy in 0..S {
+                    for dx in 0..S {
+                        let (px, py) = (x + S + (i as u32 * 4 + col) * S + dx, y + S + row as u32 * S + dy);
+                        if px < w && py < h {
+                            img.put_pixel(px, py, image::Rgb([0xF2, 0xF0, 0xEA]));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// What [`wait`] waits for.
@@ -163,12 +250,12 @@ pub async fn wait(client: &Client, until: Until, region: Option<(u32, u32, u32, 
 }
 
 /// Over this fraction of thumbnail pixels changed: the screen changed.
-const CHANGED: f32 = 0.01;
+pub const CHANGED: f32 = 0.01;
 /// Under this: nothing moved.
-const STILL: f32 = 0.003;
+pub const STILL: f32 = 0.003;
 
 /// A 128x72 (for the whole screen) grayscale copy.
-fn thumbnail(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>) -> Result<image::GrayImage> {
+pub fn thumbnail(jpeg: &[u8], region: Option<Region>) -> Result<image::GrayImage> {
     let mut img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?.to_luma8();
     if let Some((x, y, w, h)) = region {
         let (iw, ih) = img.dimensions();
@@ -182,7 +269,7 @@ fn thumbnail(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>) -> Result<image:
 }
 
 /// The fraction of pixels more than 16 levels apart.
-fn changed(a: &image::GrayImage, b: &image::GrayImage) -> f32 {
+pub fn changed(a: &image::GrayImage, b: &image::GrayImage) -> f32 {
     let differ = a.as_raw().iter().zip(b.as_raw()).filter(|(x, y)| x.abs_diff(**y) > 16).count();
     differ as f32 / a.as_raw().len().max(1) as f32
 }

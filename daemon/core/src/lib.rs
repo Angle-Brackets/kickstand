@@ -32,6 +32,21 @@ pub fn start_sysmodule() -> nx::result::Result<u64> {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Milliseconds since the console booted.
+/// Releases a held virtual controller ([`proto::Request::Hold`]) when its lease runs out, checking ten
+/// times a second. For the sysmodule; the NRO checks from its screen loop instead, as a thread left
+/// running after it exits would run unmapped code.
+pub fn start_hold_expiry() {
+    let spawned = nx::thread::Builder::new().name("hold").stack_size(0x4000).spawn(|| {
+        loop {
+            services::hid::expire_hold(uptime_ms());
+            let _ = nx::svc::sleep_thread(100_000_000);
+        }
+    });
+    if let Err(rc) = spawned {
+        log!("hold expiry thread didn't start: {rc}");
+    }
+}
+
 pub fn uptime_ms() -> u64 {
     nx::arm::get_system_tick() * 1000 / nx::arm::get_system_tick_frequency()
 }

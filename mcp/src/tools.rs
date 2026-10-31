@@ -27,8 +27,20 @@ pub struct Tools {
     collector: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// The ELF (and module name) run_nro or a memory tool was last given, for the memory tools' symbols.
     elf: Arc<std::sync::Mutex<Option<ElfChoice>>>,
+    /// The last screenshots handed out, by number, for input_until to cut patches from.
+    shots: Arc<std::sync::Mutex<Shots>>,
     tool_router: ToolRouter<Self>,
 }
+
+/// Screenshots kept for [`Tools::input_until`], newest last.
+#[derive(Default)]
+struct Shots {
+    next: u64,
+    kept: std::collections::VecDeque<(u64, Vec<u8>)>,
+}
+
+/// How many screenshots [`Shots`] keeps.
+const SHOTS_KEPT: usize = 12;
 
 /// An ELF path and the module name its addresses use.
 type ElfChoice = (String, Option<String>);
@@ -139,6 +151,37 @@ pub struct PressArgs {
     pub times: Option<u8>,
     /// How long each press is held, in milliseconds (1-2000, default 100).
     pub hold_ms: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InputUntilArgs {
+    /// Hold this the whole time: buttons and sticks joined with "+" as in input's steps, without ":MS",
+    /// e.g. "right", "l=1,0" (left stick right), "l=1,0+b" (run right), "zl+a".
+    pub hold: Option<String>,
+    /// Or press these together over and over (e.g. "a" to get through dialogue), every every_ms.
+    pub repeat: Option<String>,
+    /// Milliseconds between repeat presses (default 400, at least 150).
+    pub every_ms: Option<u32>,
+    /// Or play these input steps (input's syntax) over and over.
+    pub steps: Option<String>,
+    /// When to stop. "change": the screen (or region) differs from when it began. "still": it stops
+    /// changing. "appears": the part of an earlier screenshot given by region (and shot) shows up within
+    /// search. "gone": that part is no longer there.
+    pub until: String,
+    /// "x,y,w,h" in the 1280x720 screen. For change and still: only watch this part. For appears and gone:
+    /// the part of the screenshot to look for (at least 8x8; something distinctive, like a prompt or an
+    /// icon, 40-200 pixels across). Read it off a screenshot taken with grid: true.
+    pub region: Option<String>,
+    /// For appears and gone: the screenshot (its number, from screenshot or wait_screen) to take region
+    /// from; default the newest.
+    pub shot: Option<u64>,
+    /// For appears and gone: where to look, "x,y,w,h" or "screen" (default: around region, 96 pixels each
+    /// way, so it may move a little).
+    pub search: Option<String>,
+    /// Give up after this many seconds (default 15, max 60).
+    pub timeout_seconds: Option<f64>,
+    /// Width of the screenshot you get back (default 640).
+    pub width: Option<u32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -288,6 +331,9 @@ pub struct ScreenshotArgs {
     /// Only this part of the 1280x720 screen, "x,y,w,h" (e.g. a dialog or a status bar, to read it at full
     /// resolution cheaply).
     pub region: Option<String>,
+    /// Draw a grid every 100 screen pixels, labelled with coordinates, to read positions off accurately
+    /// (for regions in input_until, touch or region). Default false.
+    pub grid: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -406,7 +452,40 @@ fn fail(e: anyhow::Error) -> CallToolResult {
 #[tool_router]
 impl Tools {
     pub fn new(client: Arc<Client>) -> Self {
-        Tools { client, output: Default::default(), collector: Default::default(), elf: Default::default(), tool_router: Self::tool_router() }
+        Tools {
+            client,
+            output: Default::default(),
+            collector: Default::default(),
+            elf: Default::default(),
+            shots: Default::default(),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Keeps `jpeg` (full size) and returns its number.
+    fn remember(&self, jpeg: &[u8]) -> u64 {
+        let mut shots = self.shots.lock().unwrap();
+        shots.next += 1;
+        let id = shots.next;
+        shots.kept.push_back((id, jpeg.to_vec()));
+        while shots.kept.len() > SHOTS_KEPT {
+            shots.kept.pop_front();
+        }
+        id
+    }
+
+    /// Screenshot `id` (the newest if `None`).
+    fn shot(&self, id: Option<u64>) -> anyhow::Result<(u64, Vec<u8>)> {
+        let shots = self.shots.lock().unwrap();
+        let found = match id {
+            Some(id) => shots.kept.iter().find(|(n, _)| *n == id),
+            None => shots.kept.back(),
+        };
+        match (found, id) {
+            (Some((n, jpeg)), _) => Ok((*n, jpeg.clone())),
+            (None, Some(id)) => anyhow::bail!("shot {id} is gone (the last {SHOTS_KEPT} are kept): take a screenshot and use its number"),
+            (None, None) => anyhow::bail!("no screenshot yet: take one and pick the region from it"),
+        }
     }
 
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
@@ -453,6 +532,71 @@ impl Tools {
             anyhow::Ok(format!("played {n} steps"))
         };
         result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Input that runs until something happens on screen, in one call instead of a press-and-look loop: hold buttons or a stick, press a button repeatedly, or replay steps, while this PC watches the screen a few times a second and stops it the moment the condition holds. Conditions: the screen (or a region) changes, stops changing, or a piece of an earlier screenshot appears or disappears (e.g. mash A until the 'Continue' prompt appears; hold right until the door is gone; press down until the cursor reaches an item). You choose the region from a screenshot (grid: true labels coordinates); this only compares pixels, so pick something that looks the same each time it shows. Everything is released at the end. Returns what stopped it, how long it took, and the screen then (as a new shot). Reacts within about a quarter second: fine for menus, dialogue and walking, not for frame-precise play.")]
+    async fn input_until(&self, Parameters(args): Parameters<InputUntilArgs>) -> CallToolResult {
+        let result = async {
+            use crate::until::{Action, Until};
+            let action = match (&args.hold, &args.repeat, &args.steps) {
+                (Some(hold), None, None) => {
+                    let mut steps = crate::client::parse_steps(&format!("{}:1", hold.trim()))?;
+                    anyhow::ensure!(steps.len() == 1, "hold is one thing held, like \"right\" or \"l=1,0+b\"; use steps for sequences");
+                    Action::Hold(steps.remove(0))
+                }
+                (None, Some(buttons), None) => Action::Repeat {
+                    buttons: crate::client::parse_buttons(buttons)?,
+                    every: std::time::Duration::from_millis(u64::from(args.every_ms.unwrap_or(400).max(150))),
+                    hold_ms: 80,
+                },
+                (None, None, Some(steps)) => Action::Steps(crate::client::parse_steps(steps)?),
+                _ => anyhow::bail!("give exactly one of hold, repeat or steps"),
+            };
+            let region = args.region.as_deref().map(parse_region).transpose()?;
+            let mut patch_note = None;
+            let until = match args.until.as_str() {
+                "change" | "changed" => Until::Change(region),
+                "still" | "stable" | "settle" => Until::Still(region),
+                kind @ ("appears" | "appear" | "gone" | "disappears") => {
+                    let region = region.context("appears and gone need region: the part of a screenshot to look for")?;
+                    let (id, jpeg) = self.shot(args.shot)?;
+                    let patch = crate::until::Patch::cut(&jpeg, region)?;
+                    let search = match args.search.as_deref() {
+                        None => crate::until::around(region),
+                        Some("screen" | "anywhere") => (0, 0, crate::capture::SCREEN.0, crate::capture::SCREEN.1),
+                        Some(r) => parse_region(r)?,
+                    };
+                    let cut = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, Some(region), None)).await??;
+                    patch_note = Some((id, cut));
+                    if kind.starts_with("appear") { Until::Appears { patch, search } } else { Until::Gone { patch, search } }
+                }
+                other => anyhow::bail!("until is change, still, appears or gone, not {other:?}"),
+            };
+            let timeout = args.timeout_seconds.unwrap_or(15.0).clamp(0.0, crate::until::MAX_SECONDS);
+            let what = args.until.clone();
+            let outcome = crate::until::run(self.client.clone(), action, until, std::time::Duration::from_secs_f64(timeout)).await?;
+            let id = self.remember(&outcome.jpeg);
+            let mut text = if outcome.met {
+                format!("{what}: stopped after {:.1} s ({} frames)", outcome.elapsed.as_secs_f64(), outcome.frames)
+            } else {
+                format!("timed out after {:.1} s ({} frames) without {what}", outcome.elapsed.as_secs_f64(), outcome.frames)
+            };
+            if let Some(((x, y), score)) = outcome.best {
+                let verdict = if score < crate::until::MATCH { "a match" } else { "not a match" };
+                write!(text, "; closest at {x},{y}, score {score:.2}: {verdict} (0 is identical, under {} a match, about 1 nothing like it)", crate::until::MATCH)?;
+            }
+            write!(text, ". The screen now is shot {id}.")?;
+            let width = args.width.unwrap_or(640);
+            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&outcome.jpeg, None, Some(width))).await??;
+            let mut content = vec![ContentBlock::text(text)];
+            if let Some((shot, cut)) = patch_note {
+                content.push(ContentBlock::text(format!("what it looked for, from shot {shot}:")));
+                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&cut), "image/jpeg"));
+            }
+            content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+            anyhow::Ok(content)
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
     #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the console is stuck on a fatal error screen (then reboot it), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
@@ -731,12 +875,14 @@ impl Tools {
         let result = async {
             let region = args.region.as_deref().map(parse_region).transpose()?;
             let jpeg = self.client.screenshot().await?;
-            let mut text = format!("screenshot: {} bytes", jpeg.len());
+            let id = self.remember(&jpeg);
+            let mut text = format!("shot {id}: {} bytes", jpeg.len());
             if let Some(path) = &args.local_path {
                 tokio::fs::write(path, &jpeg).await?;
                 write!(text, ", saved to {path}")?;
             }
-            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, region, args.width)).await??;
+            let grid = args.grid.unwrap_or(false);
+            let jpeg = tokio::task::spawn_blocking(move || crate::capture::frame(&jpeg, region, args.width, grid)).await??;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
             anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
         };
@@ -765,6 +911,7 @@ impl Tools {
                 waited.elapsed.as_secs_f64(),
                 waited.captures
             );
+            let text = format!("{text} (shot {})", self.remember(&waited.jpeg));
             let width = args.width.unwrap_or(640);
             let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&waited.jpeg, None, Some(width))).await??;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);

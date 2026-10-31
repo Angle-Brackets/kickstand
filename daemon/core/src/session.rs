@@ -116,6 +116,7 @@ impl Session {
             Request::IramPeek { offset } => self.iram_peek(offset),
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
             Request::Input { steps } => input(&steps),
+            Request::Hold { step } => hold(&step),
             Request::AppStatus => app_status(),
             Request::CloseApp => close_app(),
             Request::ListApps { max } => list_apps(usize::from(max)),
@@ -460,21 +461,37 @@ fn input(steps: &[InputStep]) -> Response {
         let msg = format!("need 1-{MAX_INPUT_STEPS} steps lasting at most {MAX_INPUT_MS} ms in all");
         return Response::error(ErrorKind::BadRequest, msg);
     }
-    let clamp = |(x, y): (i32, i32)| [x.clamp(-STICK_MAX, STICK_MAX), y.clamp(-STICK_MAX, STICK_MAX)];
-    let steps: Vec<services::hid::Step> = steps
-        .iter()
-        .map(|s| services::hid::Step {
-            buttons: s.buttons.iter().fold(0, |bits, b| bits | b.bit()),
-            left: s.left.map_or([0, 0], clamp),
-            right: s.right.map_or([0, 0], clamp),
-            touch: s.touch.map(|(x, y)| (u32::from(x.min(1279)), u32::from(y.min(719)))),
-            ms: s.ms,
-        })
-        .collect();
+    let steps: Vec<services::hid::Step> = steps.iter().map(to_hid_step).collect();
     crate::log!("input: {} steps, {total} ms", steps.len());
     match services::hid::play(&steps) {
         Ok(()) => Response::Ok,
         Err(rc) => system_error("pressing buttons (hid:dbg)", rc),
+    }
+}
+
+fn hold(step: &InputStep) -> Response {
+    if step.ms == 0 {
+        services::hid::release_hold();
+        return Response::Ok;
+    }
+    if step.ms > proto::MAX_HOLD_LEASE_MS {
+        return Response::error(ErrorKind::BadRequest, format!("a hold lasts at most {} ms; send it again to renew", proto::MAX_HOLD_LEASE_MS));
+    }
+    let until = crate::uptime_ms() + u64::from(step.ms);
+    match services::hid::hold(&to_hid_step(step), until) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error("holding buttons (hid:dbg)", rc),
+    }
+}
+
+fn to_hid_step(s: &InputStep) -> services::hid::Step {
+    let clamp = |(x, y): (i32, i32)| [x.clamp(-STICK_MAX, STICK_MAX), y.clamp(-STICK_MAX, STICK_MAX)];
+    services::hid::Step {
+        buttons: s.buttons.iter().fold(0, |bits, b| bits | b.bit()),
+        left: s.left.map_or([0, 0], clamp),
+        right: s.right.map_or([0, 0], clamp),
+        touch: s.touch.map(|(x, y)| (u32::from(x.min(1279)), u32::from(y.min(719)))),
+        ms: s.ms,
     }
 }
 

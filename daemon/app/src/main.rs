@@ -86,6 +86,7 @@ fn main() {
     }
     STOP.store(true, Ordering::Relaxed);
     let _ = server.join();
+    services::hid::release_hold();
     // The listener is closed now, so the sysmodule can bind the port on its first try.
     if daemon_core::HANDOVER_REQUESTED.load(Ordering::Relaxed) {
         match daemon_core::start_sysmodule() {
@@ -175,6 +176,8 @@ fn run_screen() -> bool {
             return true;
         }
         screen.frame(down.contains(hid::NpadButton::Up()), down.contains(hid::NpadButton::Down()));
+        // The sysmodule has a thread for this; one here would outlive the NRO.
+        services::hid::expire_hold(daemon_core::uptime_ms());
         BOOT2.store(screen.starts_at_boot(), Ordering::Relaxed);
     }
     false

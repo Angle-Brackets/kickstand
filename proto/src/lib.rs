@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -229,7 +229,17 @@ pub enum Request {
     /// lease, so a display left open neither shows up as an agent nor keeps the console awake. Answers
     /// [`Response::Activity`].
     Activity,
+    /// (23) Holds `step`'s buttons, sticks and touch on a virtual controller that stays attached for
+    /// `step.ms` (at most [`MAX_HOLD_LEASE_MS`]); then everything is released and the controller detached,
+    /// so a client that goes away never leaves a button held. Sent again, it changes what's held and
+    /// renews the lease; `ms` 0 releases and detaches now. An empty step keeps the controller attached
+    /// holding nothing, so [`Request::Press`] and [`Request::Input`] meanwhile skip the second a new
+    /// controller needs to settle. Answers [`Response::Ok`] once it's held.
+    Hold { step: InputStep },
 }
+
+/// Longest lease of one [`Request::Hold`].
+pub const MAX_HOLD_LEASE_MS: u32 = 5_000;
 
 impl Request {
     /// What the request is doing, in plain words, for a person watching ("looking at the screen").
@@ -252,7 +262,7 @@ impl Request {
             }
             Request::Exit => "closing Kickstand",
             Request::RebootToHekate { .. } => "restarting the console",
-            Request::Press { .. } | Request::Input { .. } => "pressing buttons",
+            Request::Press { .. } | Request::Input { .. } | Request::Hold { .. } => "pressing buttons",
             Request::KeepAwake { .. } => "keeping the screen on",
             Request::IndicatorPosition { .. } => "placing the indicator",
             Request::Screenshot | Request::ScreenshotRead { .. } => "looking at the screen",
@@ -734,6 +744,7 @@ mod tests {
                 Request::Threads => 36,
                 Request::Pair { .. } => 37,
                 Request::Activity => 38,
+                Request::Hold { .. } => 39,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -801,6 +812,7 @@ mod tests {
             Request::Threads,
             Request::Pair { version: 0, code: s(), token: s() },
             Request::Activity,
+            Request::Hold { step: InputStep::default() },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
