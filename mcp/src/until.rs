@@ -149,11 +149,8 @@ pub async fn run(client: Arc<Client>, action: Action, until: Until, timeout: Dur
         if met {
             break Ok(true);
         }
-        if acting.is_finished() {
-            // It only ends on its own by failing.
-            break Ok(false);
-        }
-        if start.elapsed() >= timeout {
+        // The action only ends on its own by failing.
+        if acting.is_finished() || start.elapsed() >= timeout {
             break Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(60)).await;
@@ -305,5 +302,4 @@ mod tests {
         let (_, score) = find(&small(&gone).unwrap(), &patch, around(cut));
         assert!(score > GONE, "{score}");
     }
-
 }

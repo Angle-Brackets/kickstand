@@ -125,6 +125,7 @@ fn program_name(id: u64) -> Option<&'static str> {
         0x0100000000000004 => "sm",
         0x0100000000000006 => "usb",
         0x0100000000000009 => "settings",
+        0x010000000000000D => "dmnt",
         0x010000000000000F => "wlan",
         0x0100000000000010 => "ldn",
         0x0100000000000012 => "bsdsockets",
@@ -141,7 +142,6 @@ fn program_name(id: u64) -> Option<&'static str> {
         0x010000000000003C => "jit",
         0x0100000000001000 => "qlaunch (home menu)",
         0x0100000000001023 => "error applet",
-        0x010000000000000D => "dmnt",
         0x42000000004D4350 => "kickstand sysmodule",
         _ => return None,
     })
@@ -192,9 +192,7 @@ pub async fn list(client: &Client, limit: usize) -> Result<Vec<Entry>> {
         }
     }
     if let Ok((entries, _)) = client.list_dir(FATAL_DIR).await {
-        for e in entries.into_iter().filter(|e| e.name.starts_with("report_") && e.name.ends_with(".bin")) {
-            fatals.push((0, format!("{FATAL_DIR}/{}", e.name)));
-        }
+        fatals.extend(entries.into_iter().filter(|e| e.name.starts_with("report_") && e.name.ends_with(".bin")).map(|e| (0, format!("{FATAL_DIR}/{}", e.name))));
     }
     reports.sort_by(|a, b| b.cmp(a));
     reports.truncate(limit);
