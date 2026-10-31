@@ -88,15 +88,13 @@ fn tab_names() -> Vec<&'static str> {
 
 /// Draws the overview; `open` runs from 0 to 1 as it opens and back as it closes.
 pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
-    let frame = egui::Frame::new().fill(theme::PAPER).stroke(Stroke::new(1.5, INK)).inner_margin(Margin::same(32));
+    // The frame fades with what's in it.
+    let frame = egui::Frame::new().fill(theme::PAPER.gamma_multiply(open)).stroke(Stroke::new(1.5, INK.gamma_multiply(open))).inner_margin(Margin::same(32));
     let id = egui::Id::unique("overview");
     let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
     let screen = ctx.content_rect();
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(INK.gamma_multiply(0.35 * open)).show(ctx, |ui| {
         ui.multiply_opacity(open);
-        if !app.overview {
-            ui.disable();
-        }
         let width = (screen.width() - 140.0).clamp(480.0, 760.0);
         ui.set_width(width);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -243,10 +241,6 @@ fn diagram(ui: &mut Ui) {
         let left = rect.left() + i as f32 * (box_width + GAP);
         let cell = Rect::from_min_size(egui::pos2(left, rect.top()), Vec2::new(box_width, height));
         painter.rect_stroke(cell, 0.0, Stroke::new(1.5, INK), egui::StrokeKind::Inside);
-        // The Switch has a red edge, like the Joy-Con in the app's art.
-        if i == 2 {
-            painter.rect_filled(Rect::from_min_max(egui::pos2(cell.left(), cell.bottom() - 4.0), cell.max), 0.0, RED);
-        }
         let title_height = title.size().y;
         painter.galley(cell.min + Vec2::splat(PAD), title, INK);
         painter.galley(cell.min + Vec2::new(PAD, PAD + title_height + 6.0), what, BODY);

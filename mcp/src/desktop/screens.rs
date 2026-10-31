@@ -403,6 +403,10 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
 /// the least (one group of two).
 const LINKED_HEIGHT: f32 = 2.0 * (GROUP_ROW + 1.0) + 4.0 * (APP_ROW + 1.0);
 const LINKED_MIN_HEIGHT: f32 = GROUP_ROW + 1.0 + 2.0 * (APP_ROW + 1.0);
+/// Room for the linked apps' scroll bar, in the margin right of the column.
+const BAR_LANE: f32 = 18.0;
+/// Space inside each row's ends, so the arrow and counts sit clear of its hover colour.
+const ROW_INSET: f32 = 12.0;
 /// A maker's row and an app's (each has a 1 px rule under it).
 const GROUP_ROW: f32 = 52.0;
 const APP_ROW: f32 = 44.0;
@@ -660,9 +664,13 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Grouped by maker, each group folding; scrolls in what the Switch's section below leaves.
     let below = if ui.available_width() < 440.0 { SWITCH_HEIGHT_WRAPPED } else { SWITCH_HEIGHT };
     let height = (ui.available_height() - below).clamp(LINKED_MIN_HEIGHT, LINKED_HEIGHT);
-    // A bar of its own, clear of the counts (a floating one covered them).
-    ui.spacing_mut().scroll = egui::style::ScrollStyle { bar_inner_margin: 12.0, ..egui::style::ScrollStyle::solid() };
-    egui::ScrollArea::vertical().id_salt("linked").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+    // The scroll bar sits in the margin to the right, like a page's, so the rows keep the column's width
+    // whether it shows or not (a floating one covered the counts; one inside squeezed them).
+    let width = ui.available_width();
+    let mut lane = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min, Vec2::new(width + BAR_LANE, height))));
+    lane.spacing_mut().scroll = egui::style::ScrollStyle { bar_inner_margin: BAR_LANE - 6.0, ..egui::style::ScrollStyle::solid() };
+    egui::ScrollArea::vertical().id_salt("linked").max_height(height).auto_shrink([false, true]).show(&mut lane, |ui| {
+        ui.set_width(width);
         for maker in Maker::ALL {
             let apps: Vec<_> = linked.iter().filter(|(a, _)| a.maker() == maker).collect();
             if apps.is_empty() {
@@ -679,14 +687,14 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             let painter = ui.painter();
             painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
             let mid = rect.center().y;
-            art::fold(painter, egui::pos2(rect.left() + 2.0, mid - 6.0), openness, INK);
+            art::fold(painter, egui::pos2(rect.left() + ROW_INSET, mid - 6.0), openness, INK);
             let size = super::brands::SIZE;
-            app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
+            app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + ROW_INSET + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
             let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, INK, 0.0));
-            painter.galley(egui::pos2(rect.left() + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, INK);
+            painter.galley(egui::pos2(rect.left() + ROW_INSET + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, INK);
             let total: usize = apps.iter().map(|(which, _)| running(*which)).sum();
             let count = painter.layout_job(theme::job(&agents_count(total), Face::Mono, 13.0, if total > 0 { INK } else { MUTED }, 0.04));
-            painter.galley(egui::pos2(rect.right() - count.size().x, mid - count.size().y / 2.0), count, MUTED);
+            painter.galley(egui::pos2(rect.right() - ROW_INSET - count.size().x, mid - count.size().y / 2.0), count, MUTED);
             if response.clicked() {
                 app.folded[maker.index()] = open;
                 fold.set_open(!open);
@@ -701,9 +709,10 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 for (which, state) in apps {
                     ui.horizontal(|ui| {
                         ui.set_min_height(APP_ROW);
-                        ui.add_space(24.0 + size + 10.0);
+                        ui.add_space(ROW_INSET + 24.0 + size + 10.0);
                         ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(ROW_INSET);
                             if let State::Linked { command } = state {
                                 let n = running(*which);
                                 theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { INK } else { MUTED }).on_hover_text(format!("Linked: runs {command}"));
@@ -721,7 +730,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             }
         }
     });
-    ui.spacing_mut().scroll = egui::style::ScrollStyle::default();
+    ui.advance_cursor_after_rect(lane.min_rect());
     ui.add_space(34.0);
     theme::label(ui, "THIS SWITCH", true, 13.0, INK);
     ui.add_space(12.0);
@@ -786,15 +795,13 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 
 /// `open` runs from 0 to 1 as it opens and back as it closes; it only takes clicks while open.
 pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
-    let frame = egui::Frame::new().fill(theme::PAPER).stroke(Stroke::new(1.5, INK)).inner_margin(Margin::same(28));
+    // The frame fades with what's in it.
+    let frame = egui::Frame::new().fill(theme::PAPER.gamma_multiply(open)).stroke(Stroke::new(1.5, INK.gamma_multiply(open))).inner_margin(Margin::same(28));
     let id = egui::Id::unique("reboot");
     // Rises a little as it fades in.
     let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(INK.gamma_multiply(0.35 * open)).show(ctx, |ui| {
         ui.multiply_opacity(open);
-        if !app.confirm_reboot {
-            ui.disable();
-        }
         ui.set_max_width(ui.available_width().min(440.0));
         ui.spacing_mut().item_spacing.y = 16.0;
         theme::heading(ui, "Restart into hekate?", 30.0);
@@ -808,7 +815,8 @@ pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
-            if theme::button(ui, "Restart", Kind::Primary, true, true).clicked() {
+            // Not while it's closing.
+            if theme::button(ui, "Restart", Kind::Primary, true, true).clicked() && app.confirm_reboot {
                 app.send(Cmd::Reboot);
                 app.confirm_reboot = false;
             }

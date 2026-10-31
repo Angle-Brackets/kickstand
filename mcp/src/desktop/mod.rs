@@ -155,6 +155,9 @@ impl Kickstand {
         let frame = Frame::new().fill(PAPER).inner_margin(Margin::symmetric(theme::GUTTER as i8, 20));
         let panel = egui::Panel::top("header").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
             ui.horizontal(|ui| {
+                // The same height on every screen (the console button is the tallest), so the line under
+                // it doesn't jump when the screen changes.
+                ui.set_min_height(44.0);
                 ui.spacing_mut().item_spacing.x = 12.0;
                 // The mark and name open the overview.
                 let name = ui.painter().layout_job(theme::job("Kickstand", Face::Heavy, 22.0, INK, -0.01));
