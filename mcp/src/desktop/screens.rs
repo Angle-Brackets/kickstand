@@ -403,8 +403,8 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
 /// the least (one group of two).
 const LINKED_HEIGHT: f32 = 2.0 * (GROUP_ROW + 1.0) + 4.0 * (APP_ROW + 1.0);
 const LINKED_MIN_HEIGHT: f32 = GROUP_ROW + 1.0 + 2.0 * (APP_ROW + 1.0);
-/// Room for the linked apps' scroll bar (6 px) and the gap before it, in the margin right of the column.
-const BAR_LANE: f32 = 10.0;
+/// Room for the linked apps' scroll bar (6 px) and a 1 px gap before it, in the margin right of the column.
+const BAR_LANE: f32 = 7.0;
 /// Space inside each row's ends, so the arrow and counts sit clear of its hover colour.
 const ROW_INSET: f32 = 12.0;
 /// A maker's row and an app's (each has a 1 px rule under it).
