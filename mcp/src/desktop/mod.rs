@@ -291,9 +291,10 @@ fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> 
         let sense = if target.is_some() { Sense::click() } else { Sense::hover() };
         let (face, color) = if i == current { (Face::MonoSemi, ink()) } else { (Face::Mono, muted()) };
         let galley = ui.painter().layout_job(theme::job(step, face, 13.0, color, 0.04));
-        let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 7.0), sense);
+        // Room for the underline below the text and as much above, so the text is centred in the header.
+        let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 14.0), sense);
         let color = if response.hovered() && target.is_some() { ink() } else { color };
-        ui.painter().galley(rect.min, galley, color);
+        ui.painter().galley(rect.min + Vec2::new(0.0, 7.0), galley, color);
         let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.max);
         if i == current {
             underline = Some(bar);

@@ -130,6 +130,8 @@ pub fn moon(painter: &Painter, at: Pos2, color: Color32) {
     use std::f32::consts::TAU;
     let (outer, inner) = (8.0f32, 6.5f32);
     let off = Vec2::new(4.0, -3.5);
+    // The cut leaves the crescent's weight low and left: nudged toward it so it looks centred.
+    let at = at + off * 0.3;
     let (dist, toward) = (off.length(), off.y.atan2(off.x));
     // Where the circles cross, as angles from the offset's direction around each centre.
     let on_outer = ((outer * outer + dist * dist - inner * inner) / (2.0 * outer * dist)).acos();

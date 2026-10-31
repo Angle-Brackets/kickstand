@@ -279,7 +279,8 @@ pub fn button(ui: &mut Ui, label: &str, kind: Kind, tall: bool, enabled: bool) -
 /// Underlined text that acts as a link ("Back", "Enter its address").
 pub fn link(ui: &mut Ui, label: &str, size: f32, face: Face) -> Response {
     let galley = ui.painter().layout_job(job(label, face, size, ink(), 0.0));
-    let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 4.0), Sense::click());
+    // As tall as the text, so it lines up with text beside it; the underline fits within the line height.
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() { muted() } else { ink() };
     let painter = ui.painter();

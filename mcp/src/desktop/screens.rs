@@ -105,7 +105,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         ui.add_space(22.0);
         let text = match (&model.find_error, model.searched) {
             (Some(e), _) => format!("Couldn't look on this network: {e}"),
-            (None, true) => "Nothing yet. Kickstand has to be open on the Switch, on the same Wi-Fi as this computer.".into(),
+            (None, true) => "Nothing yet. Kickstand needs to be open on a Switch on the same Wi-Fi as this computer.".into(),
             (None, false) => "Looking…".into(),
         };
         theme::text(ui, &text, Face::Regular, 16.0, body());
@@ -133,9 +133,11 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     let mut go = false;
     ui.horizontal(|ui| {
         let edit = egui::TextEdit::singleline(&mut address)
-            .hint_text("192.168.1.20")
+            // In the field's own font, or it sits higher and smaller than what's typed.
+            .hint_text(egui::RichText::new("192.168.1.20").font(Face::Mono.size(16.0)).color(muted()))
             .font(Face::Mono.size(16.0))
-            .margin(Margin::symmetric(12, 12))
+            // 48 px tall, like the Continue button beside it.
+            .margin(Margin::symmetric(12, 14))
             .desired_width(240.0);
         let response = ui.add(edit);
         go = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
