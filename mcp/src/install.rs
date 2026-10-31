@@ -43,7 +43,10 @@ fn home() -> Result<PathBuf> {
 }
 
 fn linux(exe: &Path, remove: bool) -> Result<String> {
-    let data = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()).map(PathBuf::from).map_or_else(|| Ok(home()?.join(".local/share")), Ok::<_, anyhow::Error>)?;
+    let data = match std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => home()?.join(".local/share"),
+    };
     let entry = data.join("applications/kickstand.desktop");
     let icons = data.join("icons/hicolor");
     let icon_files: Vec<PathBuf> = ICONS

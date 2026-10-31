@@ -225,12 +225,9 @@ pub fn state(app: App) -> State {
     }
     let entry = match app.config() {
         None => None,
-        Some(Config::ClaudeCli) => {
-            let text = home().and_then(|h| std::fs::read_to_string(h.join(".claude.json")).ok()).unwrap_or_default();
-            claude_code_entry(&text)
-        }
-        Some(Config::Json(path)) => json_entry(&std::fs::read_to_string(path).unwrap_or_default()),
-        Some(Config::CodexToml(path)) => toml_entry(&std::fs::read_to_string(path).unwrap_or_default()),
+        Some(Config::ClaudeCli) => claude_code_entry(&home().map(|h| read_or_empty(&h.join(".claude.json"))).unwrap_or_default()),
+        Some(Config::Json(path)) => json_entry(&read_or_empty(&path)),
+        Some(Config::CodexToml(path)) => toml_entry(&read_or_empty(&path)),
     };
     entry.map_or(State::NotLinked, |command| State::Linked { command })
 }
@@ -250,11 +247,11 @@ pub fn link(app: App) -> Result<String> {
             run(&claude, &add)?;
         }
         Config::Json(path) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = read_or_empty(&path);
             write_config(&path, &text, &with_json_entry(&text, &command, &args)?)?;
         }
         Config::CodexToml(path) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = read_or_empty(&path);
             write_config(&path, &text, &with_toml_entry(&text, &command, &args)?)?;
         }
     }
@@ -270,11 +267,11 @@ pub fn unlink(app: App) -> Result<String> {
             true
         }
         Config::Json(path) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = read_or_empty(&path);
             without_json_entry(&text)?.map(|updated| write_config(&path, &text, &updated)).transpose()?.is_some()
         }
         Config::CodexToml(path) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = read_or_empty(&path);
             without_toml_entry(&text)?.map(|updated| write_config(&path, &text, &updated)).transpose()?.is_some()
         }
     };
@@ -298,6 +295,10 @@ fn json_entry(text: &str) -> Option<String> {
 fn describe(entry: &Value) -> String {
     let command = entry.get("command").and_then(Value::as_str).unwrap_or("?");
     let args = entry.get("args").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    command_line(command, args)
+}
+
+fn command_line<'a>(command: &'a str, args: impl Iterator<Item = &'a str>) -> String {
     std::iter::once(command).chain(args).collect::<Vec<_>>().join(" ")
 }
 
@@ -336,7 +337,7 @@ fn toml_entry(text: &str) -> Option<String> {
     let entry = doc.get("mcp_servers")?.get(NAME)?;
     let command = entry.get("command")?.as_str()?;
     let args = entry.get("args").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str());
-    Some(std::iter::once(command).chain(args).collect::<Vec<_>>().join(" "))
+    Some(command_line(command, args))
 }
 
 /// `text` (a Codex `config.toml`, possibly empty) with `[mcp_servers.kickstand]` set.
@@ -360,6 +361,11 @@ fn without_toml_entry(text: &str) -> Result<Option<String>> {
     let mut doc: toml_edit::DocumentMut = text.parse().context("the config isn't valid TOML; fix it by hand")?;
     let removed = doc.get_mut("mcp_servers").and_then(|s| s.as_table_like_mut()).and_then(|s| s.remove(NAME));
     Ok(removed.map(|_| doc.to_string()))
+}
+
+/// A config file's text; empty if it's missing or unreadable (a new one gets made when linking).
+fn read_or_empty(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 /// Writes through a temporary file, after saving the original once as `<name>.before-kickstand`.
