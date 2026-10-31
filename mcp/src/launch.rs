@@ -404,8 +404,13 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         Program::Local { nro, dest } => {
             let dest = check_path(&dest, true)?;
             let parent = &dest[..dest.rfind('/').unwrap_or(0)];
-            if !client.stat(parent).await.is_ok_and(|e| e.is_dir) {
-                bail!("{parent} doesn't exist; hbmenu won't create it (make it with upload first)");
+            // Only a missing folder means "make it first"; any other failure (the console going away) is
+            // reported as itself.
+            match client.stat(parent).await {
+                Ok(entry) if entry.is_dir => {}
+                Ok(_) => bail!("{parent} is a file, not a folder"),
+                Err(e) if format!("{e:#}").contains("NotFound") => bail!("{parent} doesn't exist; hbmenu won't create it (make it with upload first)"),
+                Err(e) => return Err(e.context(format!("checking {parent} on the SD card"))),
             }
             let dest = dest.strip_prefix("/switch/").context("NetLoader can only write under /switch/")?.to_string();
             (nro, dest, args)
