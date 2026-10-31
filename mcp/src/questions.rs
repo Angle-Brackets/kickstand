@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 
 /// How long an open desktop app's last sign of life counts.
 const ALIVE: Duration = Duration::from_secs(8);
-/// How long a just-opened desktop app gets to show up.
-const OPENING: Duration = Duration::from_secs(20);
 /// Questions older than this are left over from a server that went away.
 const STALE: Duration = Duration::from_secs(600);
 const HEARTBEAT: &str = ".desktop-open";
@@ -85,7 +83,7 @@ pub fn answer(id: &str, answer: Answer) -> Result<()> {
 }
 
 /// Puts a question to the user in the desktop app, opening it if it isn't running. Returns its id, for
-/// [`answered`], [`wait`] and [`withdraw`]. `Err`: the window couldn't be opened (the question isn't left
+/// [`answered`] and [`withdraw`]. `Err`: the window couldn't be opened (the question isn't left
 /// behind).
 pub fn post(app: Option<String>, action: &str, covers: &str) -> Result<String> {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -122,21 +120,5 @@ pub fn withdraw(id: &str) {
     if let Ok(dir) = dir() {
         let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
         let _ = std::fs::remove_file(dir.join(format!("{id}.answer")));
-    }
-}
-
-/// Waits up to `timeout` for an answer to question `id`; `None` without one (or if the window never
-/// opened).
-pub async fn wait(id: &str, timeout: Duration) -> Option<Answer> {
-    let start = tokio::time::Instant::now();
-    loop {
-        if let Some(answer) = answered(id) {
-            return Some(answer);
-        }
-        let waited = start.elapsed();
-        if waited >= timeout || (waited >= OPENING && !desktop_open()) {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }

@@ -52,9 +52,6 @@ struct Asking {
     action: String,
 }
 
-/// How long Kickstand's window gets to answer before the agent is told to ask in the chat too.
-const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Screenshots kept for [`Tools::input_until`], newest last.
 #[derive(Default)]
 struct Shots {
@@ -588,14 +585,14 @@ impl Tools {
                 anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
             }
             // This AI app can't show the question: Kickstand asks in its own window, and the agent in the chat.
-            Err(ElicitationError::CapabilityNotSupported) => self.ask_elsewhere(peer, path, &folder, need, action).await,
+            Err(ElicitationError::CapabilityNotSupported) => self.ask_elsewhere(peer, path, &folder, need, action),
             Err(e) => anyhow::bail!("couldn't ask the user about {path}: {e}"),
         }
     }
 
     /// Asks about `path` in Kickstand's window and has the agent ask in the chat; whichever answer comes
     /// first counts ([`Tools::answer_access`] records a chat answer and takes the window's question away).
-    async fn ask_elsewhere(&self, peer: &Peer<RoleServer>, path: &str, folder: &str, need: Need, action: &str) -> anyhow::Result<()> {
+    fn ask_elsewhere(&self, peer: &Peer<RoleServer>, path: &str, folder: &str, need: Need, action: &str) -> anyhow::Result<()> {
         let covers = format!(
             "everything in {}{}",
             access::describe(folder),
@@ -606,27 +603,24 @@ impl Tools {
             "Ask the user here, as a question (with your app's question tool if it has one), whether you may {action}; \
              allowing the folder would cover {covers}. Offer: just this once, this folder until Kickstand restarts, this \
              folder from now on, or no. Then pass their answer to answer_access with path {path:?} and try again. If they \
-             answer in Kickstand's window instead, just try again. (They can also run `kickstand allow {folder}{flag}` in \
+             say they answered in Kickstand's window instead, just try again. (They can also run `kickstand allow {folder}{flag}` in \
              their own terminal.)"
         );
         let pending = self.asking.lock().unwrap().iter().find(|a| a.path == path && a.need == need).map(|a| a.id.clone());
+        // The window and the chat ask at the same time; a retry picks up an answer given in the window.
         let (answer, window_open) = match pending {
-            // Asked before: the window may have been answered since.
             Some(id) => (id.as_deref().and_then(crate::questions::answered), id.is_some()),
             None => {
                 let app = self.client.app().or_else(|| peer.peer_info().map(|info| info.client_info.name.clone()));
                 let id = crate::questions::post(app, action, &covers).ok();
-                let asking = Asking { id: id.clone(), path: path.into(), folder: folder.into(), need, action: action.into() };
-                self.asking.lock().unwrap().push(asking);
-                match &id {
-                    Some(id) => (crate::questions::wait(id, WINDOW_WAIT).await, true),
-                    None => (None, false),
-                }
+                let window_open = id.is_some();
+                self.asking.lock().unwrap().push(Asking { id, path: path.into(), folder: folder.into(), need, action: action.into() });
+                (None, window_open)
             }
         };
         let Some(answer) = answer else {
             let window = if window_open {
-                "Kickstand is asking the user in its window (no answer yet)."
+                "Kickstand is also asking the user in its desktop window (no answer there yet)."
             } else {
                 "This AI app can't show Kickstand's question and Kickstand's window couldn't open."
             };
