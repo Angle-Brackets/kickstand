@@ -495,10 +495,7 @@ pub fn home(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 /// The left column: the console's state and what the agent is up to.
 fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 18.0;
-    let live = match &model.reach {
-        Reach::Connected(live) => Some(live),
-        _ => None,
-    };
+    let live = model.reach.live();
     let agents = live.and_then(|l| l.agents.as_ref()).map(|a| a.agents.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
     let busiest = agents.iter().min_by_key(|c| c.idle_ms);
     let (status, status_color, heading, standing) = match (&model.reach, busiest) {
@@ -650,7 +647,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     let linked: Vec<_> = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).collect();
     // Agents connected now, by the app they're in.
     let running = |which: App| -> usize {
-        let Reach::Connected(Live { agents: Some(report), .. }) = &model.reach else { return 0 };
+        let Some(report) = model.reach.live().and_then(|live| live.agents.as_ref()) else { return 0 };
         report
             .agents
             .iter()
@@ -742,7 +739,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             if unpair.clicked() && model.busy.is_none() {
                 app.ask(Confirm::Unpair);
             }
-            if let Reach::Connected(live) = &model.reach
+            if let Some(live) = model.reach.live()
                 && crate::update::switch_behind(&live.info.version)
             {
                 ui.add_space(18.0);
@@ -755,10 +752,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     });
     ui.add_space(12.0);
     theme::hrule(ui, 1.5, ink());
-    let live = match &model.reach {
-        Reach::Connected(live) => Some(live),
-        _ => None,
-    };
+    let live = model.reach.live();
     let unknown = || "—".to_string();
     let rows: [(&str, String, bool); 4] = [
         ("Address", model.host.clone().unwrap_or_else(unknown), true),

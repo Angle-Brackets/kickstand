@@ -123,6 +123,16 @@ pub enum Reach {
     Unreachable(String),
 }
 
+impl Reach {
+    /// What the console reported, while it's answering.
+    pub fn live(&self) -> Option<&Live> {
+        match self {
+            Reach::Connected(live) => Some(live),
+            _ => None,
+        }
+    }
+}
+
 pub struct Live {
     pub info: DaemonInfo,
     /// `None` from a console older than protocol 22 (both).
