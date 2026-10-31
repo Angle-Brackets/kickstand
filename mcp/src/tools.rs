@@ -460,6 +460,25 @@ fn parse_region(r: &str) -> anyhow::Result<(u32, u32, u32, u32)> {
     Ok((x, y, w, h))
 }
 
+/// A JPEG as an image block.
+fn jpeg_block(jpeg: &[u8]) -> ContentBlock {
+    ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(jpeg), "image/jpeg")
+}
+
+/// `jpeg` scaled to `width` pixels, off the async threads.
+async fn scaled(jpeg: Vec<u8>, width: u32) -> anyhow::Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, None, Some(width))).await?
+}
+
+/// The watchdog's limits from the `seconds` / `quiet_seconds` arguments shared by test_build and supervise.
+fn watch_settings(seconds: Option<u64>, quiet_seconds: Option<u64>, reboot_on_fatal: bool) -> crate::watchdog::Settings {
+    crate::watchdog::Settings {
+        max: std::time::Duration::from_secs(seconds.unwrap_or(60).min(300)),
+        quiet: std::time::Duration::from_secs(quiet_seconds.unwrap_or(20).max(1)),
+        reboot_on_fatal,
+    }
+}
+
 fn ok(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
@@ -642,13 +661,13 @@ impl Tools {
             }
             write!(text, ". The screen now is shot {id}.")?;
             let width = args.width.unwrap_or(640);
-            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&outcome.jpeg, None, Some(width))).await??;
+            let jpeg = scaled(outcome.jpeg, width).await?;
             let mut content = vec![ContentBlock::text(text)];
             if let Some((shot, cut)) = patch_note {
                 content.push(ContentBlock::text(format!("what it looked for, from shot {shot}:")));
-                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&cut), "image/jpeg"));
+                content.push(jpeg_block(&cut));
             }
-            content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+            content.push(jpeg_block(&jpeg));
             anyhow::Ok(content)
         };
         result.await.map_or_else(fail, CallToolResult::success)
@@ -671,8 +690,8 @@ impl Tools {
             if args.screenshot.unwrap_or(true) && fatal.is_none() {
                 let jpeg = self.client.screenshot().await?;
                 let width = args.width.unwrap_or(480);
-                let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&jpeg, None, Some(width))).await??;
-                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+                let jpeg = scaled(jpeg, width).await?;
+                content.push(jpeg_block(&jpeg));
             }
             anyhow::Ok(content)
         };
@@ -817,7 +836,7 @@ impl Tools {
             let text = crate::crash::describe(&fetched, symbols.as_ref())?;
             let mut content = vec![ContentBlock::text(text)];
             if let Some(jpg) = fetched.jpg {
-                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(jpg), "image/jpeg"));
+                content.push(jpeg_block(&jpg));
             }
             anyhow::Ok(CallToolResult::success(content))
         };
@@ -828,11 +847,7 @@ impl Tools {
     async fn test_build(&self, Parameters(args): Parameters<TestBuildArgs>) -> CallToolResult {
         let result = async {
             let project = crate::project::get(&args.project)?;
-            let settings = crate::watchdog::Settings {
-                max: std::time::Duration::from_secs(args.seconds.unwrap_or(60).min(300)),
-                quiet: std::time::Duration::from_secs(args.quiet_seconds.unwrap_or(20).max(1)),
-                reboot_on_fatal: true,
-            };
+            let settings = watch_settings(args.seconds, args.quiet_seconds, true);
             let run = crate::project::test(&self.client, &project, args.skip_build.unwrap_or(false), args.args, &self.output, &settings).await?;
             if let Some(handle) = run.collector
                 && let Some(old) = self.collector.lock().unwrap().replace(handle)
@@ -842,7 +857,7 @@ impl Tools {
             *self.elf.lock().unwrap() = Some((run.elf.0, Some(run.elf.1)));
             let mut content = vec![ContentBlock::text(run.text)];
             if let Some(jpeg) = run.screenshot {
-                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+                content.push(jpeg_block(&jpeg));
             }
             anyhow::Ok(content)
         };
@@ -865,16 +880,12 @@ impl Tools {
     async fn supervise(&self, Parameters(args): Parameters<SuperviseArgs>) -> CallToolResult {
         let result = async {
             let elf = self.elf(args.elf, None)?;
-            let settings = crate::watchdog::Settings {
-                max: std::time::Duration::from_secs(args.seconds.unwrap_or(60).min(300)),
-                quiet: std::time::Duration::from_secs(args.quiet_seconds.unwrap_or(20).max(1)),
-                reboot_on_fatal: args.reboot_on_fatal.unwrap_or(true),
-            };
+            let settings = watch_settings(args.seconds, args.quiet_seconds, args.reboot_on_fatal.unwrap_or(true));
             let output = self.output.lock().unwrap().is_open().then_some(&self.output);
             let report = crate::watchdog::supervise(&self.client, output, &elf, &settings).await?;
             let mut content = vec![ContentBlock::text(report.text)];
             if let Some(jpeg) = report.screenshot {
-                content.push(ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(&jpeg), "image/jpeg"));
+                content.push(jpeg_block(&jpeg));
             }
             anyhow::Ok(content)
         };
@@ -947,8 +958,7 @@ impl Tools {
             }
             let grid = args.grid.unwrap_or(false);
             let jpeg = tokio::task::spawn_blocking(move || crate::capture::frame(&jpeg, region, args.width, grid)).await??;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
-            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+            anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&jpeg)])
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
@@ -977,9 +987,8 @@ impl Tools {
             );
             let text = format!("{text} (shot {})", self.remember(&waited.jpeg));
             let width = args.width.unwrap_or(640);
-            let jpeg = tokio::task::spawn_blocking(move || crate::capture::reframe(&waited.jpeg, None, Some(width))).await??;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
-            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+            let jpeg = scaled(waited.jpeg, width).await?;
+            anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&jpeg)])
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
@@ -1003,8 +1012,7 @@ impl Tools {
             tokio::fs::write(&path, &gif).await?;
             let fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
             let text = format!("saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below", path.display(), gif.len() / 1024);
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&sheet);
-            anyhow::Ok(vec![ContentBlock::text(text), ContentBlock::image(b64, "image/jpeg")])
+            anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&sheet)])
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
@@ -1019,13 +1027,13 @@ impl Tools {
             let mut out = format!("{path} ({} entries)\n", entries.len());
             for e in &entries {
                 if e.is_dir {
-                    let _ = writeln!(out, "  {}/", e.name);
+                    writeln!(out, "  {}/", e.name)?;
                 } else {
-                    let _ = writeln!(out, "  {}  {} bytes", e.name, e.size);
+                    writeln!(out, "  {}  {} bytes", e.name, e.size)?;
                 }
             }
             if truncated {
-                let _ = writeln!(out, "  ... truncated at {} entries", proto::MAX_DIR_ENTRIES);
+                writeln!(out, "  ... truncated at {} entries", proto::MAX_DIR_ENTRIES)?;
             }
             anyhow::Ok(out)
         };
@@ -1171,7 +1179,7 @@ impl Tools {
             let entries = self.client.hekate_entries().await?;
             let mut out = String::from("hekate entries:\n");
             for (i, e) in entries.iter().enumerate() {
-                let _ = writeln!(out, "  {}. {e}", i + 1);
+                writeln!(out, "  {}. {e}", i + 1)?;
             }
             anyhow::Ok(out)
         };
