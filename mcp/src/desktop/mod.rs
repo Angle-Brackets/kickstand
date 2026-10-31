@@ -81,6 +81,8 @@ pub struct Kickstand {
     folded: [bool; 4],
     /// Dark or light as chosen with the header's sun/moon button; `None` follows the system.
     dark: Option<bool>,
+    /// A theme change under way: when it started, and whether to dark.
+    flood: Option<(f64, bool)>,
     /// A group just opened there, to scroll into view once its rows are laid out.
     reveal: Option<crate::link::Maker>,
     brands: brands::Brands,
@@ -125,6 +127,7 @@ impl Kickstand {
             tab,
             folded: [false; 4],
             dark: crate::config::dark_theme(),
+            flood: None,
             reveal: None,
             brands,
             shown: None,
@@ -325,10 +328,22 @@ impl eframe::App for Kickstand {
             let linked = model.links.iter().any(|(_, s)| matches!(s, crate::link::State::Linked { .. }));
             self.screen = if linked { Screen::Home } else { Screen::Link };
         }
-        // Before anything is drawn, so the whole frame has one palette.
+        // Before anything is drawn, so the whole frame has one palette. A change floods in from the top
+        // (see `flood`), except as the window opens.
         let dark = self.dark.unwrap_or(ui.ctx().system_theme() == Some(egui::Theme::Dark));
-        if dark != theme::dark() {
-            theme::set_dark(ui.ctx(), dark);
+        let now = ui.input(|i| i.time);
+        if self.flood.is_none() && dark != theme::dark() {
+            if now < 0.5 {
+                theme::set_dark(ui.ctx(), dark);
+            } else {
+                self.flood = Some((now, dark));
+            }
+        }
+        if let Some((start, to)) = self.flood
+            && now - start >= FLOOD_S as f64
+            && theme::dark() != to
+        {
+            theme::set_dark(ui.ctx(), to);
         }
         window::frame(ui.ctx());
         window::title_bar(ui);
@@ -378,9 +393,60 @@ impl eframe::App for Kickstand {
         if open > 0.0 {
             overview::show(self, ui.ctx(), open);
         }
+        if let Some((start, to)) = self.flood {
+            if flood(ui.ctx(), theme::paper_of(to), now - start) {
+                ui.ctx().request_repaint();
+            } else {
+                self.flood = None;
+            }
+        }
         // Times and the "looking" bars move on their own.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
     }
+}
+
+/// A theme change: the new background washes down from the top in a wave, covering the window; then the
+/// palette changes underneath and the window fades in through it.
+const FLOOD_S: f32 = 0.45;
+const REVEAL_S: f32 = 0.25;
+
+/// Draws the theme change `elapsed` seconds in, over everything, in the new theme's `paper`. False once
+/// it's over.
+fn flood(ctx: &egui::Context, paper: egui::Color32, elapsed: f64) -> bool {
+    let rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::unique("theme-flood")));
+    let elapsed = elapsed as f32;
+    if elapsed >= FLOOD_S + REVEAL_S {
+        return false;
+    }
+    if elapsed >= FLOOD_S {
+        let fade = egui::emath::easing::cubic_out((elapsed - FLOOD_S) / REVEAL_S);
+        painter.rect_filled(rect, 0.0, paper.gamma_multiply(1.0 - fade));
+        return true;
+    }
+    // Two swells, a faint one running ahead of the solid one; both end below the window's bottom.
+    const SWELL: f32 = 10.0;
+    const AHEAD: f32 = 28.0;
+    let t = egui::emath::easing::cubic_in_out(elapsed / FLOOD_S);
+    let front = rect.top() - SWELL + t * (rect.height() + 2.0 * SWELL + AHEAD);
+    for (lead, phase, color) in [(AHEAD, 1.7, paper.gamma_multiply(0.45)), (0.0, 0.0, paper)] {
+        let mut mesh = egui::Mesh::default();
+        let steps = (rect.width() / 12.0).ceil() as u32;
+        for i in 0..=steps {
+            let x = rect.left() + rect.width() * i as f32 / steps as f32;
+            let wave = (x / 140.0 + elapsed * 9.0 + phase).sin() * SWELL;
+            let y = (front + lead + wave).clamp(rect.top(), rect.bottom());
+            mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+            mesh.colored_vertex(egui::pos2(x, y), color);
+            if i > 0 {
+                let (a, b, c, d) = (2 * i - 2, 2 * i - 1, 2 * i, 2 * i + 1);
+                mesh.add_triangle(a, b, c);
+                mesh.add_triangle(b, d, c);
+            }
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    true
 }
 
 /// How far along an animation `elapsed` seconds into `length` is, eased out (fast, then settling).

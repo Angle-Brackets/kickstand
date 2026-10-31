@@ -73,6 +73,10 @@ fn palette() -> &'static Palette {
 pub fn paper() -> Color32 {
     palette().paper
 }
+/// The background of one theme or the other, whichever is showing.
+pub fn paper_of(dark: bool) -> Color32 {
+    if dark { DARK.paper } else { LIGHT.paper }
+}
 pub fn ink() -> Color32 {
     palette().ink
 }
