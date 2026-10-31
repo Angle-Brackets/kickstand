@@ -615,6 +615,8 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Grouped by maker, each group folding; scrolls in what the Switch's section below leaves.
     let below = if ui.available_width() < 440.0 { SWITCH_HEIGHT_WRAPPED } else { SWITCH_HEIGHT };
     let height = (ui.available_height() - below).clamp(LINKED_MIN_HEIGHT, LINKED_HEIGHT);
+    // A bar of its own: a floating one covers the counts on the right.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     egui::ScrollArea::vertical().id_salt("linked").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
         for maker in Maker::ALL {
             let apps: Vec<_> = linked.iter().filter(|(a, _)| a.maker() == maker).collect();
@@ -639,6 +641,11 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             painter.galley(egui::pos2(rect.right() - count.size().x, mid - count.size().y / 2.0), count, MUTED);
             if response.clicked() {
                 app.folded[maker.index()] = open;
+                // Opened: its rows appear next frame, then get scrolled into view.
+                if !open {
+                    app.reveal = Some(maker);
+                    ui.ctx().request_repaint();
+                }
             }
             theme::rule(ui, 1.0, RULE);
             if !open {
@@ -658,8 +665,13 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 });
                 theme::rule(ui, 1.0, RULE_LIGHT);
             }
+            if app.reveal == Some(maker) {
+                app.reveal = None;
+                ui.scroll_to_rect(Rect::from_x_y_ranges(rect.x_range(), rect.top()..=ui.min_rect().bottom()), None);
+            }
         }
     });
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::default();
     ui.add_space(34.0);
     theme::label(ui, "THIS SWITCH", true, 13.0, INK);
     ui.add_space(12.0);

@@ -63,6 +63,8 @@ pub struct Kickstand {
     tab: crate::link::Maker,
     /// Which makers' groups are folded in the home screen's linked apps (by [`crate::link::Maker::index`]).
     folded: [bool; 4],
+    /// A group just opened there, to scroll into view once its rows are laid out.
+    reveal: Option<crate::link::Maker>,
     brands: brands::Brands,
 }
 
@@ -79,7 +81,7 @@ impl Kickstand {
             (screen, linked.or_else(installed).map_or(crate::link::Maker::Claude, |(app, _)| app.maker()))
         };
         let brands = brands::Brands::load(ctx);
-        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, folded: [false; 4], brands }
+        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, folded: [false; 4], reveal: None, brands }
     }
 
     fn send(&self, cmd: Cmd) {
