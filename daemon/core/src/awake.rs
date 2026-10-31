@@ -2,7 +2,10 @@
 //! Keep-awake: while a lease is running, a thread tells `idle:sys` the user is active, so the screen
 //! neither dims nor sleeps. Every client request extends the lease by [`ACTIVITY_LEASE_MS`], so the
 //! console stays up while an agent works and goes back to its normal timers (sparing the battery) once it
-//! stops; [`proto::Request::KeepAwake`] can hold it longer. Nothing is saved, so a reboot ends it.
+//! stops; [`proto::Request::KeepAwake`] can hold it longer. The lease is saved to the SD card so that a
+//! restart of the daemon (an update, or the NRO taking over) keeps it: losing it once let the console
+//! fall asleep ten minutes after an update, under an agent that was still working (2026-10-31). A reboot
+//! ends it.
 //!
 //! A sleeping console suspends the daemon too, so this can only prevent sleep, not end it. The lock screen
 //! sleeps on its own timer, which `idle:sys` doesn't reset; [`unlock_after_agent_reboot`] gets past it.
@@ -13,6 +16,8 @@ use nx::svc;
 use nx::thread;
 use proto::path::AGENT_REBOOT_FLAG;
 use services::idle::{IIdleSysInterfaceClient, IdleSysService};
+
+use alloc::format;
 
 use crate::{log, sd, uptime_ms};
 
@@ -25,6 +30,14 @@ static UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 pub const ACTIVITY_LEASE_MS: u64 = 30 * 60_000;
 /// Longest lease [`proto::Request::KeepAwake`] may ask for.
 pub const MAX_LEASE_MS: u64 = 8 * 3_600_000;
+
+/// Where the lease outlives a restart of the daemon: "<until> <saved at>", both uptimes in ms.
+const LEASE_PATH: &str = "/kickstand/keep-awake";
+/// Every request extends the lease, so it's saved only when it has grown this much (or was ended): a
+/// restart costs at most this much of it.
+const SAVE_STEP_MS: u64 = 5 * 60_000;
+/// The lease as last saved.
+static SAVED_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Well inside the shortest dim and sleep timers (one minute).
 const INTERVAL_NS: i64 = 20_000_000_000;
@@ -44,11 +57,46 @@ pub fn remaining_ms() -> u64 {
     UNTIL_MS.load(Ordering::Relaxed).saturating_sub(uptime_ms())
 }
 
-/// Starts the thread that acts on the lease.
+/// Starts the thread that acts on the lease, taking up the lease a previous run of the daemon saved.
 pub fn start() {
+    restore();
     let spawned = thread::Builder::new().name("keep-awake").stack_size(0x4000).spawn(run);
     if let Err(rc) = spawned {
         log!("keep-awake thread didn't start: {rc}");
+    }
+}
+
+/// Takes up the lease saved by the daemon that ran before this one since the console booted.
+fn restore() {
+    let Ok((data, _)) = sd::read(LEASE_PATH, 0, 64) else { return };
+    let text = core::str::from_utf8(&data).unwrap_or("");
+    let mut numbers = text.split_whitespace().map(|n| n.parse::<u64>().ok());
+    let (Some(Some(until)), Some(Some(saved_at))) = (numbers.next(), numbers.next()) else { return };
+    let now = uptime_ms();
+    // Uptime starts over at a reboot, so a lease saved later than now is from before one.
+    if saved_at > now || until <= now || until - now > MAX_LEASE_MS {
+        return;
+    }
+    extend(until - now);
+    SAVED_MS.store(until, Ordering::Relaxed);
+    log!("keep-awake: {} min left, from before the restart", (until - now) / 60_000);
+}
+
+/// Saves the lease when it has grown by [`SAVE_STEP_MS`] or ended.
+fn save_if_changed() {
+    let until = UNTIL_MS.load(Ordering::Relaxed);
+    let saved = SAVED_MS.load(Ordering::Relaxed);
+    if until == saved || (until > saved && until - saved < SAVE_STEP_MS) {
+        return;
+    }
+    SAVED_MS.store(until, Ordering::Relaxed);
+    let text = format!("{until} {}", uptime_ms());
+    let written = sd::create_dirs("/kickstand").and_then(|()| sd::remove_if_exists(LEASE_PATH)).and_then(|()| {
+        let mut file = sd::create_for_write(LEASE_PATH, text.len() as u64)?;
+        file.write_array::<u8, true>(text.as_bytes()).map_err(|rc| sd::io_error("write", LEASE_PATH, rc))
+    });
+    if let Err(e) = written {
+        log!("keep-awake: saving the lease: {}", e.message);
     }
 }
 
@@ -56,6 +104,7 @@ fn run() {
     let mut idle: Option<IdleSysService> = None;
     let mut failing = false;
     loop {
+        save_if_changed();
         if remaining_ms() > 0 {
             let result = match idle.as_ref() {
                 Some(srv) => srv.report_user_is_active(),
