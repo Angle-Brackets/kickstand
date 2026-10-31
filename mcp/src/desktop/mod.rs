@@ -5,6 +5,7 @@
 
 mod art;
 mod brands;
+mod overview;
 mod screens;
 mod theme;
 mod worker;
@@ -13,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
-use eframe::egui::{self, Frame, Margin, Sense, Stroke, Vec2};
+use eframe::egui::{self, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
 use theme::{Face, INK, MUTED, PAPER, RED, RULE};
@@ -92,6 +93,10 @@ pub struct Kickstand {
     /// Activity entries seen so far: when each happened (seconds since 1970) and when it appeared here,
     /// so new ones fade in.
     seen: Vec<(f64, f64)>,
+    /// The overview (the header's Kickstand opens it), its tab, and when that tab was chosen.
+    overview: bool,
+    overview_tab: usize,
+    overview_at: f64,
 }
 
 impl Kickstand {
@@ -123,6 +128,9 @@ impl Kickstand {
             from: 0.0,
             tab_at: f64::NEG_INFINITY,
             seen: Vec::new(),
+            overview: false,
+            overview_tab: 0,
+            overview_at: f64::NEG_INFINITY,
         }
     }
 
@@ -145,9 +153,18 @@ impl Kickstand {
         let panel = egui::Panel::top("header").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-                art::mark(ui.painter(), rect);
-                ui.label(theme::job("Kickstand", Face::Heavy, 22.0, INK, -0.01));
+                // The mark and name open the overview.
+                let name = ui.painter().layout_job(theme::job("Kickstand", Face::Heavy, 22.0, INK, -0.01));
+                let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0 + 12.0 + name.size().x + 10.0, 36.0), Sense::click());
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("What Kickstand does, and its commands");
+                let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+                let painter = ui.painter();
+                painter.rect_filled(rect.expand(4.0), 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
+                art::mark(painter, Rect::from_min_size(rect.min, Vec2::splat(36.0)));
+                painter.galley(egui::pos2(rect.left() + 48.0, rect.center().y - name.size().y / 2.0), name, INK);
+                if response.clicked() {
+                    self.overview = true;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &self.screen {
                     Screen::Home => {
                         if self.selector(ui, model).clicked() {
@@ -299,6 +316,10 @@ impl eframe::App for Kickstand {
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-reboot"), self.confirm_reboot, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {
             screens::confirm_reboot(self, ui.ctx(), open);
+        }
+        let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("overview-open"), self.overview, OPEN_S, egui::emath::easing::cubic_out);
+        if open > 0.0 {
+            overview::show(self, ui.ctx(), open);
         }
         // Times and the "looking" bars move on their own.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));

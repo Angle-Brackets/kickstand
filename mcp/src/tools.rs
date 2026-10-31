@@ -1260,11 +1260,17 @@ impl Tools {
     }
 }
 
+/// Every tool's name.
+#[cfg(test)]
+pub fn tool_names() -> Vec<String> {
+    Tools::tool_router().list_all().into_iter().map(|t| t.name.into()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn contentious_tools_exist() {
-        let names: Vec<String> = super::Tools::tool_router().list_all().into_iter().map(|t| t.name.into()).collect();
+        let names = super::tool_names();
         for name in super::CONTENTIOUS {
             assert!(names.iter().any(|n| n == name), "no tool named {name}");
         }
