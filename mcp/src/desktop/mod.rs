@@ -96,7 +96,11 @@ impl Kickstand {
                             self.go(model, Screen::Find);
                         }
                     }
-                    screen => stepper(ui, screen),
+                    screen => {
+                        if let Some(next) = stepper(ui, screen, model) {
+                            self.go(model, next);
+                        }
+                    }
                 });
             });
         });
@@ -146,25 +150,45 @@ impl Kickstand {
     }
 }
 
-/// 01 FIND · 02 PAIR · 03 LINK, the current one underlined in red.
-fn stepper(ui: &mut egui::Ui, screen: &Screen) {
+/// 01 FIND · 02 PAIR · 03 LINK, the current one underlined in red; the others are links to their screen.
+/// Pair needs a Switch showing a code (the first one found). Returns the screen clicked.
+fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> {
     let current = match screen {
         Screen::Find => 0,
         Screen::Pair { .. } => 1,
         _ => 2,
     };
+    let showing_code = model.found.iter().find(|f| f.announce.pairing).map(|f| Screen::Pair {
+        addr: f.addr,
+        name: if f.announce.nickname.is_empty() { "Switch".into() } else { f.announce.nickname.clone() },
+    });
+    let targets = [Some(Screen::Find), showing_code, Some(Screen::Link)];
+    let mut clicked = None;
     ui.spacing_mut().item_spacing.x = 28.0;
     // Right to left.
     for (i, step) in ["01 FIND", "02 PAIR", "03 LINK"].iter().enumerate().rev() {
+        let target = if i == current { None } else { targets[i].clone() };
+        let sense = if target.is_some() { Sense::click() } else { Sense::hover() };
         let (face, color) = if i == current { (Face::MonoSemi, INK) } else { (Face::Mono, MUTED) };
         let galley = ui.painter().layout_job(theme::job(step, face, 13.0, color, 0.04));
-        let (rect, _) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 7.0), Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 7.0), sense);
+        let color = if response.hovered() && target.is_some() { INK } else { color };
         ui.painter().galley(rect.min, galley, color);
+        let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.max);
         if i == current {
-            let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.max);
             ui.painter().rect_filled(bar, 0.0, RED);
+        } else if response.hovered() && target.is_some() {
+            ui.painter().rect_filled(bar.with_min_y(bar.max.y - 1.5), 0.0, INK);
+        }
+        if target.is_some() {
+            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                clicked = target;
+            }
+        } else if i == 1 && i != current {
+            response.on_hover_text("Open Kickstand from the Homebrew Menu on your Switch: its screen shows a code to pair with");
         }
     }
+    clicked
 }
 
 impl eframe::App for Kickstand {
