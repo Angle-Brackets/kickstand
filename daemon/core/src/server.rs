@@ -6,6 +6,9 @@
 //! hundred connections, and Atmosphère's fatal service aborted.
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -13,10 +16,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use nx::result::Result;
 use nx::socket::net::traits::{Pollable, SocketCommon};
 use nx::socket::net::{TcpListener, TcpStream, UdpSocket, poll};
-use proto::discovery;
 use nx::socket::{BsdServiceConfig, BsdSrvkind, Paralellism, PollFlags};
 use nx::svc;
 use nx::thread;
+use proto::discovery;
 use proto::{DaemonKind, ErrorKind, Request, Response};
 
 use crate::log;
@@ -207,7 +210,7 @@ pub fn run(config: &'static Config<'static>) {
             let _ = stream.set_nodelay(true);
             let Some(slot) = take_slot() else {
                 log!("client {}:{} refused: {MAX_CLIENTS} already connected", who.0, who.1);
-                let msg = alloc::format!("the daemon already has {MAX_CLIENTS} clients; try again when one disconnects");
+                let msg = format!("the daemon already has {MAX_CLIENTS} clients; try again when one disconnects");
                 let _ = send(&stream, &Response::error(ErrorKind::Busy, msg));
                 continue;
             };
@@ -269,7 +272,7 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
             // length kept us in step).
             Err(_) => Response::error(
                 ErrorKind::Unsupported,
-                alloc::format!("this daemon (protocol {}) doesn't know that request: update the sysmodule", proto::PROTOCOL_VERSION),
+                format!("this daemon (protocol {}) doesn't know that request: update the sysmodule", proto::PROTOCOL_VERSION),
             ),
         };
         if send(stream, &resp).is_err() {
@@ -308,7 +311,7 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
     }
 }
 
-/// Waits until `fd` is readable. Returns `Ok(false)` on timeout or when the server is stopping.
+/// What [`wait_client_or_probe`] woke for.
 enum Ready {
     Client,
     Probe,
@@ -341,7 +344,7 @@ fn bind_probes(failed_before: bool) -> Option<UdpSocket> {
 /// Waits for a connection on `listener` or a datagram on `probes`; `None` once the server is stopping.
 /// Without `probes`, returns [`Ready::RetryProbes`] every [`PROBE_RETRY_MS`].
 fn wait_client_or_probe(listener: &TcpListener, probes: Option<&UdpSocket>, config: &Config) -> Result<Option<Ready>> {
-    let mut fds = alloc::vec![(RawFd(listener.get_poll_fd()), PollFlags::PollIn())];
+    let mut fds = vec![(RawFd(listener.get_poll_fd()), PollFlags::PollIn())];
     fds.extend(probes.map(|p| (RawFd(p.get_poll_fd()), PollFlags::PollIn())));
     let retry_at = probes.is_none().then(|| crate::uptime_ms() + PROBE_RETRY_MS);
     let step = match (config.stop.is_some(), retry_at.is_some()) {
@@ -373,10 +376,10 @@ fn answer_probe(probes: &UdpSocket, config: &Config, nickname: &str) {
     let announce = discovery::Announce {
         nonce: probe.nonce,
         protocol: proto::PROTOCOL_VERSION,
-        daemon_version: alloc::string::String::from(crate::VERSION),
+        daemon_version: String::from(crate::VERSION),
         kind: config.kind,
         port: config.port,
-        nickname: alloc::string::String::from(nickname),
+        nickname: String::from(nickname),
         pairing: crate::pairing::code().is_some(),
     };
     if let Err(rc) = probes.send_to(&discovery::encode_announce(&announce), (ip, port)) {
@@ -385,10 +388,10 @@ fn answer_probe(probes: &UdpSocket, config: &Config, nickname: &str) {
 }
 
 /// The console's nickname, cut to what an announce carries.
-fn nickname() -> alloc::string::String {
+fn nickname() -> String {
     let mut name = services::set::nickname().unwrap_or_else(|rc| {
         log!("no console nickname ({rc})");
-        alloc::string::String::new()
+        String::new()
     });
     while name.len() > discovery::MAX_NICKNAME {
         name.pop();
@@ -396,11 +399,8 @@ fn nickname() -> alloc::string::String {
     name
 }
 
-fn wait_readable<P: nx::socket::net::traits::Pollable>(
-    fd: &P,
-    timeout_ms: Option<i32>,
-    config: &Config,
-) -> Result<bool> {
+/// Waits until `fd` is readable. Returns `Ok(false)` on timeout or when the server is stopping.
+fn wait_readable<P: Pollable>(fd: &P, timeout_ms: Option<i32>, config: &Config) -> Result<bool> {
     let fds = [(RawFd(fd.get_poll_fd()), PollFlags::PollIn())];
     let mut waited = 0;
     loop {
@@ -426,7 +426,7 @@ fn wait_readable<P: nx::socket::net::traits::Pollable>(
 /// Lets a bare descriptor be passed to [`poll`] without the owning type.
 struct RawFd(i32);
 
-impl nx::socket::net::traits::Pollable for RawFd {
+impl Pollable for RawFd {
     fn get_poll_fd(&self) -> i32 {
         self.0
     }
