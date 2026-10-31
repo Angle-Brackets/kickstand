@@ -169,12 +169,12 @@ impl Session {
             return too_old(version);
         }
         match crate::tokens::check(token) {
-            Err(()) => {
+            None => {
                 let msg = format!("this console isn't paired with any PC: open Kickstand from hbmenu on it and pair, or put a token in {}", path::TOKEN_PATH);
                 Response::error(ErrorKind::Unauthorized, msg)
             }
-            Ok(false) => Response::error(ErrorKind::Unauthorized, "wrong token (pair this PC again)"),
-            Ok(true) => self.welcome(token),
+            Some(false) => Response::error(ErrorKind::Unauthorized, "wrong token (pair this PC again)"),
+            Some(true) => self.welcome(token),
         }
     }
 

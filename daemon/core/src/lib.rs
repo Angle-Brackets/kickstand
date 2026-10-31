@@ -31,7 +31,6 @@ pub fn start_sysmodule() -> nx::result::Result<u64> {
 /// The daemon's version, reported in [`proto::Response::Hello`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Milliseconds since the console booted.
 /// Releases a held virtual controller ([`proto::Request::Hold`]) when its lease runs out, checking ten
 /// times a second. For the sysmodule; the NRO checks from its screen loop instead, as a thread left
 /// running after it exits would run unmapped code.
@@ -47,6 +46,7 @@ pub fn start_hold_expiry() {
     }
 }
 
+/// Milliseconds since the console booted.
 pub fn uptime_ms() -> u64 {
     nx::arm::get_system_tick() * 1000 / nx::arm::get_system_tick_frequency()
 }

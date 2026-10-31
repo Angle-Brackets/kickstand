@@ -62,13 +62,14 @@ static FILE_LOCK: nx::sync::Mutex<()> = nx::sync::Mutex::new(());
 
 fn append_to_file(bytes: &[u8]) {
     let _one_writer = FILE_LOCK.lock();
-    let Ok(mut file) = fs::open_file(LOG_PATH, FileOpenOption::Create() | FileOpenOption::Write() | FileOpenOption::Append()) else {
+    let open = || fs::open_file(LOG_PATH, FileOpenOption::Create() | FileOpenOption::Write() | FileOpenOption::Append());
+    let Ok(mut file) = open() else {
         return;
     };
     if file.get_size().unwrap_or(0) > MAX_LOG_SIZE {
         drop(file);
         let _ = fs::remove_file(LOG_PATH);
-        let Ok(new_file) = fs::open_file(LOG_PATH, FileOpenOption::Create() | FileOpenOption::Write() | FileOpenOption::Append()) else {
+        let Ok(new_file) = open() else {
             return;
         };
         file = new_file;

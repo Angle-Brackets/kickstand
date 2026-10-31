@@ -66,14 +66,14 @@ pub fn any() -> bool {
     !FILE.lock().is_empty() || EXTRA.lock().is_some()
 }
 
-/// Whether `token` may connect: `Err(())` if no token may.
-pub fn check(token: &str) -> Result<bool, ()> {
+/// Whether `token` may connect: `None` if no token may.
+pub fn check(token: &str) -> Option<bool> {
     let known = known();
     if known.is_empty() {
-        return Err(());
+        return None;
     }
     // Check every one, so the time taken doesn't say which matched.
-    Ok(known.iter().fold(false, |found, known| proto::tokens::same(known, token) | found))
+    Some(known.iter().fold(false, |found, known| proto::tokens::same(known, token) | found))
 }
 
 /// Saves `token` as a paired PC's (`who`, its address, goes in a comment) and accepts it from now on.
