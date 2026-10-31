@@ -28,10 +28,19 @@ pub struct Console {
 struct Activity {
     next_id: u64,
     clients: Vec<(u64, MockClient)>,
-    recent: VecDeque<(Instant, [u8; 4], &'static str)>,
+    recent: VecDeque<Event>,
+}
+
+struct Event {
+    at: Instant,
+    id: u64,
+    ip: [u8; 4],
+    app: Option<String>,
+    what: &'static str,
 }
 
 struct MockClient {
+    app: Option<String>,
     ip: [u8; 4],
     connected: Instant,
     requests: u32,
@@ -54,7 +63,7 @@ impl Console {
         activity.next_id += 1;
         let id = activity.next_id;
         let now = Instant::now();
-        activity.clients.push((id, MockClient { ip, connected: now, requests: 0, doing: "connecting", last: now, change: None }));
+        activity.clients.push((id, MockClient { app: None, ip, connected: now, requests: 0, doing: "connecting", last: now, change: None }));
         id
     }
 
@@ -74,29 +83,46 @@ impl Console {
         if proto::changes_console(doing) {
             client.change = Some((doing, client.last));
         }
-        let ip = client.ip;
+        let (ip, app) = (client.ip, client.app.clone());
         if changed && !proto::ROUTINE.contains(&doing) {
             if activity.recent.len() == proto::MAX_RECENT {
                 activity.recent.pop_front();
             }
-            activity.recent.push_back((Instant::now(), ip, doing));
+            activity.recent.push_back(Event { at: Instant::now(), id, ip, app, what: doing });
         }
     }
 
-    fn agents(&self, you: u64) -> Vec<proto::AgentInfo> {
+    fn introduce(&self, id: u64, app: String) {
+        if let Some((_, client)) = self.activity.lock().unwrap().clients.iter_mut().find(|(c, _)| *c == id) {
+            client.app = Some(app);
+        }
+    }
+
+    fn agents(&self, you: u64) -> proto::AgentsReport {
         let activity = self.activity.lock().unwrap();
         let ms = |t: Instant| t.elapsed().as_millis() as u64;
-        activity
+        let agents = activity
             .clients
             .iter()
             .map(|(id, c)| proto::AgentInfo {
+                id: *id as u32,
                 ip: c.ip,
                 you: *id == you,
+                app: c.app.clone(),
+                connected_ms: ms(c.connected),
+                requests: c.requests,
                 doing: c.doing.into(),
                 idle_ms: ms(c.last),
                 change: c.change.map(|(what, at)| (what.into(), ms(at))),
             })
-            .collect()
+            .collect();
+        let recent = activity
+            .recent
+            .iter()
+            .rev()
+            .map(|e| proto::AgentEvent { ago_ms: ms(e.at), id: e.id as u32, ip: e.ip, app: e.app.clone(), what: e.what.into() })
+            .collect();
+        proto::AgentsReport { agents, recent }
     }
 
     fn report(&self, you: u64) -> proto::ActivityReport {
@@ -115,7 +141,7 @@ impl Console {
                     idle_ms: ms(c.last),
                 })
                 .collect(),
-            recent: activity.recent.iter().rev().map(|(at, ip, what)| proto::ActivityEvent { ago_ms: ms(*at), ip: *ip, what: (*what).into() }).collect(),
+            recent: activity.recent.iter().rev().map(|e| proto::ActivityEvent { ago_ms: ms(e.at), ip: e.ip, what: e.what.into() }).collect(),
             keep_awake_s: 0,
         }
     }
@@ -203,7 +229,7 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             stream.write_all(&proto::encode(&Response::error(ErrorKind::Unsupported, "unknown request"))?).await?;
             continue;
         };
-        if authed && !matches!(req, Request::Activity | Request::Agents) {
+        if authed && !matches!(req, Request::Activity | Request::Agents | Request::Introduce { .. }) {
             console.request(id, &req);
         }
         let resp = match req {
@@ -234,6 +260,10 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             _ if !authed => Response::error(ErrorKind::Unauthorized, "send Hello first"),
             Request::Activity => Response::Activity(console.report(id)),
             Request::Agents => Response::Agents(console.agents(id)),
+            Request::Introduce { app } => {
+                console.introduce(id, app);
+                Response::Ok
+            }
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },
             Request::ListDir { path } => match path::check_read(&path) {
                 Ok(p) => list(&root.join(&p[1..])),

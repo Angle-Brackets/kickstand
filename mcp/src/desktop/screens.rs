@@ -9,7 +9,7 @@ use proto::DaemonKind;
 use super::theme::{self, BODY, FIELD, Face, INK, Kind, MUTED, RED, RULE, RULE_LIGHT};
 use super::worker::{Cmd, Live, Model, Pairing, Reach, capitalize};
 use super::{Kickstand, Screen, art, columns};
-use crate::link::{Maker, State};
+use crate::link::{App, Maker, State};
 
 /// The page's padding.
 fn page(ui: &mut Ui, top: f32, add: impl FnOnce(&mut Ui)) {
@@ -385,6 +385,11 @@ const LINKED_MIN_HEIGHT: f32 = 45.0 + 2.0 * 37.0;
 const SWITCH_HEIGHT: f32 = 330.0;
 const SWITCH_HEIGHT_WRAPPED: f32 = 390.0;
 
+/// "1 AGENT", "3 AGENTS".
+fn agents_count(n: usize) -> String {
+    if n == 1 { "1 AGENT".into() } else { format!("{n} AGENTS") }
+}
+
 /// ✓ LINKED, naming the command it runs on hover. (Right to left.)
 fn linked_mark(ui: &mut Ui, command: &str) {
     let response = theme::label(ui, "LINKED", false, 13.0, INK);
@@ -395,7 +400,7 @@ fn linked_mark(ui: &mut Ui, command: &str) {
 
 /// The Custom tab's part for apps Kickstand doesn't know: the command, and the JSON most of them take.
 fn any_app(ui: &mut Ui, model: &mut Model) {
-    let Ok((command, args)) = crate::link::server_command() else { return };
+    let Ok((command, args)) = crate::link::server_command(None) else { return };
     let line = std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
     let config = serde_json::json!({ "mcpServers": { crate::link::NAME: { "command": command, "args": args } } });
     // Shown on one line to keep the window still; copied laid out.
@@ -463,7 +468,7 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         Reach::Connected(live) => Some(live),
         _ => None,
     };
-    let agents = live.and_then(|l| l.activity.as_ref()).map(|a| a.clients.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
+    let agents = live.and_then(|l| l.agents.as_ref()).map(|a| a.agents.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
     let busiest = agents.iter().min_by_key(|c| c.idle_ms);
     let (status, status_color, heading, standing) = match (&model.reach, busiest) {
         (Reach::Unknown, _) => ("CONNECTING", MUTED, "Getting in touch".to_string(), false),
@@ -512,15 +517,18 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 }
 
-fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::ClientInfo>) {
-    let Some(report) = &live.activity else {
+fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::AgentInfo>) {
+    let Some(report) = &live.agents else {
         theme::text(ui, "Update Kickstand on the Switch to see what the agent is doing here.", Face::Regular, 16.0, BODY);
         return;
     };
-    let me = report.clients.iter().find(|c| c.you).map(|c| c.ip);
+    let me = report.agents.iter().find(|c| c.you).map(|c| c.ip);
     let who = |ip: [u8; 4]| if Some(ip) == me { "This computer".to_string() } else { std::net::Ipv4Addr::from(ip).to_string() };
     let meta = match busiest {
-        Some(c) => format!("{} · connected {} · {} requests", who(c.ip), duration(c.connected_ms), c.requests),
+        Some(c) => {
+            let label = model.labels.get(c.id).map(|l| format!("{l} · ")).unwrap_or_default();
+            format!("{label}{} · connected {} · {} requests", who(c.ip), duration(c.connected_ms), c.requests)
+        }
         None => {
             let linked = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
             if linked { "Ask an agent to use the Switch and it shows up here".into() } else { "Link an AI app, then ask it to use the Switch".into() }
@@ -550,11 +558,15 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Cli
                 let at = now - chrono::TimeDelta::milliseconds(event.ago_ms as i64 + elapsed);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
                 ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if let Some(label) = model.labels.get(event.id) {
+                    ui.label(theme::job(&format!("[{label}]"), Face::Mono, 13.0, MUTED, 0.0));
+                }
                 let mut what = capitalize(&event.what);
                 if Some(event.ip) != me {
                     what = format!("{what} ({})", who(event.ip));
                 }
-                ui.label(theme::job(&what, Face::Mono, 13.0, INK, 0.0));
+                ui.add(egui::Label::new(theme::job(&what, Face::Mono, 13.0, INK, 0.0)).wrap());
             });
             ui.add_space(10.0);
             theme::rule(ui, 1.0, RULE_LIGHT);
@@ -585,6 +597,15 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.add_space(10.0);
     theme::rule(ui, 1.5, INK);
     let linked: Vec<_> = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).collect();
+    // Agents connected now, by the app they're in.
+    let running = |which: App| -> usize {
+        let Reach::Connected(Live { agents: Some(report), .. }) = &model.reach else { return 0 };
+        report
+            .agents
+            .iter()
+            .filter(|a| !a.you && a.app.as_deref().and_then(|name| App::identify(name, |app| super::worker::linked(&model.links, app))) == Some(which))
+            .count()
+    };
     if linked.is_empty() {
         ui.add_space(14.0);
         theme::text(ui, "No AI app yet.", Face::Regular, 16.0, BODY);
@@ -613,7 +634,8 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
             let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, INK, 0.0));
             painter.galley(egui::pos2(rect.left() + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, INK);
-            let count = painter.layout_job(theme::job(&format!("{} LINKED", apps.len()), Face::Mono, 13.0, MUTED, 0.04));
+            let total: usize = apps.iter().map(|(which, _)| running(*which)).sum();
+            let count = painter.layout_job(theme::job(&agents_count(total), Face::Mono, 13.0, if total > 0 { INK } else { MUTED }, 0.04));
             painter.galley(egui::pos2(rect.right() - count.size().x, mid - count.size().y / 2.0), count, MUTED);
             if response.clicked() {
                 app.folded[maker.index()] = open;
@@ -629,7 +651,8 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                     ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let State::Linked { command } = state {
-                            linked_mark(ui, command);
+                            let n = running(*which);
+                            theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { INK } else { MUTED }).on_hover_text(format!("Linked: runs {command}"));
                         }
                     });
                 });

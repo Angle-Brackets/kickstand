@@ -236,11 +236,15 @@ pub enum Request {
     /// holding nothing, so [`Request::Press`] and [`Request::Input`] meanwhile skip the second a new
     /// controller needs to settle. Answers [`Response::Ok`] once it's held.
     Hold { step: InputStep },
-    /// (24) Each connected client's last request and its last one that changed something on the console
-    /// (not [`ROUTINE`] or [`LOOKING`]), so an agent can tell another is at work even while that one is
-    /// looking at the screen between presses. Passive like [`Request::Activity`]. Answers
-    /// [`Response::Agents`].
+    /// (24) Each connected client: which AI app it works for ([`Request::Introduce`]), its last request and
+    /// its last one that changed something on the console (not [`ROUTINE`] or [`LOOKING`]), so an agent
+    /// can tell another is at work even while that one is looking at the screen between presses; and what
+    /// clients did lately, by client. Passive like [`Request::Activity`]. Answers [`Response::Agents`].
     Agents,
+    /// (24) Names the AI app this client works for: an MCP server sends the app it was linked to, or what
+    /// the app called itself in MCP's handshake. Cut to [`MAX_APP_NAME`] bytes. Passive like
+    /// [`Request::Activity`]. Answers [`Response::Ok`].
+    Introduce { app: String },
 }
 
 /// Longest lease of one [`Request::Hold`].
@@ -257,7 +261,8 @@ impl Request {
             | Request::AppletStatus
             | Request::FatalReports
             | Request::Activity
-            | Request::Agents => "checking on the console",
+            | Request::Agents
+            | Request::Introduce { .. } => "checking on the console",
             Request::ListDir { .. } | Request::Stat { .. } | Request::ReadFile { .. } => "reading files",
             Request::UploadBegin { .. } | Request::UploadChunk { .. } | Request::UploadFinish { .. } | Request::UploadAbort => {
                 "copying a file to the SD card"
@@ -455,8 +460,8 @@ pub enum Response {
     Threads { app: App, threads: Vec<ThreadInfo> },
     /// (22)
     Activity(ActivityReport),
-    /// (24) Longest connected first.
-    Agents(Vec<AgentInfo>),
+    /// (24)
+    Agents(AgentsReport),
 }
 
 /// Answer to [`Request::Activity`].
@@ -488,17 +493,46 @@ pub struct ClientInfo {
     pub idle_ms: u64,
 }
 
-/// One client in [`Response::Agents`].
+/// Most bytes of an app's name in [`Request::Introduce`].
+pub const MAX_APP_NAME: usize = 48;
+
+/// Answer to [`Request::Agents`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentsReport {
+    /// Longest connected first.
+    pub agents: Vec<AgentInfo>,
+    /// What clients did lately, newest first, as in [`ActivityReport::recent`].
+    pub recent: Vec<AgentEvent>,
+}
+
+/// One client in [`AgentsReport`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AgentInfo {
+    /// Numbers connections since the daemon started, from 1.
+    pub id: u32,
     pub ip: [u8; 4],
     /// The connection that asked.
     pub you: bool,
+    /// From [`Request::Introduce`].
+    pub app: Option<String>,
+    pub connected_ms: u64,
+    pub requests: u32,
     /// Its last request, in plain words ([`Request::describe`]), and how long ago.
     pub doing: String,
     pub idle_ms: u64,
     /// Its last request that changed something ([`changes_console`]), and how long ago.
     pub change: Option<(String, u64)>,
+}
+
+/// A client turning to something else, in [`AgentsReport::recent`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AgentEvent {
+    pub ago_ms: u64,
+    /// [`AgentInfo::id`].
+    pub id: u32,
+    pub ip: [u8; 4],
+    pub app: Option<String>,
+    pub what: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -781,6 +815,7 @@ mod tests {
                 Request::Activity => 38,
                 Request::Hold { .. } => 39,
                 Request::Agents => 40,
+                Request::Introduce { .. } => 41,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -851,6 +886,7 @@ mod tests {
             Request::Activity,
             Request::Hold { step: InputStep::default() },
             Request::Agents,
+            Request::Introduce { app: s() },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -877,7 +913,7 @@ mod tests {
             Response::Status(ConsoleStatus { uptime_ms: 0, unlocking_ms: None, keep_awake_s: 0, application: None, applet: None }),
             Response::Threads { app: app.clone(), threads: Vec::new() },
             Response::Activity(ActivityReport { clients: Vec::new(), recent: Vec::new(), keep_awake_s: 0 }),
-            Response::Agents(Vec::new()),
+            Response::Agents(AgentsReport::default()),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

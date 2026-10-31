@@ -663,7 +663,7 @@ impl Tools {
             if let Some(fatal) = &fatal {
                 text = format!("{fatal}\n{text}");
             }
-            let others = crate::client::other_agents(&self.client.agents().await?, false);
+            let others = self.client.agents().await?.map(|r| crate::client::other_agents(&r.agents, false)).unwrap_or_default();
             if !others.is_empty() {
                 write!(text, "\nother agents: {} (launching, closing, input and restarts aren't coordinated between agents)", others.join("; "))?;
             }
@@ -1214,6 +1214,13 @@ impl ServerHandler for Tools {
     /// Runs the tool, warning first when another agent changed something on the console lately and the
     /// tool could clash with it.
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, rmcp::ErrorData> {
+        if self.client.app().is_none() {
+            // What the app calls itself: in the handshake, or (stateless MCP) with each request.
+            let name = context.peer.peer_info().map(|info| info.client_info.name.clone()).or_else(|| context.meta.client_info().map(|info| info.name));
+            if let Some(name) = name {
+                self.client.set_app(&name).await;
+            }
+        }
         let warning = if CONTENTIOUS.contains(&request.name.as_ref()) { self.clash().await } else { None };
         let mut response = self.tool_router.call(ToolCallContext::new(self, request, context)).await?;
         if let (Some(warning), CallToolResponse::Complete(result)) = (warning, &mut response) {
@@ -1243,7 +1250,7 @@ const CONTENTIOUS: &[&str] = &[
 impl Tools {
     /// A warning if other agents changed something on the console in the last two minutes.
     async fn clash(&self) -> Option<String> {
-        let others = crate::client::other_agents(&self.client.agents().await.ok()?, true);
+        let others = crate::client::other_agents(&self.client.agents().await.ok()??.agents, true);
         (!others.is_empty()).then(|| {
             format!(
                 "Heads up, the console is shared right now: {}. Input, launching, closing and restarts aren't coordinated between agents, so this may clash with what they're doing (check the screen). If it matters, wait for them to finish or ask the user.",

@@ -29,6 +29,8 @@ pub struct DaemonInfo {
 pub struct Client {
     addr: String,
     token: String,
+    /// The AI app this client works for, told to the console on each connection ([`Request::Introduce`]).
+    app: std::sync::Mutex<Option<String>>,
     conn: Mutex<Option<Conn>>,
 }
 
@@ -45,7 +47,7 @@ pub struct UploadStats {
 
 impl Client {
     pub fn new(addr: String, token: String) -> Self {
-        Client { addr, token, conn: Mutex::new(None) }
+        Client { addr, token, app: std::sync::Mutex::new(None), conn: Mutex::new(None) }
     }
 
     pub fn addr(&self) -> &str {
@@ -55,7 +57,25 @@ impl Client {
     /// A client for the same console with a connection of its own, for work alongside this one's (frames
     /// captured while this one holds buttons).
     pub fn another(&self) -> Client {
-        Client::new(self.addr.clone(), self.token.clone())
+        let other = Client::new(self.addr.clone(), self.token.clone());
+        *other.app.lock().unwrap() = self.app();
+        other
+    }
+
+    pub fn app(&self) -> Option<String> {
+        self.app.lock().unwrap().clone()
+    }
+
+    /// Names the AI app this client works for, telling the console now if connected (and on every
+    /// connection after).
+    pub async fn set_app(&self, app: &str) {
+        if self.app.lock().unwrap().replace(app.to_string()).as_deref() == Some(app) {
+            return;
+        }
+        if let Some(conn) = self.conn.lock().await.as_mut() {
+            // An older console doesn't know the request; nothing to do about it.
+            round_trip(conn, &Request::Introduce { app: app.to_string() }).await.ok();
+        }
     }
 
     /// The console's address without the port.
@@ -429,23 +449,27 @@ impl Client {
         }
     }
 
-    /// Every connected client: what it's doing and the last thing it changed (see [`Request::Agents`]). From
-    /// a daemon before protocol 24, the last change is only known while it's what the client is doing;
-    /// before protocol 22, there's nothing to go on.
-    pub async fn agents(&self) -> Result<Vec<proto::AgentInfo>> {
+    /// Every connected client: its app, what it's doing and the last thing it changed, and what clients
+    /// did lately (see [`Request::Agents`]); `None` before protocol 22. Before 24 (from
+    /// [`Request::Activity`]), apps and ids (0) aren't known, and the last change is known only while
+    /// it's what the client is doing.
+    pub async fn agents(&self) -> Result<Option<proto::AgentsReport>> {
         match self.request(Request::Agents).await? {
-            Response::Agents(agents) => return Ok(agents),
+            Response::Agents(report) => return Ok(Some(report)),
             Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => {}
             other => return Err(unexpected(other)),
         }
-        let clients = self.activity().await?.map(|r| r.clients).unwrap_or_default();
-        Ok(clients
+        let Some(report) = self.activity().await? else { return Ok(None) };
+        let agents = report
+            .clients
             .into_iter()
             .map(|c| {
                 let change = proto::changes_console(&c.doing).then(|| (c.doing.clone(), c.idle_ms));
-                proto::AgentInfo { ip: c.ip, you: c.you, doing: c.doing, idle_ms: c.idle_ms, change }
+                proto::AgentInfo { id: 0, ip: c.ip, you: c.you, app: None, connected_ms: c.connected_ms, requests: c.requests, doing: c.doing, idle_ms: c.idle_ms, change }
             })
-            .collect())
+            .collect();
+        let recent = report.recent.into_iter().map(|e| proto::AgentEvent { ago_ms: e.ago_ms, id: 0, ip: e.ip, app: None, what: e.what }).collect();
+        Ok(Some(proto::AgentsReport { agents, recent }))
     }
 
     /// Keeps the console awake for `minutes` (0 ends it; `None` just asks); returns the seconds left.
@@ -569,7 +593,11 @@ impl Client {
     }
 
     async fn connect(&self) -> Result<Conn> {
-        self.connect_with(Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() }).await
+        let mut conn = self.connect_with(Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() }).await?;
+        if let Some(app) = self.app() {
+            round_trip(&mut conn, &Request::Introduce { app }).await.ok();
+        }
+        Ok(conn)
     }
 
     /// Pairs this PC with the console: `code` is the pairing code on its screen, and this client's token
@@ -811,7 +839,12 @@ pub fn other_agents(agents: &[proto::AgentInfo], changing: bool) -> Vec<String> 
         .iter()
         .filter(|a| !a.you)
         .filter_map(|a| {
-            let who = if Some(a.ip) == mine { "an agent on this PC".to_string() } else { format!("an agent at {}", std::net::Ipv4Addr::from(a.ip)) };
+            let app = a.app.as_deref().map(|name| crate::link::App::identify(name, |_| false).map_or(name, |app| app.name()));
+            let place = if Some(a.ip) == mine { "on this PC".to_string() } else { format!("at {}", std::net::Ipv4Addr::from(a.ip)) };
+            let who = match app {
+                Some(app) => format!("an agent in {app} {place}"),
+                None => format!("an agent {place}"),
+            };
             match &a.change {
                 Some((what, ms)) if *ms < BUSY_MS => {
                     let now = if a.idle_ms < BUSY_MS && a.doing != *what && !proto::ROUTINE.contains(&a.doing.as_str()) && !changing {
@@ -844,13 +877,17 @@ mod tests {
     #[test]
     fn other_agents_at_work() {
         let agent = |ip: [u8; 4], you, doing: &str, idle_ms, change: Option<(&str, u64)>| AgentInfo {
+            id: 1,
             ip,
             you,
+            app: None,
+            connected_ms: 600_000,
+            requests: 5,
             doing: doing.into(),
             idle_ms,
             change: change.map(|(what, ms)| (what.into(), ms)),
         };
-        let agents = [
+        let mut agents = [
             agent([192, 168, 1, 2], true, "pressing buttons", 0, Some(("pressing buttons", 0))),
             // Pressed, then looked at the screen.
             agent([192, 168, 1, 2], false, "looking at the screen", 800, Some(("pressing buttons", 12_400))),
@@ -866,5 +903,7 @@ mod tests {
             ]
         );
         assert_eq!(super::other_agents(&agents, true), ["an agent on this PC was pressing buttons 12 s ago"]);
+        agents[1].app = Some("antigravity-client".into());
+        assert_eq!(super::other_agents(&agents, true), ["an agent in Antigravity CLI on this PC was pressing buttons 12 s ago"]);
     }
 }

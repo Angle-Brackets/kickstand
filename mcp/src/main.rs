@@ -47,7 +47,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the MCP server on stdio (what AI apps start; the default when stdin is a pipe).
-    Serve,
+    Serve {
+        /// The AI app this server is for, so the desktop app can tell whose agent is whose: `link` writes it
+        /// (code, agy, ...); any other name works too. Without it, the name the app gives in MCP's handshake.
+        #[arg(long)]
+        app: Option<String>,
+    },
     /// Open the desktop app (the default otherwise): find the Switch, pair, link an AI app, and see what
     /// the agent is doing.
     Desktop,
@@ -372,7 +377,7 @@ enum SysmoduleCmd {
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
-    let command = cli.command.take().unwrap_or(if stdin_is_pipe() { Command::Serve } else { Command::Desktop });
+    let command = cli.command.take().unwrap_or(if stdin_is_pipe() { Command::Serve { app: None } } else { Command::Desktop });
     if let Command::Desktop = command {
         return desktop::run();
     }
@@ -503,7 +508,10 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
     match command {
         Command::Desktop => unreachable!("opened before the runtime starts"),
         Command::Allow { .. } => unreachable!("handled before connecting"),
-        Command::Serve => {
+        Command::Serve { app } => {
+            if let Some(app) = app {
+                client.set_app(&app).await;
+            }
             let service = tools::Tools::new(client).serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }

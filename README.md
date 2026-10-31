@@ -55,6 +55,12 @@ target/release/kickstand link code                # adds it to Claude Code (or d
 Starting the sysmodule at boot (`boot2.flag`) is left to the user (`kickstand sysmodule enable`); the MCP
 tools never set it.
 
+`link` writes `kickstand serve --app <app>`, which tells the console whose agent each connection is: the
+desktop app counts agents per app and tags the activity list (`[Claude Agent #1]`). Without `--app`, the
+name the AI app gives in MCP's handshake is used (the Antigravity CLI and IDE give the same one). Several
+agents can use the console at once, but input, launching, closing and restarts aren't coordinated: `status`
+lists other agents at work, and tools that change the console warn when another agent changed it lately.
+
 ## MCP tools
 | Area | Tools |
 | - | - |

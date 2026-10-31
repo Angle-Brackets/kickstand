@@ -76,6 +76,10 @@ impl Session {
             // Passive: a status display shouldn't look like an agent or keep the console awake.
             Request::Activity => self.activity(),
             Request::Agents => self.agents(),
+            Request::Introduce { app } => {
+                crate::activity::introduce(self.slot, app);
+                Response::Ok
+            }
             req => {
                 crate::activity::request(self.slot, &req);
                 // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
@@ -90,7 +94,9 @@ impl Session {
 
     fn handle_authed(&mut self, req: Request) -> Response {
         match req {
-            Request::Hello { .. } | Request::Pair { .. } | Request::Activity | Request::Agents => unreachable!("handled above"),
+            Request::Hello { .. } | Request::Pair { .. } | Request::Activity | Request::Agents | Request::Introduce { .. } => {
+                unreachable!("handled above")
+            }
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: crate::uptime_ms() },
             Request::ListDir { path } => self.list_dir(&path),
             Request::Stat { path } => match path::check_read(&path) {
@@ -191,14 +197,22 @@ impl Session {
         let agents = crate::activity::clients()
             .into_iter()
             .map(|c| proto::AgentInfo {
+                id: c.id,
                 ip: c.ip.octets(),
                 you: c.slot == self.slot,
+                app: c.app,
+                connected_ms: now.saturating_sub(c.connected_ms),
+                requests: c.requests,
                 doing: String::from(c.doing),
                 idle_ms: now.saturating_sub(c.last_ms),
                 change: c.change.map(|(what, at)| (String::from(what), now.saturating_sub(at))),
             })
             .collect();
-        Response::Agents(agents)
+        let recent = crate::activity::recent()
+            .into_iter()
+            .map(|e| proto::AgentEvent { ago_ms: now.saturating_sub(e.at_ms), id: e.id, ip: e.ip.octets(), app: e.app, what: String::from(e.what) })
+            .collect();
+        Response::Agents(proto::AgentsReport { agents, recent })
     }
 
     fn activity(&self) -> Response {

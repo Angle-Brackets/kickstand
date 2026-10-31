@@ -427,7 +427,7 @@ async fn another_agent_pressing_shows_after_it_looks() {
     other.press(vec![proto::Button::B], 1, 50).await.unwrap();
     other.list_dir("/atmosphere/crash_reports").await.unwrap();
     agent.ping().await.unwrap();
-    let agents = agent.agents().await.unwrap();
+    let agents = agent.agents().await.unwrap().unwrap().agents;
     assert_eq!(crate::client::other_agents(&agents, true), ["an agent on this PC was pressing buttons just now"]);
     assert_eq!(crate::client::other_agents(&agents, false), ["an agent on this PC was pressing buttons just now, then reading files"]);
     // Only looking isn't a clash.
@@ -435,5 +435,24 @@ async fn another_agent_pressing_shows_after_it_looks() {
     looker.list_dir("/").await.unwrap();
     drop(other);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(crate::client::other_agents(&agent.agents().await.unwrap(), true).is_empty());
+    assert!(crate::client::other_agents(&agent.agents().await.unwrap().unwrap().agents, true).is_empty());
+}
+
+#[tokio::test]
+async fn agents_name_their_app() {
+    let (agent, _) = start("tok").await;
+    agent.ping().await.unwrap();
+    agent.set_app("code").await;
+    let other = agent.another();
+    other.press(vec![proto::Button::B], 1, 50).await.unwrap();
+    let late = Client::new(agent.addr().to_string(), "tok".into());
+    late.set_app("antigravity-client").await;
+    late.ping().await.unwrap();
+    let report = Client::new(agent.addr().to_string(), "tok".into()).agents().await.unwrap().unwrap();
+    let apps: Vec<_> = report.agents.iter().filter(|a| !a.you).map(|a| a.app.as_deref()).collect();
+    assert_eq!(apps, [Some("code"), Some("code"), Some("antigravity-client")]);
+    let ids: Vec<u32> = report.agents.iter().map(|a| a.id).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+    let event = &report.recent[0];
+    assert_eq!((event.what.as_str(), event.app.as_deref(), event.id), ("pressing buttons", Some("code"), report.agents[1].id));
 }

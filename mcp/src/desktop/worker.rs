@@ -2,15 +2,16 @@
 //! The desktop app's network side: a thread with its own runtime that finds consoles, pairs, and keeps an
 //! eye on the paired one, writing what it learns into a [`Model`] the UI draws from.
 //!
-//! Watching uses [`proto::Request::Activity`] only, which the console doesn't count as activity: an open
-//! window neither shows up as an agent nor keeps the Switch awake.
+//! Watching uses [`proto::Request::Activity`] and [`proto::Request::Agents`] only, which the console doesn't
+//! count as activity: an open window neither shows up as an agent nor keeps the Switch awake.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use proto::{ActivityReport, HekateTarget};
+use proto::{ActivityReport, AgentsReport, HekateTarget};
 use tokio::sync::mpsc;
 
 use crate::client::{Client, DaemonInfo};
@@ -55,6 +56,49 @@ pub struct Model {
     pub busy: Option<&'static str>,
     /// The last button's outcome: (text, is an error).
     pub notice: Option<(String, bool)>,
+    pub labels: Labels,
+}
+
+/// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
+#[derive(Default)]
+pub struct Labels {
+    /// By connection id: the app name it was given for, and its label.
+    by_id: HashMap<u32, (Option<String>, String)>,
+    counts: HashMap<String, u32>,
+}
+
+impl Labels {
+    pub fn get(&self, id: u32) -> Option<&str> {
+        self.by_id.get(&id).map(|(_, label)| label.as_str())
+    }
+
+    /// Labels the agents and events of `report` not seen yet (ids from older consoles, 0, aren't real).
+    fn assign(&mut self, report: &AgentsReport, links: &[(App, link::State)]) {
+        let mut seen: Vec<(u32, Option<&str>)> = report.agents.iter().filter(|a| !a.you).map(|a| (a.id, a.app.as_deref())).collect();
+        seen.extend(report.recent.iter().map(|e| (e.id, e.app.as_deref())));
+        seen.sort_by_key(|(id, _)| *id);
+        for (id, app) in seen {
+            // The same id for another app: the console restarted and counts from 1 again.
+            if id == 0 || self.by_id.get(&id).is_some_and(|(was, _)| was.as_deref() == app) {
+                continue;
+            }
+            let base = match app {
+                Some(name) => match App::identify(name, |app| linked(links, app)) {
+                    Some(app) if app.maker() == link::Maker::Custom => format!("{} Agent", app.name()),
+                    Some(app) => format!("{} Agent", app.maker().name()),
+                    None => format!("{} Agent", capitalize(name)),
+                },
+                None => "Agent".to_string(),
+            };
+            let count = self.counts.entry(base.clone()).or_default();
+            *count += 1;
+            self.by_id.insert(id, (app.map(String::from), format!("{base} #{count}")));
+        }
+    }
+}
+
+pub fn linked(links: &[(App, link::State)], app: App) -> bool {
+    links.iter().any(|(a, s)| *a == app && matches!(s, link::State::Linked { .. }))
 }
 
 #[derive(Default)]
@@ -67,8 +111,9 @@ pub enum Reach {
 
 pub struct Live {
     pub info: DaemonInfo,
-    /// `None` from a console older than protocol 22.
+    /// `None` from a console older than protocol 22 (both).
     pub activity: Option<ActivityReport>,
+    pub agents: Option<AgentsReport>,
     pub at: Instant,
 }
 
@@ -146,10 +191,14 @@ impl Worker {
         let result = async {
             let info = client.hello().await?;
             let activity = client.activity().await?;
-            anyhow::Ok(Live { info, activity, at: Instant::now() })
+            let agents = client.agents().await?;
+            anyhow::Ok(Live { info, activity, agents, at: Instant::now() })
         }
         .await;
         self.update(|m| {
+            if let Ok(Live { agents: Some(agents), .. }) = &result {
+                m.labels.assign(agents, &m.links);
+            }
             m.reach = match result {
                 Ok(live) => Reach::Connected(live),
                 Err(e) => Reach::Unreachable(format!("{e:#}")),

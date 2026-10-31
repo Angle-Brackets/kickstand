@@ -125,6 +125,40 @@ impl App {
         App::ALL.into_iter().find(|app| app.slug() == slug || app.name().to_ascii_lowercase().replace(' ', "-") == slug)
     }
 
+    /// The apps a client could be, from the name it gave the console ([`proto::Request::Introduce`]): the
+    /// slug it was linked with (`serve --app`), or what the app calls itself in MCP's handshake (Claude
+    /// Code "claude-code", Claude Desktop "claude-ai", the Antigravity CLI and IDE both
+    /// "antigravity-client").
+    pub fn candidates(name: &str) -> Vec<App> {
+        if let Some(app) = App::from_slug(name) {
+            return vec![app];
+        }
+        let name = name.to_ascii_lowercase();
+        let has = |part: &str| name.contains(part);
+        if has("claude-code") || has("claude code") {
+            vec![App::ClaudeCode]
+        } else if has("claude") {
+            vec![App::ClaudeDesktop]
+        } else if has("antigravity") {
+            vec![App::AntigravityCli, App::Antigravity]
+        } else if has("gemini") {
+            vec![App::GeminiCli]
+        } else if has("codex") {
+            vec![App::Codex]
+        } else if has("lmstudio") || has("lm studio") || has("lm-studio") {
+            vec![App::LmStudio]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Which app a client named `name` is: of its [`App::candidates`], the first that's `linked`, else the
+    /// first.
+    pub fn identify(name: &str, linked: impl Fn(App) -> bool) -> Option<App> {
+        let candidates = App::candidates(name);
+        candidates.iter().copied().find(|&app| linked(app)).or(candidates.first().copied())
+    }
+
     /// What to do after linking or unlinking for it to take effect.
     fn restart(self) -> &'static str {
         match self {
@@ -174,10 +208,15 @@ pub enum State {
     Linked { command: String },
 }
 
-/// What runs Kickstand's MCP server: this program, with `serve`.
-pub fn server_command() -> Result<(String, Vec<String>)> {
+/// What runs Kickstand's MCP server: this program, with `serve`, and `--app` naming the app it's for
+/// (so the console can tell agents in the Antigravity CLI and IDE apart, which call themselves the same).
+pub fn server_command(app: Option<App>) -> Result<(String, Vec<String>)> {
     let exe = std::env::current_exe().context("finding this program's path")?;
-    Ok((exe.to_string_lossy().into_owned(), vec!["serve".into()]))
+    let mut args = vec!["serve".to_string()];
+    if let Some(app) = app {
+        args.extend(["--app".to_string(), app.slug().to_string()]);
+    }
+    Ok((exe.to_string_lossy().into_owned(), args))
 }
 
 pub fn state(app: App) -> State {
@@ -198,7 +237,7 @@ pub fn state(app: App) -> State {
 
 /// Adds Kickstand to `app`; returns what to tell the user.
 pub fn link(app: App) -> Result<String> {
-    let (command, args) = server_command()?;
+    let (command, args) = server_command(Some(app))?;
     match app.config().with_context(|| format!("no {} config location on this system", app.name()))? {
         Config::ClaudeCli => {
             let claude = find_on_path("claude").context("Claude Code's `claude` command isn't installed")?;
@@ -416,6 +455,17 @@ mod tests {
         let fresh = with_toml_entry("", "k", &["serve".into()]).unwrap();
         assert_eq!(fresh, "[mcp_servers.kickstand]\ncommand = \"k\"\nargs = [\"serve\"]\n");
         assert!(with_toml_entry("mcp_servers = 3", "k", &[]).is_err());
+    }
+
+    #[test]
+    fn apps_by_client_name() {
+        assert_eq!(App::identify("agy", |_| false), Some(App::AntigravityCli));
+        assert_eq!(App::identify("claude-code", |_| false), Some(App::ClaudeCode));
+        assert_eq!(App::identify("claude-ai", |_| false), Some(App::ClaudeDesktop));
+        assert_eq!(App::identify("antigravity-client", |_| false), Some(App::AntigravityCli));
+        assert_eq!(App::identify("antigravity-client", |app| app == App::Antigravity), Some(App::Antigravity));
+        assert_eq!(App::identify("codex-mcp-client", |_| false), Some(App::Codex));
+        assert_eq!(App::identify("jan", |_| true), None);
     }
 
     #[test]
