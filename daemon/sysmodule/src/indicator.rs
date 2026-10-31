@@ -31,6 +31,11 @@ const SOFTWARE_EVERY: u32 = 4;
 const EARLIEST_MS: u64 = 45_000;
 /// After a failure to set up the layer, wait this long before trying again.
 const RETRY_NS: i64 = 60_000_000_000;
+/// The layer is only made once no software has been open for this long, and this long after the sysmodule
+/// started. Made at the moment the Kickstand NRO had closed its own vi:m layer and handed over (the Album
+/// still open), it never came back: vi stopped answering, then the home menu and every display
+/// (2026-10-30; nothing logged after the start, the NRO's screen stayed blank and HOME did nothing).
+const SETTLE_MS: u64 = 15_000;
 
 type Canvas = CanvasManager<RGBA8>;
 
@@ -49,9 +54,14 @@ fn run() {
     let mut shown = false;
     let mut software = false;
     let mut polls = 0u32;
+    // Uptime when software was last seen open (or the thread started).
+    let mut settled_from = daemon_core::uptime_ms();
     loop {
         if polls.is_multiple_of(SOFTWARE_EVERY) {
             software = software_open();
+            if software {
+                settled_from = daemon_core::uptime_ms();
+            }
         }
         polls = polls.wrapping_add(1);
         let want = awake::remaining_ms() > 0 && !software;
@@ -61,7 +71,8 @@ fn run() {
             layer = None;
             shown = false;
         }
-        if want && layer.is_none() && daemon_core::uptime_ms() >= EARLIEST_MS {
+        let now = daemon_core::uptime_ms();
+        if want && layer.is_none() && now >= EARLIEST_MS && now >= settled_from + SETTLE_MS {
             match create(pos) {
                 Ok(canvas) => layer = Some((canvas, pos)),
                 Err(rc) => {

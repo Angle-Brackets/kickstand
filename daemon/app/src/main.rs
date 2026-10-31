@@ -54,12 +54,13 @@ fn main() {
     // The sysmodule would hold the port; this NRO takes over until a client asks for a handover.
     let mut stopped_sysmodule = false;
     if services::pm::process_id(proto::path::SYSMODULE_PROGRAM_ID).is_some() {
-        match services::pm::terminate_program(proto::path::SYSMODULE_PROGRAM_ID) {
-            Ok(()) => {
+        match stop_sysmodule() {
+            Some(Ok(())) => {
                 stopped_sysmodule = true;
                 log!("paused the background service while this screen is open");
             }
-            Err(rc) => log!("couldn't stop the running sysmodule ({rc}); the port may be taken"),
+            Some(Err(rc)) => log!("couldn't stop the running sysmodule ({rc}); the port may be taken"),
+            None => log!("the background service didn't stop within {STOP_WAIT_MS} ms: it's stuck; restart the Switch"),
         }
     }
 
@@ -94,6 +95,39 @@ fn main() {
     }
     log!("exiting");
     nxlink::disconnect();
+}
+
+/// How long [`stop_sysmodule`] waits.
+const STOP_WAIT_MS: u64 = 5_000;
+
+/// Terminates the sysmodule, giving up after [`STOP_WAIT_MS`] (`None`): a sysmodule stuck in a call to a
+/// system service doesn't end, and waiting on it kept this screen from ever drawing (2026-10-30). The
+/// thread is left behind then; the console needs a restart anyway.
+fn stop_sysmodule() -> Option<nx::result::Result<()>> {
+    use core::sync::atomic::AtomicU32;
+    // 0: running, 1: stopped, otherwise the error's value.
+    static OUTCOME: AtomicU32 = AtomicU32::new(0);
+    let spawned = thread::Builder::new().name("stop-sysmodule").stack_size(0x4000).spawn(|| {
+        let outcome = match services::pm::terminate_program(proto::path::SYSMODULE_PROGRAM_ID) {
+            Ok(()) => 1,
+            Err(rc) => rc.get_value().max(2),
+        };
+        OUTCOME.store(outcome, Ordering::Release);
+    });
+    if let Err(rc) = spawned {
+        return Some(Err(rc));
+    }
+    let deadline = daemon_core::uptime_ms() + STOP_WAIT_MS;
+    while daemon_core::uptime_ms() < deadline {
+        match OUTCOME.load(Ordering::Acquire) {
+            0 => {
+                let _ = nx::svc::sleep_thread(100_000_000);
+            }
+            1 => return Some(Ok(())),
+            rc => return Some(Err(nx::result::ResultCode::new(rc))),
+        }
+    }
+    None
 }
 
 /// Launcher mode: no sockets, screen or sysmodule handling, just the launch (logged to the SD card).
