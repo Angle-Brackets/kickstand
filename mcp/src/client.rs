@@ -259,7 +259,7 @@ impl Client {
     pub async fn set_boot2(&self, on: bool) -> Result<SysmoduleStatus> {
         let status = self.sysmodule(Request::SysmoduleStatus).await?;
         if on && !status.installed {
-            anyhow::bail!("install the sysmodule before enabling start-at-boot");
+            bail!("install the sysmodule before enabling start-at-boot");
         }
         if on && !status.boot2 {
             self.upload(proto::path::SYSMODULE_BOOT2_FLAG, &[]).await?;
@@ -295,12 +295,12 @@ impl Client {
 
     /// Presses `buttons` together `times` times on a virtual controller (see [`Request::Press`]).
     pub async fn press(&self, buttons: Vec<proto::Button>, times: u8, hold_ms: u32) -> Result<()> {
-        expect(self.request(Request::Press { buttons, times, hold_ms }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+        expect_ok(self.request(Request::Press { buttons, times, hold_ms }).await?)
     }
 
     /// Plays timed button steps on one virtual controller ([`Request::Input`]).
     pub async fn input(&self, steps: Vec<proto::InputStep>) -> Result<()> {
-        expect(self.request(Request::Input { steps }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+        expect_ok(self.request(Request::Input { steps }).await?)
     }
 
     /// Holds `step` for `step.ms` on a controller that stays attached meanwhile (see [`Request::Hold`]);
@@ -391,7 +391,7 @@ impl Client {
 
     /// Points this connection's memory requests at the Album's process (`applet`) or the application.
     pub async fn memory_target(&self, applet: bool) -> Result<()> {
-        expect(self.request(Request::MemoryTarget { applet }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+        expect_ok(self.request(Request::MemoryTarget { applet }).await?)
     }
 
     /// Installed applications, most recently used first (the home menu's order).
@@ -429,14 +429,14 @@ impl Client {
     pub async fn write_memory(&self, address: u64, data: &[u8]) -> Result<()> {
         for (i, chunk) in data.chunks(proto::MAX_CHUNK).enumerate() {
             let req = Request::WriteMemory { address: address.wrapping_add((i * proto::MAX_CHUNK) as u64), data: chunk.to_vec() };
-            expect(self.request(req).await?, |r| matches!(r, Response::Ok))?;
+            expect_ok(self.request(req).await?)?;
         }
         Ok(())
     }
 
     /// Moves the sysmodule's indicator (debug; see [`Request::IndicatorPosition`]).
     pub async fn indicator_position(&self, x: u16, y: u16) -> Result<()> {
-        expect(self.request(Request::IndicatorPosition { x, y }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
+        expect_ok(self.request(Request::IndicatorPosition { x, y }).await?)
     }
 
     /// Who is connected and what they've been doing (see [`Request::Activity`]); `None` from a daemon older
@@ -483,12 +483,10 @@ impl Client {
     /// Asks the NRO daemon to exit. The connection is dropped afterwards.
     pub async fn exit(&self) -> Result<()> {
         let resp = self.request(Request::Exit).await;
-        *self.conn.lock().await = None;
-        expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
+        self.disconnect().await;
+        expect_ok(resp?)
     }
 
-    /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
-    /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
     /// Every thread of the memory target (see [`Client::memory_target`]), paused for a moment.
     pub async fn threads(&self) -> Result<(proto::App, Vec<proto::ThreadInfo>)> {
         match self.request(Request::Threads).await? {
@@ -506,11 +504,13 @@ impl Client {
         *self.conn.lock().await = None;
     }
 
+    /// Hands the console over from the NRO daemon to the sysmodule (replacing any running one) and waits
+    /// until the sysmodule answers. Returns its status. A no-op if the sysmodule is already answering.
     pub async fn handover(&self) -> Result<SysmoduleStatus> {
         if self.hello().await?.kind == DaemonKind::Nro {
             let resp = self.request(Request::Handover).await;
-            *self.conn.lock().await = None;
-            expect(resp?, |r| matches!(r, Response::Ok))?;
+            self.disconnect().await;
+            expect_ok(resp?)?;
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -536,15 +536,15 @@ impl Client {
     /// Warm-reboots into hekate. Returns once the daemon has accepted; the console then goes away.
     pub async fn reboot_to_hekate(&self, target: HekateTarget) -> Result<()> {
         let resp = self.request(Request::RebootToHekate { target }).await;
-        *self.conn.lock().await = None;
-        expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
+        self.disconnect().await;
+        expect_ok(resp?)
     }
 
     /// Makes the console forget this PC's token ([`Request::Unpair`]): it can't connect again until it pairs
     /// again with the code on the console's screen.
     pub async fn unpair(&self) -> Result<()> {
         let resp = self.request(Request::Unpair).await;
-        *self.conn.lock().await = None;
+        self.disconnect().await;
         match resp? {
             Response::Ok => Ok(()),
             Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Err(anyhow!(
@@ -564,11 +564,8 @@ impl Client {
     /// [`Client::request`] with the connection already locked, for multi-request operations.
     async fn request_locked(&self, guard: &mut MutexGuard<'_, Option<Conn>>, req: Request) -> Result<Response> {
         let had_conn = guard.is_some();
-        let first = match self.connected(guard).await {
-            Ok(conn) => round_trip(conn, &req).await,
-            Err(e) => return Err(e),
-        };
-        match first {
+        let conn = self.connected(guard).await?;
+        match round_trip(conn, &req).await {
             Ok(resp) => Ok(resp),
             Err(e) if had_conn => {
                 **guard = None;
@@ -699,6 +696,11 @@ fn expect(resp: Response, ok: impl Fn(&Response) -> bool) -> Result<Response> {
     if ok(&resp) { Ok(resp) } else { Err(unexpected(resp)) }
 }
 
+/// Succeeds if `resp` is a plain [`Response::Ok`].
+fn expect_ok(resp: Response) -> Result<()> {
+    expect(resp, |r| matches!(r, Response::Ok)).map(|_| ())
+}
+
 fn unexpected(resp: Response) -> anyhow::Error {
     match resp {
         Response::Error(e) => match e.result {
@@ -753,7 +755,6 @@ pub fn describe_resources(r: &proto::Resources) -> String {
     out
 }
 
-/// Parses buttons written like "a", "zl+zr" or "l,r" (case-insensitive).
 /// Parses input steps like `"r:300 r+a:150 r:6000 -:500 l=0,1+b:2000 touch=640,360:100"`: what is held
 /// together, joined by `+` (buttons; `l=X,Y` / `r=X,Y` for the sticks, -1.0 to 1.0 with y up;
 /// `touch=X,Y` for a finger on the 1280x720 touch screen; `-` for nothing, a pause), then `:` and for how
@@ -769,7 +770,7 @@ pub fn parse_steps(spec: &str) -> Result<Vec<proto::InputStep>> {
                     Some(("l" | "ls", v)) => parsed.left = Some(parse_stick(v)?),
                     Some(("r" | "rs", v)) => parsed.right = Some(parse_stick(v)?),
                     Some(("touch" | "t", v)) => parsed.touch = Some(parse_point(v)?),
-                    Some((k, _)) => anyhow::bail!("step {step:?}: unknown {k:?}= (l=, r= or touch=)"),
+                    Some((k, _)) => bail!("step {step:?}: unknown {k:?}= (l=, r= or touch=)"),
                     None => parsed.buttons.extend(parse_buttons(part)?),
                 }
             }
@@ -784,7 +785,7 @@ fn parse_stick(v: &str) -> Result<(i32, i32)> {
     let axis = |a: &str| -> Result<i32> {
         let f: f64 = a.trim().parse().with_context(|| format!("stick axis {a:?}"))?;
         if !(-1.0..=1.0).contains(&f) {
-            anyhow::bail!("stick axis {a:?} is outside -1..1");
+            bail!("stick axis {a:?} is outside -1..1");
         }
         Ok((f * f64::from(proto::STICK_MAX)).round() as i32)
     };
@@ -796,11 +797,12 @@ fn parse_point(v: &str) -> Result<(u16, u16)> {
     let (x, y) = v.split_once(',').ok_or_else(|| anyhow!("touch point {v:?} isn't X,Y"))?;
     let (x, y): (u16, u16) = (x.trim().parse()?, y.trim().parse()?);
     if x > 1279 || y > 719 {
-        anyhow::bail!("touch point {v:?} is off the 1280x720 screen");
+        bail!("touch point {v:?} is off the 1280x720 screen");
     }
     Ok((x, y))
 }
 
+/// Parses buttons written like "a", "zl+zr" or "l,r" (case-insensitive).
 pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
     let buttons = spec
         .split(['+', ',', ' '])
@@ -813,7 +815,7 @@ pub fn parse_buttons(spec: &str) -> Result<Vec<proto::Button>> {
         })
         .collect::<Result<Vec<_>>>()?;
     if buttons.is_empty() {
-        anyhow::bail!("no buttons given");
+        bail!("no buttons given");
     }
     Ok(buttons)
 }
