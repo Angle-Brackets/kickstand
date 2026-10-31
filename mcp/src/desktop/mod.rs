@@ -81,8 +81,8 @@ pub struct Kickstand {
     folded: [bool; 4],
     /// Dark or light as chosen with the header's sun/moon button; `None` follows the system.
     dark: Option<bool>,
-    /// A theme change under way: when it started, and whether to dark.
-    flood: Option<(f64, bool)>,
+    /// A theme change under way.
+    flood: Option<Flood>,
     /// A group just opened there, to scroll into view once its rows are laid out.
     reveal: Option<crate::link::Maker>,
     brands: brands::Brands,
@@ -336,14 +336,29 @@ impl eframe::App for Kickstand {
             if now < 0.5 {
                 theme::set_dark(ui.ctx(), dark);
             } else {
-                self.flood = Some((now, dark));
+                // Capture the window as it is (this frame, still in the old colours).
+                let shot = Arc::new(Mutex::new(None));
+                let (sink, ctx) = (shot.clone(), ui.ctx().clone());
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
+                    *sink.lock().unwrap() = Some(image);
+                    ctx.request_repaint();
+                })));
+                self.flood = Some(Flood { to_dark: dark, asked: now, shot, old: None });
             }
         }
-        if let Some((start, to)) = self.flood
-            && now - start >= FLOOD_S as f64
-            && theme::dark() != to
+        if let Some(flood) = &mut self.flood
+            && flood.old.is_none()
         {
-            theme::set_dark(ui.ctx(), to);
+            let image = flood.shot.lock().unwrap().take();
+            if let Some(image) = image {
+                flood.old = Some((ui.ctx().load_texture("theme-old", image, egui::TextureOptions::LINEAR), now));
+                theme::set_dark(ui.ctx(), flood.to_dark);
+            } else if now - flood.asked > SHOT_TIMEOUT_S {
+                theme::set_dark(ui.ctx(), flood.to_dark);
+                self.flood = None;
+            } else {
+                ui.ctx().request_repaint();
+            }
         }
         window::frame(ui.ctx());
         window::title_bar(ui);
@@ -393,8 +408,8 @@ impl eframe::App for Kickstand {
         if open > 0.0 {
             overview::show(self, ui.ctx(), open);
         }
-        if let Some((start, to)) = self.flood {
-            if flood(ui.ctx(), theme::paper_of(to), now - start) {
+        if let Some(Flood { old: Some((old, start)), .. }) = &self.flood {
+            if wave(ui.ctx(), old, (now - start) as f32) {
                 ui.ctx().request_repaint();
             } else {
                 self.flood = None;
@@ -405,47 +420,56 @@ impl eframe::App for Kickstand {
     }
 }
 
-/// A theme change: the new background washes down from the top in a wave, covering the window; then the
-/// palette changes underneath and the window fades in through it.
-const FLOOD_S: f32 = 0.45;
-const REVEAL_S: f32 = 0.25;
+/// A theme change. The window as it was is captured, the palette changes at once, and the capture is
+/// laid over the window and peeled away from the top in a wave, showing the window in its new colours
+/// behind it.
+struct Flood {
+    to_dark: bool,
+    asked: f64,
+    /// Filled by the screenshot callback.
+    shot: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
+    /// The capture, and when the wave started.
+    old: Option<(egui::TextureHandle, f64)>,
+}
 
-/// Draws the theme change `elapsed` seconds in, over everything, in the new theme's `paper`. False once
-/// it's over.
-fn flood(ctx: &egui::Context, paper: egui::Color32, elapsed: f64) -> bool {
-    let rect = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::unique("theme-flood")));
-    let elapsed = elapsed as f32;
-    if elapsed >= FLOOD_S + REVEAL_S {
+const WAVE_S: f32 = 1.1;
+/// How long to wait for the capture before changing without the wave.
+const SHOT_TIMEOUT_S: f64 = 0.5;
+
+/// Draws the old window below a wave `elapsed` seconds in. False once it's past the bottom.
+fn wave(ctx: &egui::Context, old: &egui::TextureHandle, elapsed: f32) -> bool {
+    if elapsed >= WAVE_S {
         return false;
     }
-    if elapsed >= FLOOD_S {
-        let fade = egui::emath::easing::cubic_out((elapsed - FLOOD_S) / REVEAL_S);
-        painter.rect_filled(rect, 0.0, paper.gamma_multiply(1.0 - fade));
-        return true;
-    }
-    // Two swells, a faint one running ahead of the solid one; both end below the window's bottom.
-    const SWELL: f32 = 10.0;
-    const AHEAD: f32 = 28.0;
-    let t = egui::emath::easing::cubic_in_out(elapsed / FLOOD_S);
-    let front = rect.top() - SWELL + t * (rect.height() + 2.0 * SWELL + AHEAD);
-    for (lead, phase, color) in [(AHEAD, 1.7, paper.gamma_multiply(0.45)), (0.0, 0.0, paper)] {
-        let mut mesh = egui::Mesh::default();
-        let steps = (rect.width() / 12.0).ceil() as u32;
-        for i in 0..=steps {
-            let x = rect.left() + rect.width() * i as f32 / steps as f32;
-            let wave = (x / 140.0 + elapsed * 9.0 + phase).sin() * SWELL;
-            let y = (front + lead + wave).clamp(rect.top(), rect.bottom());
-            mesh.colored_vertex(egui::pos2(x, rect.top()), color);
-            mesh.colored_vertex(egui::pos2(x, y), color);
-            if i > 0 {
-                let (a, b, c, d) = (2 * i - 2, 2 * i - 1, 2 * i, 2 * i + 1);
-                mesh.add_triangle(a, b, c);
-                mesh.add_triangle(b, d, c);
-            }
+    const SWELL: f32 = 14.0;
+    let rect = ctx.content_rect();
+    let t = egui::emath::easing::cubic_in_out(elapsed / WAVE_S);
+    let front = rect.top() - SWELL + t * (rect.height() + 2.0 * SWELL);
+    let crest = |x: f32| {
+        let wave = (x / 70.0 + elapsed * 5.0).sin() * 0.65 + (x / 37.0 - elapsed * 3.0).sin() * 0.35;
+        (front + wave * SWELL).clamp(rect.top(), rect.bottom())
+    };
+    let mut mesh = egui::Mesh::with_texture(old.id());
+    let mut edge = Vec::new();
+    let steps = (rect.width() / 8.0).ceil() as u32;
+    for i in 0..=steps {
+        let u = i as f32 / steps as f32;
+        let x = rect.left() + rect.width() * u;
+        let y = crest(x);
+        edge.push(egui::pos2(x, y));
+        let v = (y - rect.top()) / rect.height();
+        mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(x, y), uv: egui::pos2(u, v), color: egui::Color32::WHITE });
+        mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(x, rect.bottom()), uv: egui::pos2(u, 1.0), color: egui::Color32::WHITE });
+        if i > 0 {
+            let (a, b, c, d) = (2 * i - 2, 2 * i - 1, 2 * i, 2 * i + 1);
+            mesh.add_triangle(a, b, c);
+            mesh.add_triangle(b, d, c);
         }
-        painter.add(egui::Shape::mesh(mesh));
     }
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::unique("theme-wave")));
+    painter.add(egui::Shape::mesh(mesh));
+    // The crest, in red.
+    painter.add(egui::Shape::line(edge, Stroke::new(2.0, RED)));
     true
 }
 
