@@ -88,6 +88,8 @@ pub struct Kickstand {
     shown: Option<usize>,
     entered: f64,
     from: f32,
+    /// Frames a new screen is still drawn unseen, so it's laid out before it fades in.
+    settling: u8,
     /// When the Link screen's tab last changed.
     tab_at: f64,
     /// Activity entries seen so far: when each happened (seconds since 1970) and when it appeared here,
@@ -126,6 +128,7 @@ impl Kickstand {
             shown: None,
             entered: 0.0,
             from: 0.0,
+            settling: 0,
             tab_at: f64::NEG_INFINITY,
             seen: Vec::new(),
             overview: false,
@@ -291,9 +294,17 @@ impl eframe::App for Kickstand {
         if self.shown != Some(order) {
             self.from = self.shown.map_or(0.0, |shown| if order > shown { 1.0 } else { -1.0 });
             self.shown = Some(order);
-            self.entered = now;
+            // egui sizes things (columns, text, right-aligned rows) over a frame or two: until then the
+            // screen is drawn unseen, and the fade starts after.
+            self.settling = 2;
         }
-        let t = eased(now - self.entered, ENTER_S);
+        let t = if self.settling > 0 {
+            self.settling -= 1;
+            self.entered = now;
+            0.0
+        } else {
+            eased(now - self.entered, ENTER_S)
+        };
         if t < 1.0 {
             ui.ctx().request_repaint();
         }

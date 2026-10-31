@@ -15,7 +15,7 @@ type Area = (&'static str, &'static str, &'static [(&'static str, &'static str)]
 const TOOLS: &[Area] = &[
     (
         "Develop & run",
-        "From a code change to the result on the Switch, and the software on it.",
+        "Build, run and manage software on the Switch.",
         &[
             ("test_build", "Build a project on this computer, send it over, run it and watch: one step from code change to result"),
             ("projects", "The projects test_build knows (~/.config/kickstand/projects.json)"),
@@ -30,7 +30,7 @@ const TOOLS: &[Area] = &[
     ),
     (
         "See & play",
-        "The screen, and a virtual controller.",
+        "Watch the screen and use a virtual controller.",
         &[
             ("screenshot", "A screenshot, scaled or cropped, with an optional coordinate grid"),
             ("wait_screen", "Wait until the screen changes or settles"),
@@ -42,7 +42,7 @@ const TOOLS: &[Area] = &[
     ),
     (
         "Debug",
-        "Crashes, hangs and memory.",
+        "Track down crashes, hangs and memory problems.",
         &[
             ("crash_reports", "Atmosphère's crash reports and fatal errors"),
             ("crash_report", "One of them, summarized, with the screenshot taken at the crash"),
@@ -55,7 +55,7 @@ const TOOLS: &[Area] = &[
     ),
     (
         "Files",
-        "The SD card. Outside Kickstand's folders and your projects', your AI app asks you first.",
+        "Browse the SD card. Outside Kickstand's folders and your projects, you're asked first.",
         &[
             ("list_dir", "List a folder"),
             ("stat", "A file's size and type"),
@@ -68,7 +68,7 @@ const TOOLS: &[Area] = &[
     ),
     (
         "Console",
-        "The Switch itself.",
+        "Check on the Switch and look after it.",
         &[
             ("status", "What's running, a fatal error, keep-awake, other agents, and a small screenshot"),
             ("ping", "Check the Switch answers"),
@@ -109,7 +109,7 @@ pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
             });
         });
         ui.add_space(6.0);
-        theme::text(ui, "Your Switch, for an AI agent on this computer.", Face::Regular, 17.0, BODY);
+        theme::text(ui, "Let an AI agent use your Switch.", Face::Regular, 17.0, BODY);
         ui.add_space(20.0);
         tabs(app, ui);
         ui.add_space(4.0);
@@ -145,6 +145,7 @@ pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
 /// The tab strip, the chosen one underlined in red (the line slides over).
 fn tabs(app: &mut Kickstand, ui: &mut Ui) {
     let mut underline = None;
+    let start = ui.cursor().left();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(20.0, 4.0);
         for (i, name) in tab_names().into_iter().enumerate() {
@@ -165,17 +166,17 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui) {
     });
     if let Some(rect) = underline {
         let ctx = ui.ctx();
-        let left = ctx.animate_value_with_time(egui::Id::unique("overview-tab-left"), rect.left(), 0.2);
-        let right = ctx.animate_value_with_time(egui::Id::unique("overview-tab-right"), rect.right(), 0.2);
-        let top = ctx.animate_value_with_time(egui::Id::unique("overview-tab-top"), rect.bottom() - 3.0, 0.2);
-        ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, top..=top + 3.0), 0.0, RED);
+        // Measured from the strip, so it only moves when the tab changes, not while the dialog rises in.
+        let left = start + ctx.animate_value_with_time(egui::Id::unique("overview-tab-left"), rect.left() - start, 0.2);
+        let right = start + ctx.animate_value_with_time(egui::Id::unique("overview-tab-right"), rect.right() - start, 0.2);
+        ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, rect.bottom() - 3.0..=rect.bottom()), 0.0, RED);
     }
     theme::rule(ui, 1.5, INK);
 }
 
 fn overview(ui: &mut Ui) {
     let section = |ui: &mut Ui, title: &str| {
-        ui.add_space(22.0);
+        ui.add_space(26.0);
         theme::label(ui, title, true, 13.0, INK);
         ui.add_space(10.0);
         theme::rule(ui, 1.0, RULE);
@@ -183,51 +184,92 @@ fn overview(ui: &mut Ui) {
     ui.add_space(18.0);
     theme::text(
         ui,
-        "Kickstand lets an AI agent use your Switch the way you would at a desk: copy homebrew over, run it, look at the screen, press buttons, read logs and crash reports, and get the console back when something hangs. So it can test and debug on real hardware without you there.",
+        "Kickstand lets an AI agent work on your Switch for you. It can copy homebrew over, run it, watch the screen, press buttons and read crash reports, so it can test and debug on real hardware while you're away.",
         Face::Regular,
         16.0,
         BODY,
     );
-    section(ui, "HOW IT FITS TOGETHER");
-    rows(
+    section(ui, "HOW IT WORKS");
+    ui.add_space(18.0);
+    diagram(ui);
+    ui.add_space(16.0);
+    theme::text(
         ui,
-        [
-            ("The Switch", "Kickstand's background service answers on your Wi-Fi (or the Kickstand app, opened from the Homebrew Menu)."),
-            ("Your AI app", "Runs Kickstand's MCP server, which gives the agent its tools: Claude Code, Antigravity, Codex, LM Studio and others."),
-            ("This window", "Finds the Switch, pairs with it, links your AI apps, and shows what agents are doing."),
-        ]
-        .map(|(a, b)| (a.to_string(), b.to_string())),
+        "This window sets it all up: it finds your Switch, pairs with it and links your AI apps. After that, it shows you what the agents are doing.",
+        Face::Regular,
+        15.0,
+        BODY,
     );
-    section(ui, "GETTING STARTED");
+    section(ui, "STAYING SAFE");
     rows(
         ui,
         [
-            ("01 Find", "Open Kickstand from the Homebrew Menu on the Switch, on the same Wi-Fi as this computer."),
-            ("02 Pair", "Type the code on the Switch's screen."),
-            ("03 Link", "Add Kickstand to your AI app, then start a new session in it."),
-            ("Then", "Ask the agent to use the Switch: \"run my build and tell me if it crashes\"."),
-        ]
-        .map(|(a, b)| (a.to_string(), b.to_string())),
-    );
-    section(ui, "WHAT IT WON'T DO");
-    rows(
-        ui,
-        [
-            ("Your files", "Outside Kickstand's folders and your projects', the agent asks you before using the SD card."),
-            ("The system", "Never touches Atmosphère's, hekate's or Nintendo's files, keys or NAND."),
-            ("Games", "Always run with full memory, and their memory is never changed."),
-            ("Restarts", "Only into hekate, never a power-off: a console injected over RCM couldn't come back on its own."),
-            ("Sleep", "The Switch stays awake 30 minutes after the agent's last request, then sleeps as usual."),
+            ("SD card", "Kickstand's folders and your projects are fair game. For anything else, you're asked first."),
+            ("System files", "Atmosphère, hekate and Nintendo's files, keys and NAND are never touched."),
+            ("Games", "Games always run with full memory, and their memory is never edited."),
+            ("Restarts", "The Switch only ever restarts into hekate. It's never powered off, so an RCM setup can always get back."),
+            ("Sleep", "The Switch stays awake for 30 minutes after the agent's last action, then sleeps as usual."),
         ]
         .map(|(a, b)| (a.to_string(), b.to_string())),
     );
     ui.add_space(8.0);
 }
 
+/// Your AI app → Kickstand on this computer → your Switch.
+fn diagram(ui: &mut Ui) {
+    const BOXES: [(&str, &str); 3] = [
+        ("Your AI app", "Claude Code, Antigravity, Codex, LM Studio and others"),
+        ("Kickstand", "Runs on this computer and gives the agent its tools"),
+        ("Your Switch", "Kickstand's background service does what the agent asks"),
+    ];
+    const LINKS: [&str; 2] = ["TOOLS", "WI-FI"];
+    const GAP: f32 = 64.0;
+    const PAD: f32 = 14.0;
+    let width = ui.available_width();
+    let box_width = (width - 2.0 * GAP) / 3.0;
+    let painter = ui.painter().clone();
+    let laid: Vec<_> = BOXES
+        .iter()
+        .map(|(title, what)| {
+            let title = painter.layout_job(theme::job(title, Face::Bold, 16.0, INK, 0.0));
+            let mut job = theme::job(what, Face::Regular, 13.5, BODY, 0.0);
+            job.wrap.max_width = box_width - 2.0 * PAD;
+            (title, painter.layout_job(job))
+        })
+        .collect();
+    let height = laid.iter().map(|(title, what)| title.size().y + 6.0 + what.size().y).fold(0.0, f32::max) + 2.0 * PAD;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    for (i, (title, what)) in laid.into_iter().enumerate() {
+        let left = rect.left() + i as f32 * (box_width + GAP);
+        let cell = Rect::from_min_size(egui::pos2(left, rect.top()), Vec2::new(box_width, height));
+        painter.rect_stroke(cell, 0.0, Stroke::new(1.5, INK), egui::StrokeKind::Inside);
+        // The Switch has a red edge, like the Joy-Con in the app's art.
+        if i == 2 {
+            painter.rect_filled(Rect::from_min_max(egui::pos2(cell.left(), cell.bottom() - 4.0), cell.max), 0.0, RED);
+        }
+        let title_height = title.size().y;
+        painter.galley(cell.min + Vec2::splat(PAD), title, INK);
+        painter.galley(cell.min + Vec2::new(PAD, PAD + title_height + 6.0), what, BODY);
+        if let Some(link) = LINKS.get(i) {
+            // Both ways: the agent asks, the Switch answers.
+            let y = cell.center().y;
+            let (from, to) = (cell.right() + 8.0, cell.right() + GAP - 8.0);
+            painter.line_segment([egui::pos2(from, y), egui::pos2(to, y)], Stroke::new(1.5, INK));
+            for (tip, dir) in [(to, 1.0), (from, -1.0)] {
+                let back = tip - dir * 6.0;
+                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y - 4.0)], Stroke::new(1.5, INK));
+                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y + 4.0)], Stroke::new(1.5, INK));
+            }
+            let label = painter.layout_job(theme::job(link, Face::Mono, 11.0, MUTED, 0.06));
+            painter.galley(egui::pos2((from + to) / 2.0 - label.size().x / 2.0, y - 8.0 - label.size().y), label, MUTED);
+        }
+    }
+}
+
 /// The terminal commands, as `kickstand --help` lists them.
 fn commands(ui: &mut Ui) {
     ui.add_space(16.0);
-    theme::text(ui, "Everything from a terminal too: kickstand <command>, and kickstand <command> --help for the details.", Face::Regular, 15.0, BODY);
+    theme::text(ui, "Everything here works from a terminal too. Add --help to any command for the details.", Face::Regular, 15.0, BODY);
     ui.add_space(8.0);
     let cli = crate::Cli::command();
     let commands = cli.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| {
