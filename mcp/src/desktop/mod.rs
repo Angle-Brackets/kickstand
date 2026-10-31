@@ -450,13 +450,11 @@ fn wave(ctx: &egui::Context, old: &egui::TextureHandle, elapsed: f32) -> bool {
         (front + wave * SWELL).clamp(rect.top(), rect.bottom())
     };
     let mut mesh = egui::Mesh::with_texture(old.id());
-    let mut edge = Vec::new();
     let steps = (rect.width() / 8.0).ceil() as u32;
     for i in 0..=steps {
         let u = i as f32 / steps as f32;
         let x = rect.left() + rect.width() * u;
         let y = crest(x);
-        edge.push(egui::pos2(x, y));
         let v = (y - rect.top()) / rect.height();
         mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(x, y), uv: egui::pos2(u, v), color: egui::Color32::WHITE });
         mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(x, rect.bottom()), uv: egui::pos2(u, 1.0), color: egui::Color32::WHITE });
@@ -468,8 +466,6 @@ fn wave(ctx: &egui::Context, old: &egui::TextureHandle, elapsed: f32) -> bool {
     }
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::unique("theme-wave")));
     painter.add(egui::Shape::mesh(mesh));
-    // The crest, in red.
-    painter.add(egui::Shape::line(edge, Stroke::new(2.0, RED)));
     true
 }
 
