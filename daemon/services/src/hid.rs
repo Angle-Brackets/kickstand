@@ -67,8 +67,22 @@ pub struct SetStateArgs {
     pub state: State,
 }
 
+/// `HiddbgKeyboardAutoPilotState`: modifiers (`HidKeyboardModifier`) and a bitmap of held keys
+/// (`HidKeyboardKey`, USB HID usage ids).
+#[derive(nx_derive::Request, nx_derive::Response, Copy, Clone, Default)]
+#[repr(C)]
+pub struct KeyboardState {
+    pub modifiers: u64,
+    pub keys: [u64; 4],
+}
+
 #[nx_derive::ipc_trait]
 pub trait HidDbgInterface {
+    /// `hiddbgSetKeyboardAutoPilotState`: the keyboard reports this state until unset.
+    #[ipc_rid(31)]
+    fn set_keyboard_auto_pilot_state(&self, state: KeyboardState);
+    #[ipc_rid(32)]
+    fn unset_keyboard_auto_pilot_state(&self);
     /// `hiddbgSetTouchScreenAutoPilotState`: the touch screen reports these touches until unset.
     #[ipc_rid(11)]
     fn set_touch_screen_auto_pilot_state(&self, states: sf::InMapAliasBuffer<TouchState>);
@@ -348,4 +362,92 @@ pub fn press(buttons: u64, times: u32, hold_ms: u32) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// Like [`play`], but on the held controller (attached and settled first if there's none), and then it
+/// keeps holding the last step until `lease_end()` (uptime ms, asked once the steps have played) instead
+/// of letting go: the next call carries on with nothing released in between.
+pub fn play_held(steps: &[Step], lease_end: impl FnOnce() -> u64) -> Result<()> {
+    let mut held = PAD.lock();
+    if held.is_none() {
+        let pad = VirtualController::attach()?;
+        let _ = svc::sleep_thread(SETTLE_NS);
+        // `expire_hold` waits on this lock, so it can't let go while the steps play.
+        *held = Some(Held { pad, step: Step::default(), until_ms: u64::MAX });
+    }
+    let Some(held) = held.as_mut() else { unreachable!("attached above") };
+    for step in steps {
+        apply(&mut held.pad, step)?;
+        let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
+    }
+    held.step = steps.last().copied().unwrap_or_default();
+    held.until_ms = lease_end();
+    Ok(())
+}
+
+/// How long a key stays down, and the gap after it: long enough for an app reading once a frame.
+const KEY_DOWN_NS: i64 = 40_000_000;
+const KEY_UP_NS: i64 = 30_000_000;
+/// `HidKeyboardModifier_Shift`.
+const SHIFT: u64 = 1 << 1;
+
+/// The key (a USB HID usage id) and whether Shift is needed for `c` on a US layout.
+pub fn key_for(c: char) -> Option<(u8, bool)> {
+    const SHIFTED_DIGITS: &str = "!@#$%^&*()";
+    Some(match c {
+        'a'..='z' => (c as u8 - b'a' + 4, false),
+        'A'..='Z' => (c as u8 - b'A' + 4, true),
+        '1'..='9' => (c as u8 - b'1' + 30, false),
+        '0' => (39, false),
+        '\n' => (40, false),
+        '\t' => (43, false),
+        ' ' => (44, false),
+        '-' => (45, false),
+        '_' => (45, true),
+        '=' => (46, false),
+        '+' => (46, true),
+        '[' => (47, false),
+        '{' => (47, true),
+        ']' => (48, false),
+        '}' => (48, true),
+        '\\' => (49, false),
+        '|' => (49, true),
+        ';' => (51, false),
+        ':' => (51, true),
+        '\'' => (52, false),
+        '"' => (52, true),
+        '`' => (53, false),
+        '~' => (53, true),
+        ',' => (54, false),
+        '<' => (54, true),
+        '.' => (55, false),
+        '>' => (55, true),
+        '/' => (56, false),
+        '?' => (56, true),
+        _ => {
+            let i = SHIFTED_DIGITS.find(c)?;
+            // ! is Shift+1 ... ) is Shift+0.
+            (if i == 9 { 39 } else { 30 + i as u8 }, true)
+        }
+    })
+}
+
+/// Types `text` on the keyboard autopilot, a key at a time, then gives the keyboard back. Characters
+/// [`key_for`] doesn't know must be refused before this.
+pub fn type_text(text: &str) -> Result<()> {
+    let srv = service::new_service_object::<HidDbgService>()?;
+    let result = (|| {
+        for c in text.chars() {
+            let Some((key, shift)) = key_for(c) else { continue };
+            let mut down = KeyboardState { modifiers: if shift { SHIFT } else { 0 }, ..Default::default() };
+            down.keys[usize::from(key / 64)] |= 1 << (key % 64);
+            srv.set_keyboard_auto_pilot_state(down)?;
+            let _ = svc::sleep_thread(KEY_DOWN_NS);
+            srv.set_keyboard_auto_pilot_state(KeyboardState::default())?;
+            let _ = svc::sleep_thread(KEY_UP_NS);
+        }
+        Ok(())
+    })();
+    let _ = srv.unset_keyboard_auto_pilot_state();
+    result
 }

@@ -331,10 +331,30 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             Request::Press { .. }
             | Request::Input { .. }
             | Request::Hold { .. }
+            | Request::Play { .. }
+            | Request::TypeText { .. }
+            | Request::RecordStart { .. }
             | Request::HblOverride { .. }
             | Request::MemoryTarget { .. }
             | Request::IndicatorPosition { .. } => Response::Ok,
             Request::FatalReports => Response::Dir { entries: Vec::new(), truncated: false },
+            // Every recording is the same: A, then the left stick up for a second.
+            Request::RecordStop => Response::Recording { total: MOCK_RECORDING.len() as u32, ms: 2000, full: false },
+            Request::RecordRead { from } => Response::Recorded { inputs: MOCK_RECORDING.iter().skip(from as usize).copied().collect() },
+            Request::Find { dir, name, max } => match path::check_read(&dir) {
+                Ok(p) => {
+                    let mut entries = Vec::new();
+                    find(root, &p, &name.to_lowercase(), max.max(1) as usize, &mut entries);
+                    let truncated = entries.len() > max.max(1) as usize;
+                    entries.truncate(max.max(1) as usize);
+                    Response::Found { entries, truncated }
+                }
+                Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
+            },
+            Request::Grep { path, needle, ignore_case, max } => match path::check_read(&path) {
+                Ok(p) => grep(root, &p, &needle, ignore_case, max.max(1) as usize),
+                Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
+            },
             Request::AppStatus | Request::CloseApp | Request::AppletStatus | Request::CloseApplet => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
             Request::Status => Response::Status(proto::ConsoleStatus {
@@ -403,6 +423,62 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
         };
         stream.write_all(&proto::encode(&resp)?).await?;
     }
+}
+
+const MOCK_RECORDING: [proto::RecordedInput; 5] = [
+    proto::RecordedInput { at_ms: 0, buttons: 0, left: (0, 0), right: (0, 0) },
+    proto::RecordedInput { at_ms: 200, buttons: 1, left: (0, 0), right: (0, 0) },
+    proto::RecordedInput { at_ms: 300, buttons: 0, left: (0, 0), right: (0, 0) },
+    proto::RecordedInput { at_ms: 500, buttons: 0, left: (0, proto::STICK_MAX), right: (0, 0) },
+    proto::RecordedInput { at_ms: 1500, buttons: 0, left: (0, 0), right: (0, 0) },
+];
+
+/// [`Request::Find`] over the mock's folder: entries under `sd_dir` (an SD path) whose name contains
+/// `needle`, one more than `max` at most.
+fn find(root: &Path, sd_dir: &str, needle: &str, max: usize, out: &mut Vec<DirEntry>) {
+    let Ok(read) = std::fs::read_dir(root.join(sd_dir.trim_start_matches('/'))) else { return };
+    for e in read.filter_map(|e| e.ok()) {
+        if out.len() > max {
+            return;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        let full = format!("{}/{name}", sd_dir.trim_end_matches('/'));
+        let is_dir = e.path().is_dir();
+        if name.to_lowercase().contains(needle) {
+            out.push(DirEntry { name: full.clone(), is_dir, size: e.metadata().map_or(0, |m| m.len()) });
+        }
+        if is_dir {
+            find(root, &full, needle, max, out);
+        }
+    }
+}
+
+fn grep(root: &Path, sd_path: &str, needle: &str, ignore_case: bool, max: usize) -> Response {
+    let local = root.join(sd_path.trim_start_matches('/'));
+    let files: Vec<String> = if local.is_dir() {
+        let mut all = Vec::new();
+        find(root, sd_path, "", usize::MAX - 1, &mut all);
+        all.into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect()
+    } else if local.exists() {
+        vec![sd_path.to_string()]
+    } else {
+        return Response::error(ErrorKind::NotFound, format!("stat {sd_path}: not found"));
+    };
+    let lower = needle.to_lowercase();
+    let mut matches = Vec::new();
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(root.join(file.trim_start_matches('/'))) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            let hit = if ignore_case { line.to_lowercase().contains(&lower) } else { line.contains(needle) };
+            if hit {
+                if matches.len() == max {
+                    return Response::Matches { matches, files: files.len() as u32, truncated: true };
+                }
+                matches.push(proto::GrepMatch { path: file.clone(), line: i as u32 + 1, text: line.to_string() });
+            }
+        }
+    }
+    Response::Matches { matches, files: files.len() as u32, truncated: false }
 }
 
 fn io_err(e: std::io::Error) -> Response {

@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -250,6 +250,74 @@ pub enum Request {
     /// given on the NRO's command line can't be forgotten this way. Answers [`Response::Ok`]; the
     /// connection isn't authenticated after it.
     Unpair,
+    /// (26) Plays `steps` like [`Request::Input`] (at most [`MAX_PLAY_STEPS`] and [`MAX_INPUT_MS`]), but on
+    /// the held controller of [`Request::Hold`] (attaching it if need be), and then keeps holding the last
+    /// step for `lease_ms` (at most [`MAX_HOLD_LEASE_MS`]) instead of letting go: a long recording is sent
+    /// as several of these back to back, with no release or settling between them. Finish with a Hold of
+    /// `ms` 0. Answers [`Response::Ok`] when the steps have played.
+    Play { steps: Vec<InputStep>, lease_ms: u32 },
+    /// (26) Starts recording the physical controllers (buttons and sticks, all players and handheld
+    /// merged; not HOME or Capture) for at most `max_ms` ([`MAX_RECORD_MS`]); a recording in progress is
+    /// thrown away. Answers [`Response::Ok`].
+    RecordStart { max_ms: u32 },
+    /// (26) Stops recording (or, after it stopped by itself, just reports). Answers
+    /// [`Response::Recording`]; read its inputs with [`Request::RecordRead`].
+    RecordStop,
+    /// (26) The recorded inputs from number `from` on, at most [`MAX_RECORD_PAGE`]. Answers
+    /// [`Response::Recorded`].
+    RecordRead { from: u32 },
+    /// (26) Types `text` on a virtual USB keyboard (for the software keyboard, or anything that reads a
+    /// keyboard), at most [`MAX_TYPE_TEXT`] characters of printable ASCII and newlines. Answers
+    /// [`Response::Ok`] once typed.
+    TypeText { text: String },
+    /// (26) Files and folders under `dir` (searched depth first) whose name contains `name` (ignoring
+    /// case; empty matches all), at most `max` ([`MAX_FIND`]). Folders the daemon won't read are skipped.
+    /// Answers [`Response::Found`].
+    Find { dir: String, name: String, max: u32 },
+    /// (26) Lines containing `needle` (ignoring case if asked) in the file `path`, or in every file under it
+    /// if it's a folder (files over [`MAX_GREP_FILE`] skipped), at most `max` ([`MAX_GREP`]). Answers
+    /// [`Response::Matches`].
+    Grep { path: String, needle: String, ignore_case: bool, max: u32 },
+}
+
+/// Most steps in one [`Request::Play`].
+pub const MAX_PLAY_STEPS: usize = 256;
+/// Longest recording.
+pub const MAX_RECORD_MS: u32 = 10 * 60_000;
+/// Most changes one recording keeps (it stops when full).
+pub const MAX_RECORDED: usize = 16_384;
+/// Most inputs in one [`Response::Recorded`] (well inside [`MAX_FRAME`]).
+pub const MAX_RECORD_PAGE: usize = 1_500;
+/// Most characters one [`Request::TypeText`] types (70 ms each: under the client's 30 s reply timeout).
+pub const MAX_TYPE_TEXT: usize = 250;
+/// Most results of one [`Request::Find`].
+pub const MAX_FIND: u32 = 1_000;
+/// Most matching lines from one [`Request::Grep`].
+pub const MAX_GREP: u32 = 500;
+/// Files bigger than this are skipped when grepping a folder.
+pub const MAX_GREP_FILE: u64 = 16 << 20;
+/// Longest line [`Request::Grep`] returns (longer ones are cut).
+pub const MAX_GREP_LINE: usize = 300;
+
+/// One change in the physical controllers' state, while recording: from `at_ms` (since the recording
+/// began) they're in this state until the next change.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecordedInput {
+    pub at_ms: u32,
+    /// [`Button::bit`]s held.
+    pub buttons: u32,
+    /// Sticks, each axis -[`STICK_MAX`]..=[`STICK_MAX`] (x right, y up).
+    pub left: (i32, i32),
+    pub right: (i32, i32),
+}
+
+/// A line [`Request::Grep`] found.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GrepMatch {
+    pub path: String,
+    /// From 1.
+    pub line: u32,
+    pub text: String,
 }
 
 /// Longest lease of one [`Request::Hold`].
@@ -279,7 +347,13 @@ impl Request {
             }
             Request::Exit => "closing Kickstand",
             Request::RebootToHekate { .. } => "restarting the console",
-            Request::Press { .. } | Request::Input { .. } | Request::Hold { .. } => "pressing buttons",
+            Request::Press { .. }
+            | Request::Input { .. }
+            | Request::Hold { .. }
+            | Request::Play { .. }
+            | Request::TypeText { .. } => "pressing buttons",
+            Request::RecordStart { .. } | Request::RecordStop | Request::RecordRead { .. } => "recording the controller",
+            Request::Find { .. } | Request::Grep { .. } => "reading files",
             Request::KeepAwake { .. } => "keeping the screen on",
             Request::IndicatorPosition { .. } => "placing the indicator",
             Request::Screenshot | Request::ScreenshotRead { .. } => "looking at the screen",
@@ -302,8 +376,15 @@ impl Request {
 pub const ROUTINE: [&str; 2] = ["connecting", "checking on the console"];
 
 /// What a client does without changing anything on the console ([`Request::describe`]).
-pub const LOOKING: [&str; 6] =
-    ["reading files", "looking at the screen", "looking at installed software", "checking memory use", "keeping the screen on", "placing the indicator"];
+pub const LOOKING: [&str; 7] = [
+    "reading files",
+    "looking at the screen",
+    "looking at installed software",
+    "checking memory use",
+    "keeping the screen on",
+    "placing the indicator",
+    "recording the controller",
+];
 
 /// Whether a request described as `doing` changes something on the console (input, launching or closing,
 /// files, memory, restarting): what another agent could clash with.
@@ -468,6 +549,15 @@ pub enum Response {
     Activity(ActivityReport),
     /// (24)
     Agents(AgentsReport),
+    /// (26) Answer to [`Request::RecordStop`]: how many inputs were recorded over `ms`, and whether it
+    /// stopped early because [`MAX_RECORDED`] were.
+    Recording { total: u32, ms: u32, full: bool },
+    /// (26)
+    Recorded { inputs: Vec<RecordedInput> },
+    /// (26) Answer to [`Request::Find`]: full paths in `name`.
+    Found { entries: Vec<DirEntry>, truncated: bool },
+    /// (26) Answer to [`Request::Grep`].
+    Matches { matches: Vec<GrepMatch>, files: u32, truncated: bool },
 }
 
 /// Answer to [`Request::Activity`].
@@ -823,6 +913,13 @@ mod tests {
                 Request::Agents => 40,
                 Request::Introduce { .. } => 41,
                 Request::Unpair => 42,
+                Request::Play { .. } => 43,
+                Request::RecordStart { .. } => 44,
+                Request::RecordStop => 45,
+                Request::RecordRead { .. } => 46,
+                Request::TypeText { .. } => 47,
+                Request::Find { .. } => 48,
+                Request::Grep { .. } => 49,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -848,6 +945,10 @@ mod tests {
                 Response::Threads { .. } => 18,
                 Response::Activity(_) => 19,
                 Response::Agents(_) => 20,
+                Response::Recording { .. } => 21,
+                Response::Recorded { .. } => 22,
+                Response::Found { .. } => 23,
+                Response::Matches { .. } => 24,
             }
         }
         let s = || String::from("/a");
@@ -895,6 +996,13 @@ mod tests {
             Request::Agents,
             Request::Introduce { app: s() },
             Request::Unpair,
+            Request::Play { steps: Vec::new(), lease_ms: 0 },
+            Request::RecordStart { max_ms: 0 },
+            Request::RecordStop,
+            Request::RecordRead { from: 0 },
+            Request::TypeText { text: s() },
+            Request::Find { dir: s(), name: s(), max: 0 },
+            Request::Grep { path: s(), needle: s(), ignore_case: false, max: 0 },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -922,6 +1030,10 @@ mod tests {
             Response::Threads { app: app.clone(), threads: Vec::new() },
             Response::Activity(ActivityReport { clients: Vec::new(), recent: Vec::new(), keep_awake_s: 0 }),
             Response::Agents(AgentsReport::default()),
+            Response::Recording { total: 0, ms: 0, full: false },
+            Response::Recorded { inputs: Vec::new() },
+            Response::Found { entries: Vec::new(), truncated: false },
+            Response::Matches { matches: Vec::new(), files: 0, truncated: false },
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");
@@ -948,5 +1060,20 @@ mod tests {
     #[test]
     fn oversized_frame_rejected() {
         assert_eq!(frame_len(((MAX_FRAME + 1) as u32).to_le_bytes()), None);
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn a_full_page_of_recorded_inputs_fits_a_frame() {
+        let worst = RecordedInput { at_ms: u32::MAX, buttons: u32::MAX, left: (i32::MIN, i32::MIN), right: (i32::MIN, i32::MIN) };
+        let page = Response::Recorded { inputs: vec![worst; MAX_RECORD_PAGE] };
+        assert!(encode(&page).unwrap().len() - 4 <= MAX_FRAME);
+        let steps = vec![InputStep { buttons: Button::ALL.to_vec(), ms: u32::MAX, left: Some((0, 0)), right: Some((0, 0)), touch: Some((0, 0)) }; MAX_PLAY_STEPS];
+        assert!(encode(&Request::Play { steps, lease_ms: 0 }).unwrap().len() - 4 <= MAX_FRAME);
     }
 }

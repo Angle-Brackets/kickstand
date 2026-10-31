@@ -125,6 +125,13 @@ impl Session {
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
             Request::Input { steps } => input(&steps),
             Request::Hold { step } => hold(&step),
+            Request::Play { steps, lease_ms } => play(&steps, lease_ms),
+            Request::RecordStart { max_ms } => record_start(max_ms),
+            Request::RecordStop => record_stop(),
+            Request::RecordRead { from } => Response::Recorded { inputs: crate::record::read(from as usize, proto::MAX_RECORD_PAGE) },
+            Request::TypeText { text } => type_text(&text),
+            Request::Find { dir, name, max } => find(&dir, &name, max),
+            Request::Grep { path, needle, ignore_case, max } => grep(&path, &needle, ignore_case, max),
             Request::AppStatus => app_status(),
             Request::CloseApp => close_app(),
             Request::ListApps { max } => list_apps(usize::from(max)),
@@ -529,6 +536,80 @@ fn hold(step: &InputStep) -> Response {
     match services::hid::hold(&to_hid_step(step), until) {
         Ok(()) => Response::Ok,
         Err(rc) => system_error("holding buttons (hid:dbg)", rc),
+    }
+}
+
+fn play(steps: &[InputStep], lease_ms: u32) -> Response {
+    let total: u64 = steps.iter().map(|s| u64::from(s.ms)).sum();
+    if steps.is_empty() || steps.len() > proto::MAX_PLAY_STEPS || total > u64::from(MAX_INPUT_MS) || lease_ms > proto::MAX_HOLD_LEASE_MS {
+        let msg = format!(
+            "need 1-{} steps lasting at most {MAX_INPUT_MS} ms in all, and a lease of at most {} ms",
+            proto::MAX_PLAY_STEPS,
+            proto::MAX_HOLD_LEASE_MS
+        );
+        return Response::error(ErrorKind::BadRequest, msg);
+    }
+    let steps: Vec<services::hid::Step> = steps.iter().map(to_hid_step).collect();
+    match services::hid::play_held(&steps, || crate::uptime_ms() + u64::from(lease_ms)) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error("playing input (hid:dbg)", rc),
+    }
+}
+
+fn record_start(max_ms: u32) -> Response {
+    if max_ms == 0 || max_ms > proto::MAX_RECORD_MS {
+        return Response::error(ErrorKind::BadRequest, format!("a recording lasts 1-{} ms", proto::MAX_RECORD_MS));
+    }
+    match crate::record::start(max_ms) {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::error(ErrorKind::Io, e),
+    }
+}
+
+fn record_stop() -> Response {
+    let (total, ms, full, error) = crate::record::stop();
+    match error {
+        Some(rc) => system_error("reading the controllers (hid)", rc),
+        None => Response::Recording { total, ms, full },
+    }
+}
+
+fn type_text(text: &str) -> Response {
+    if text.chars().count() > proto::MAX_TYPE_TEXT {
+        return Response::error(ErrorKind::BadRequest, format!("at most {} characters at a time", proto::MAX_TYPE_TEXT));
+    }
+    if let Some(c) = text.chars().find(|&c| services::hid::key_for(c).is_none()) {
+        return Response::error(ErrorKind::BadRequest, format!("can't type {c:?}: printable ASCII, tabs and newlines only"));
+    }
+    crate::log!("typing {} characters", text.chars().count());
+    match services::hid::type_text(text) {
+        Ok(()) => Response::Ok,
+        Err(rc) => system_error("typing (hid:dbg keyboard)", rc),
+    }
+}
+
+fn find(dir: &str, name: &str, max: u32) -> Response {
+    let dir = match path::check_read(dir) {
+        Ok(p) => p,
+        Err(e) => return forbidden(e),
+    };
+    match crate::search::find(&dir, name, max.clamp(1, proto::MAX_FIND) as usize) {
+        Ok(found) => Response::Found { entries: found.items, truncated: found.truncated },
+        Err(e) => Response::Error(e),
+    }
+}
+
+fn grep(target: &str, needle: &str, ignore_case: bool, max: u32) -> Response {
+    let target = match path::check_read(target) {
+        Ok(p) => p,
+        Err(e) => return forbidden(e),
+    };
+    if needle.is_empty() {
+        return Response::error(ErrorKind::BadRequest, "nothing to look for");
+    }
+    match crate::search::grep(&target, needle, ignore_case, max.clamp(1, proto::MAX_GREP) as usize) {
+        Ok((found, files)) => Response::Matches { matches: found.items, files, truncated: found.truncated },
+        Err(e) => Response::Error(e),
     }
 }
 

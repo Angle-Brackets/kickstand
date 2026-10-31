@@ -366,6 +366,60 @@ pub struct ListAppsArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecordMacroArgs {
+    /// "start": record the physical controllers while the user plays (tell them first). "stop": stop and
+    /// save it as name.
+    pub action: String,
+    /// The macro's name when stopping (letters, digits, spaces, - and _), e.g. "title to rogueport".
+    pub name: Option<String>,
+    /// When stopping: what it does and where it starts from ("from the title screen: file 1 to Rogueport's
+    /// square"), for whoever plays it later.
+    pub note: Option<String>,
+    /// When starting: stop by itself after this many seconds (default 300, max 600).
+    pub max_seconds: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct PlayMacroArgs {
+    /// A saved macro's name (see macros).
+    pub name: String,
+    /// Then look, in the same call: "still" or "change", as press's then.
+    pub then: Option<String>,
+    /// Width of that screenshot (default 640).
+    pub width: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TypeTextArgs {
+    /// What to type: printable ASCII, tabs and newlines, up to 250 characters (US keyboard layout).
+    pub text: String,
+    /// Press Enter afterwards (default false), e.g. to confirm the software keyboard.
+    pub enter: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct FindArgs {
+    /// The folder to search under, e.g. /switch.
+    pub dir: String,
+    /// Part of the name to look for, ignoring case (e.g. ".nro", "save"); empty lists everything.
+    pub name: Option<String>,
+    /// Most results (default 100, max 1000).
+    pub max: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GrepArgs {
+    /// A file, or a folder to search every file under (files over 16 MB and binary files skipped).
+    pub path: String,
+    /// The text to look for (plain text, not a pattern).
+    pub text: String,
+    /// Ignore ASCII case (default false).
+    pub ignore_case: Option<bool>,
+    /// Most matching lines (default 50, max 500).
+    pub max: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct AnswerAccessArgs {
     /// The path the request was about, as the tool said.
     pub path: String,
@@ -792,6 +846,123 @@ impl Tools {
                 Answer::Session => format!("{} allowed until Kickstand restarts: try again", access::describe(&asked.folder)),
                 _ => format!("{} allowed from now on: try again", access::describe(&asked.folder)),
             })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "The macros saved on this PC: controller input the user recorded once (in Kickstand's desktop app, with `kickstand macro record`, or through record_macro) for agents to replay with play_macro, e.g. to get from the title screen to a level. Each with its length, when it was recorded and what it does.")]
+    async fn macros(&self) -> CallToolResult {
+        let result = async {
+            let all = crate::macros::list()?;
+            if all.is_empty() {
+                return anyhow::Ok("no macros yet: the user can record one in Kickstand's desktop app (Macros), with `kickstand macro record NAME`, or you can ask them to play while you call record_macro".to_string());
+            }
+            let mut text = String::new();
+            for m in all {
+                write!(text, "{}: {}, {} steps", m.name, crate::macros::length(m.data.ms), m.data.steps.split_whitespace().count())?;
+                if !m.data.note.is_empty() {
+                    write!(text, ". {}", m.data.note)?;
+                }
+                text.push('\n');
+            }
+            anyhow::Ok(text)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Record a macro from the physical controllers while the user plays: start, have the user play (tell them what to do, and to put the controller down when done), then stop with a name and a note. Records buttons and both sticks of every controller (not HOME, Capture or touch), up to 10 minutes. Only useful with someone at the console; replay it later with play_macro.")]
+    async fn record_macro(&self, Parameters(args): Parameters<RecordMacroArgs>) -> CallToolResult {
+        let result = async {
+            match args.action.as_str() {
+                "start" => {
+                    let seconds = args.max_seconds.unwrap_or(300).clamp(1, proto::MAX_RECORD_MS / 1000);
+                    self.client.record_start(seconds * 1000).await?;
+                    anyhow::Ok(format!("recording for up to {seconds} s: the user can play now; call record_macro with action stop and a name when they're done"))
+                }
+                "stop" => {
+                    let name = args.name.as_deref().context("give the macro a name to save it under")?;
+                    let name = crate::macros::check_name(name)?;
+                    let (inputs, ms, full) = self.client.record_stop().await?;
+                    let data = crate::macros::from_recording(&inputs, ms, args.note.unwrap_or_default())?;
+                    let path = crate::macros::save(name, &data)?;
+                    let mut text = format!("saved macro {name:?} ({}, {} steps) to {}", crate::macros::length(data.ms), data.steps.split_whitespace().count(), path.display());
+                    if full {
+                        text.push_str(" (it stopped early: the recording was full)");
+                    }
+                    anyhow::Ok(text)
+                }
+                other => anyhow::bail!("action is \"start\" or \"stop\", not {other:?}"),
+            }
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Replay a saved macro (see macros) on a virtual controller, with its recorded timing, e.g. to get back to the same place in a game for a test. Start it from where it was recorded (its note says where); timing can drift a little over a long one, so check where it ended (then: \"still\" returns the screen) and fix up with press or input_until.")]
+    async fn play_macro(&self, Parameters(args): Parameters<PlayMacroArgs>) -> CallToolResult {
+        let result = async {
+            let then = args.then.as_deref().map(parse_until).transpose()?;
+            let (data, took) = crate::macros::play(&self.client, &args.name).await?;
+            let done = format!("played {:?} ({} in {:.1} s)", args.name, crate::macros::length(data.ms), took.as_secs_f64());
+            match then {
+                Some(until) => anyhow::Ok(self.look_after(&done, until, args.width).await),
+                None => Ok(vec![ContentBlock::text(done)]),
+            }
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Type text on a virtual USB keyboard: into the software keyboard (naming a save, a profile, a search) or anything that reads a keyboard. Printable ASCII, tabs and newlines, up to 250 characters a call, at about 14 characters a second; enter: true presses Enter after. Open the keyboard first (with press) and check it took the text with screenshot.")]
+    async fn type_text(&self, Parameters(args): Parameters<TypeTextArgs>) -> CallToolResult {
+        let result = async {
+            let mut text = args.text;
+            if args.enter.unwrap_or(false) {
+                text.push('\n');
+            }
+            self.client.type_text(&text).await?;
+            anyhow::Ok(format!("typed {} characters", text.chars().count()))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Find files and folders by name under a folder on the SD card, searched on the console (no listing every folder over Wi-Fi). Skips what Kickstand never reads; stops after 20 s with what it has.")]
+    async fn find(&self, Parameters(args): Parameters<FindArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let dir = check_path(&args.dir, false)?;
+            let name = args.name.unwrap_or_default();
+            self.permit(&context.peer, &dir, Need::Read, true, &format!("search {dir} for {name:?}")).await?;
+            let (entries, truncated) = self.client.find(&dir, &name, args.max.unwrap_or(100).clamp(1, proto::MAX_FIND)).await?;
+            let mut text = String::new();
+            for e in &entries {
+                if e.is_dir {
+                    writeln!(text, "{}/", e.name)?;
+                } else {
+                    writeln!(text, "{}  {} bytes", e.name, e.size)?;
+                }
+            }
+            write!(text, "[{} found{}]", entries.len(), if truncated { "; stopped early (max, time, or a folder over 1024 entries): narrow the search" } else { "" })?;
+            anyhow::Ok(text)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Search a file, or every file under a folder, on the SD card for lines containing some text, on the console: the matching lines with file and line number, without downloading anything. For logs and configs; binary files and files over 16 MB are skipped.")]
+    async fn grep(&self, Parameters(args): Parameters<GrepArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let path = check_path(&args.path, false)?;
+            let is_dir = self.client.stat(&path).await.map(|e| e.is_dir).unwrap_or(false);
+            self.permit(&context.peer, &path, Need::Read, is_dir, &format!("search {path} for {:?}", args.text)).await?;
+            let (matches, files, truncated) =
+                self.client.grep(&path, &args.text, args.ignore_case.unwrap_or(false), args.max.unwrap_or(50).clamp(1, proto::MAX_GREP)).await?;
+            let mut text = String::new();
+            for m in &matches {
+                if is_dir {
+                    writeln!(text, "{}:{}: {}", m.path, m.line, m.text)?;
+                } else {
+                    writeln!(text, "{}: {}", m.line, m.text)?;
+                }
+            }
+            write!(text, "[{} matching lines in {files} file{}{}]", matches.len(), if files == 1 { "" } else { "s" }, if truncated { "; stopped early: narrow the search" } else { "" })?;
+            anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
     }
@@ -1479,6 +1650,8 @@ const CONTENTIOUS: &[&str] = &[
     "press",
     "input",
     "input_until",
+    "play_macro",
+    "type_text",
     "close_app",
     "launch_title",
     "open_hbmenu",

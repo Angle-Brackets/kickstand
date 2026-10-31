@@ -1,6 +1,6 @@
 # Kickstand Capabilities & MCP Tools Reference
 
-This document details all **37 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
+This document details all **43 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
 ## At a Glance
 
@@ -10,9 +10,9 @@ The tool names are the same in every AI app.
 | :--- | :--- |
 | [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`close_app`](#close_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
-| [Controller & Touch Input](#3-controller--touch-input) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) |
+| [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`play_macro`](#play_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
-| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
+| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
 | [CLI Command Reference](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
@@ -178,9 +178,9 @@ Record the Switch's screen as a looping GIF from repeated captures and save it o
 
 ---
 
-## 3. Controller & Touch Input
+## 3. Controller, Keyboard & Macros
 
-Tools for driving menus and gameplay via a virtual Pro Controller and touch screen.
+Tools for driving menus and gameplay via a virtual Pro Controller, touch screen and USB keyboard, and for replaying input the user recorded.
 
 ### `press`
 Press one or more buttons simultaneously on a virtual Pro Controller (attaches the controller, waits ~1s to settle, performs the presses, and detaches).
@@ -237,6 +237,46 @@ Closed-loop input that holds a direction/button, mashes a button repeatedly, or 
 | `search` | `string` | 96 px around `region` | Where to search for the patch: `"x,y,w,h"` or `"screen"`. |
 | `timeout_seconds` | `number` | `15.0` *(max 60)* | Give up after this many seconds. |
 | `width` | `integer` | `640` | Width in pixels of the returned screenshot. |
+
+---
+
+### `type_text`
+Type text on a virtual USB keyboard: into the software keyboard (naming a save, a profile, a search) or anything else that reads a keyboard. About 14 characters a second, US layout. Open the keyboard first (with [`press`](#press)), then check it took the text with [`screenshot`](#screenshot).
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `text` | `string` *(required)* | — | Printable ASCII, tabs and newlines, up to 250 characters a call. |
+| `enter` | `boolean` | `false` | Press Enter afterwards (e.g. to confirm the software keyboard). |
+
+---
+
+### `macros`
+List the macros saved on this PC: controller input the user recorded once (in the desktop app's **Macros** page, with `kickstand macro record`, or through [`record_macro`](#record_macro)) for agents to replay with [`play_macro`](#play_macro), e.g. to get from the title screen to a level. Each comes with its length, when it was recorded and its note (what it does and where it starts). No parameters.
+
+Macros live in `~/.config/kickstand/macros/<name>.json` as `input` step text, so they can be read and edited by hand.
+
+---
+
+### `record_macro`
+Record a macro from the physical controllers while the user plays. Call `start`, tell the user what to play (and to put the controller down when done), then `stop` with a name and a note. Records the buttons and both sticks of every connected controller, merged; HOME, Capture and touch aren't recorded. Idle time at the start and end is trimmed. Only useful with someone at the console.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `action` | `string` *(required)* | — | `"start"` or `"stop"`. |
+| `name` | `string` | — | When stopping: the macro's name (letters, digits, spaces, `-` and `_`), e.g. `"title to rogueport"`. |
+| `note` | `string` | — | When stopping: what it does and where it starts from, for whoever plays it later. |
+| `max_seconds` | `integer` | `300` *(max 600)* | When starting: stop by itself after this many seconds. |
+
+---
+
+### `play_macro`
+Replay a saved macro on a virtual controller with its recorded timing, e.g. to get back to the same place in a game before a test. Start from where it was recorded (its note says where). Timing can drift a little over a long macro, so check where it ended (`then: "still"`) and fix up with [`press`](#press) or [`input_until`](#input_until). Long macros are streamed to the console in pieces, without gaps.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `name` | `string` *(required)* | — | A saved macro's name (see [`macros`](#macros)). |
+| `then` | `string` | — | `"still"` or `"change"`: return the screen afterwards, as in [`press`](#press). |
+| `width` | `integer` | `640` | Width of that screenshot. |
 
 ---
 
@@ -370,6 +410,29 @@ Read the last lines of a log file on the SD card and optionally follow new lines
 | `from` | `integer` | — | Byte offset (`next` from an earlier `tail_file` call) to continue reading from. |
 | `follow_seconds` | `number` | `0` *(max 60)* | Poll every 0.5s for up to this many seconds to collect newly appended output. |
 | `until` | `string` | — | Stop following early as soon as a newly added line contains this substring. |
+
+---
+
+### `find`
+Find files and folders by name under a folder on the SD card. The search runs on the console, so no folder listings cross Wi-Fi. Skips what Kickstand never reads, and stops after 20 s with what it has (saying so).
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `dir` | `string` *(required)* | — | The folder to search under, e.g. `/switch`. |
+| `name` | `string` | `""` | Part of the name to look for, ignoring case (e.g. `".nro"`, `"save"`); empty lists everything. |
+| `max` | `integer` | `100` *(max 1000)* | Most results. |
+
+---
+
+### `grep`
+Search a file, or every file under a folder, for lines containing some text. The search runs on the console and returns the matching lines with file and line number, without downloading anything. Binary files and files over 16 MB are skipped; long lines are cut to 300 characters.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `path` | `string` *(required)* | — | A file, or a folder to search every file under. |
+| `text` | `string` *(required)* | — | The text to look for (plain text, not a pattern). |
+| `ignore_case` | `boolean` | `false` | Ignore ASCII case. |
+| `max` | `integer` | `50` *(max 500)* | Most matching lines. |
 
 ---
 
@@ -518,6 +581,10 @@ Every capability above is also available directly from your terminal via `kickst
 | | `kickstand gif <file.gif>` | Record the screen as a looping GIF. |
 | | `kickstand press <buttons>` | Press buttons on a virtual controller (or `unlock` to press `B` three times). |
 | | `kickstand input <steps>` | Play timed `WHAT:MS` steps (buttons, sticks, touch). |
+| | `kickstand type <text> [--enter]` | Type text on a virtual USB keyboard (into the software keyboard, for one). |
+| | `kickstand macro record <name> [--note <text>] [--seconds <n>]` | Record the controllers while you play, until Enter is pressed in the terminal, and save it as a macro. |
+| | `kickstand macro play <name>` | Replay a saved macro. |
+| | `kickstand macro list` / `delete <name>` | List or delete saved macros. |
 | **Debug & Memory** | `kickstand crashes [--limit <n>]` | List the newest Atmosphère crash reports and fatal records. |
 | | `kickstand crash <name> [--elf <elf>]` | Summarize a crash report or fatal record (with optional symbolization and `--screenshot`). |
 | | `kickstand symbolize <elf> [text]` | Symbolize `<module>+0x<offset>` addresses in text or `stdin`. |
@@ -530,6 +597,8 @@ Every capability above is also available directly from your terminal via `kickst
 | | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
 | | `kickstand put <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified). |
 | | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
+| | `kickstand find <dir> [name] [--max <n>]` | Find files and folders by name, searched on the console. |
+| | `kickstand grep [-i] <text> <path> [--max <n>]` | Print matching lines of a file or of every file under a folder, searched on the console. |
 | | `kickstand rm [-r] <path>` | Delete a file or directory on the SD card. |
 | **Console** | `kickstand status` | Show uptime, unlock state, keep-awake timer, running app, and applet status. |
 | | `kickstand ping` | Ping the daemon and report round-trip time and version. |

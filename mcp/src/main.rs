@@ -11,6 +11,7 @@ mod desktop;
 mod install;
 mod launch;
 mod link;
+mod macros;
 mod memory;
 mod mock;
 mod nxlink;
@@ -165,6 +166,39 @@ enum Command {
     /// Play timed input on one virtual controller: STEPS like "r:300 r+a:150 r:6000 -:500", each the
     /// buttons held together ("-" for none) and for how many milliseconds; 20 s at most in all.
     Input { steps: String },
+    /// Record controller input as a macro (play it on the Switch while this records), replay one, or
+    /// list and delete them. Saved in ~/.config/kickstand/macros/.
+    Macro {
+        #[command(subcommand)]
+        action: MacroCmd,
+    },
+    /// Type TEXT on a virtual USB keyboard (into the software keyboard, for one).
+    Type {
+        text: String,
+        /// Press Enter afterwards.
+        #[arg(long)]
+        enter: bool,
+    },
+    /// Find files and folders under DIR whose name contains NAME (ignoring case), searched on the console.
+    Find {
+        dir: String,
+        #[arg(default_value = "")]
+        name: String,
+        /// Most results.
+        #[arg(long, default_value_t = 200)]
+        max: u32,
+    },
+    /// Print the lines of a file, or of every file under a folder, containing TEXT, searched on the console.
+    Grep {
+        text: String,
+        path: String,
+        /// Ignore ASCII case.
+        #[arg(short, long)]
+        ignore_case: bool,
+        /// Most matching lines.
+        #[arg(long, default_value_t = 100)]
+        max: u32,
+    },
     /// The running application, if any, and whether it's hbloader (hbmenu or an NRO).
     App,
     /// Where the console is: uptime, unlock presses after a reboot, keep-awake, application, applet.
@@ -374,6 +408,26 @@ enum Command {
         #[arg(long)]
         pair_code: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum MacroCmd {
+    /// Record until Enter is pressed here (or --seconds pass), then save it as NAME.
+    Record {
+        name: String,
+        /// What it does and where it starts ("title screen to Rogueport, file 1").
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Stop by itself after this many seconds.
+        #[arg(long, default_value_t = 300)]
+        seconds: u32,
+    },
+    /// Replay macro NAME.
+    Play { name: String },
+    /// List the saved macros.
+    List,
+    /// Delete macro NAME.
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -614,6 +668,60 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             typed_or_allowed(&path, access::Need::Write, client.stat(&path).await.is_ok_and(|e| e.is_dir))?;
             let was_dir = client.delete(&path, recursive).await?;
             println!("deleted {path}{}", if was_dir { "/" } else { "" });
+        }
+        Command::Macro { action } => match action {
+            MacroCmd::Record { name, note, seconds } => {
+                let name = macros::check_name(&name)?.to_string();
+                let seconds = seconds.clamp(1, proto::MAX_RECORD_MS / 1000);
+                client.record_start(seconds * 1000).await?;
+                println!("recording: play on the Switch now, then press Enter here (stops by itself after {seconds} s)");
+                let mut line = String::new();
+                let enter = tokio::task::spawn_blocking(move || std::io::stdin().read_line(&mut line));
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(u64::from(seconds)), enter).await;
+                let (inputs, ms, full) = client.record_stop().await?;
+                let data = macros::from_recording(&inputs, ms, note)?;
+                let path = macros::save(&name, &data)?;
+                println!("saved {name:?}: {}, {} steps ({}){}", macros::length(data.ms), data.steps.split_whitespace().count(), path.display(), if full { "; the recording filled up and stopped early" } else { "" });
+            }
+            MacroCmd::Play { name } => {
+                let (data, took) = macros::play(&client, &name).await?;
+                println!("played {name:?} ({} in {:.1} s)", macros::length(data.ms), took.as_secs_f64());
+            }
+            MacroCmd::List => {
+                for m in macros::list()? {
+                    println!("{}\t{}\t{}", m.name, macros::length(m.data.ms), m.data.note);
+                }
+            }
+            MacroCmd::Delete { name } => {
+                macros::delete(&name)?;
+                println!("deleted {name:?}");
+            }
+        },
+        Command::Type { text, enter } => {
+            let text = if enter { format!("{text}\n") } else { text };
+            client.type_text(&text).await?;
+            println!("typed {} characters", text.chars().count());
+        }
+        Command::Find { dir, name, max } => {
+            let dir = check_path(&dir, false)?;
+            typed_or_allowed(&dir, access::Need::Read, true)?;
+            let (entries, truncated) = client.find(&dir, &name, max.clamp(1, proto::MAX_FIND)).await?;
+            for e in &entries {
+                if e.is_dir { println!("{}/", e.name) } else { println!("{}\t{}", e.name, e.size) }
+            }
+            if truncated {
+                eprintln!("(stopped early: more than {max}, out of time, or a folder over 1024 entries)");
+            }
+        }
+        Command::Grep { text, path, ignore_case, max } => {
+            let path = check_path(&path, false)?;
+            let is_dir = client.stat(&path).await?.is_dir;
+            typed_or_allowed(&path, access::Need::Read, is_dir)?;
+            let (matches, files, truncated) = client.grep(&path, &text, ignore_case, max.clamp(1, proto::MAX_GREP)).await?;
+            for m in &matches {
+                if is_dir { println!("{}:{}: {}", m.path, m.line, m.text) } else { println!("{}: {}", m.line, m.text) }
+            }
+            eprintln!("{} matching lines in {files} file(s){}", matches.len(), if truncated { "; stopped early" } else { "" });
         }
         Command::Sysmodule { action } => {
             let status = match action {

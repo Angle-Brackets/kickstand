@@ -6,7 +6,7 @@ license.workspace = true
 description = "kickstand daemon: command server shared by the sysmodule and the test NRO"
 
 [dependencies]
-nx = { workspace = true, features = ["socket", "fs"] }
+nx = { workspace = true, features = ["socket", "fs", "input"] }
 proto.workspace = true
 nxlink.workspace = true
 services.workspace = true

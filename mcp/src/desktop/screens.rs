@@ -796,6 +796,9 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         if theme::button(ui, "Keep awake 1 h", Kind::Outline, false, ready).clicked() {
             app.send(Cmd::KeepAwake { minutes: 60 });
         }
+        if theme::button(ui, "Macros", Kind::Outline, false, true).on_hover_text("Record yourself playing, for agents to replay").clicked() {
+            app.go(model, Screen::Macros);
+        }
         if theme::button(ui, "Restart into hekate", Kind::Dashed, false, ready).clicked() {
             app.ask(Confirm::Reboot);
         }
@@ -803,6 +806,131 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     notice(ui, model);
     if go_link {
         app.go(model, Screen::Link);
+    }
+}
+
+/// Recording and replaying macros: input the user plays once, for agents to replay.
+pub fn macros(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
+    page(ui, 44.0, |ui| {
+        if theme::link(ui, "← Back", 14.0, Face::Mono).clicked() {
+            app.go(model, Screen::Home);
+            return;
+        }
+        ui.add_space(20.0);
+        columns(ui, &[1.0, 1.1], &[320.0, 380.0], 56.0, |ui, column| {
+            if column == 0 {
+                record(app, ui, model);
+            } else {
+                saved_macros(app, ui, model);
+            }
+        });
+    });
+}
+
+fn record(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
+    ui.spacing_mut().item_spacing.y = 18.0;
+    theme::heading(ui, "Macros", 52.0);
+    ui.set_max_width(ui.available_width().min(460.0));
+    theme::text(
+        ui,
+        "Play something once and agents can replay it, like getting from the title screen to the level they're testing. Start somewhere easy to come back to, play, then stop. Buttons and sticks are recorded, not HOME, Capture or touch.",
+        Face::Regular,
+        17.0,
+        body(),
+    );
+    let connected = model.reach.live().is_some();
+    if let Some(started) = model.recording {
+        let secs = started.elapsed().as_secs();
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        theme::status(ui, &format!("RECORDING {}:{:02} / {}:00", secs / 60, secs % 60, super::worker::RECORD_MAX_S / 60), RED);
+        theme::text(ui, &format!("Saving as {}. Play on the Switch now, then stop here.", app.macro_name.trim()), Face::Regular, 16.0, body());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            if theme::button(ui, "Stop and save", Kind::Primary, true, true).clicked() {
+                app.send(Cmd::RecordStop { name: app.macro_name.trim().to_string(), note: app.macro_note.trim().to_string() });
+            }
+            if theme::link(ui, "Throw it away", 15.0, Face::Semi).clicked() {
+                app.send(Cmd::RecordCancel);
+            }
+        });
+        return;
+    }
+    let field = |ui: &mut Ui, label: &str, text: &mut String, hint: &str| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            theme::label(ui, label, true, 13.0, ink());
+            let edit = egui::TextEdit::singleline(text)
+                .hint_text(egui::RichText::new(hint).font(Face::Regular.size(16.0)).color(muted()))
+                .font(Face::Regular.size(16.0))
+                .margin(Margin::symmetric(12, 12))
+                .desired_width(ui.available_width().min(420.0));
+            ui.add(edit);
+        });
+    };
+    field(ui, "NAME", &mut app.macro_name, "title to rogueport");
+    field(ui, "WHERE IT STARTS, AND WHAT IT DOES", &mut app.macro_note, "Title screen; loads file 1 and walks to the square");
+    let name_ok = crate::macros::check_name(&app.macro_name).is_ok();
+    let taken = name_ok && model.macros.iter().any(|m| m.name.eq_ignore_ascii_case(app.macro_name.trim()));
+    if theme::button(ui, if taken { "Record over it" } else { "Record" }, Kind::Primary, true, name_ok && connected && model.busy.is_none()).clicked() {
+        app.send(Cmd::RecordStart);
+    }
+    if !connected {
+        theme::text(ui, "Connect to your Switch to record.", Face::Regular, 14.0, muted());
+    } else if !app.macro_name.trim().is_empty() && !name_ok {
+        theme::text(ui, "Names use letters, digits, spaces, - and _.", Face::Regular, 14.0, muted());
+    }
+    notice(ui, model);
+}
+
+fn saved_macros(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    section_header(ui, "SAVED", |ui| {
+        theme::label(ui, &model.macros.len().to_string(), false, 13.0, muted());
+    });
+    ui.add_space(10.0);
+    theme::hrule(ui, 1.5, ink());
+    if model.macros.is_empty() {
+        ui.add_space(14.0);
+        theme::text(ui, "None yet.", Face::Regular, 16.0, body());
+        return;
+    }
+    let ready = model.reach.live().is_some() && model.busy.is_none() && model.recording.is_none();
+    let mut action = None;
+    egui::ScrollArea::vertical().id_salt("macros").auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
+        for m in &model.macros {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(ROW_INSET);
+                ui.label(theme::job(&m.name, Face::Semi, 16.0, ink(), 0.0));
+                ui.label(theme::job(&crate::macros::length(m.data.ms), Face::Mono, 13.0, muted(), 0.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 16.0;
+                    ui.add_space(ROW_INSET);
+                    let sure = app.deleting.as_deref() == Some(m.name.as_str());
+                    if theme::link(ui, if sure { "Sure?" } else { "Delete" }, 13.0, Face::Mono).clicked() {
+                        action = Some(if sure { Some(m.name.clone()) } else { None });
+                        app.deleting = (!sure).then(|| m.name.clone());
+                    }
+                    ui.add_enabled_ui(ready, |ui| {
+                        if theme::link(ui, "Play", 13.0, Face::Mono).on_hover_text("Replay it on the Switch now").clicked() {
+                            app.send(Cmd::PlayMacro { name: m.name.clone() });
+                        }
+                    });
+                });
+            });
+            if !m.data.note.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(ROW_INSET);
+                    ui.add(egui::Label::new(theme::job(&m.data.note, Face::Regular, 14.0, body(), 0.0)).wrap());
+                });
+            }
+            ui.add_space(12.0);
+            theme::hrule(ui, 1.0, rule_light());
+        }
+    });
+    if let Some(Some(name)) = action {
+        app.send(Cmd::DeleteMacro { name });
     }
 }
 

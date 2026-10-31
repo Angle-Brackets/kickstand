@@ -323,6 +323,99 @@ impl Client {
         }
     }
 
+    /// Plays `chunks` back to back on a held controller (see [`Request::Play`]), sending each next one
+    /// while the previous plays so nothing is let go between them, then lets go.
+    pub async fn play(&self, chunks: Vec<Vec<proto::InputStep>>) -> Result<()> {
+        /// How long the last step of a chunk is held while the next one is on its way.
+        const LEASE_MS: u32 = 3_000;
+        let mut guard = self.conn.lock().await;
+        let result = async {
+            let conn = self.connected(&mut guard).await?;
+            let mut chunks = chunks.into_iter();
+            let mut in_flight = 0;
+            loop {
+                while in_flight < 2 {
+                    let Some(steps) = chunks.next() else { break };
+                    send(conn, &Request::Play { steps, lease_ms: LEASE_MS }).await?;
+                    in_flight += 1;
+                }
+                if in_flight == 0 {
+                    break;
+                }
+                match recv(conn).await? {
+                    Response::Ok => in_flight -= 1,
+                    other => return Err(too_old(other, "replaying recordings")),
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if result.is_err() {
+            // Unread replies may still be queued on the connection.
+            *guard = None;
+        }
+        drop(guard);
+        // Let go whether it played or not.
+        let _ = self.hold(proto::InputStep::default()).await;
+        result
+    }
+
+    /// Starts recording the physical controllers for at most `max_ms`.
+    pub async fn record_start(&self, max_ms: u32) -> Result<()> {
+        match self.request(Request::RecordStart { max_ms }).await? {
+            Response::Ok => Ok(()),
+            other => Err(too_old(other, "recording")),
+        }
+    }
+
+    /// Stops recording and fetches what was recorded; also how long it ran (ms) and whether it filled up.
+    pub async fn record_stop(&self) -> Result<(Vec<proto::RecordedInput>, u32, bool)> {
+        let (total, ms, full) = match self.request(Request::RecordStop).await? {
+            Response::Recording { total, ms, full } => (total, ms, full),
+            other => return Err(too_old(other, "recording")),
+        };
+        let mut inputs = Vec::with_capacity(total as usize);
+        while inputs.len() < total as usize {
+            match self.request(Request::RecordRead { from: inputs.len() as u32 }).await? {
+                Response::Recorded { inputs: page } if !page.is_empty() => inputs.extend(page),
+                Response::Recorded { .. } => break,
+                other => return Err(unexpected(other)),
+            }
+        }
+        Ok((inputs, ms, full))
+    }
+
+    /// Types `text` on a virtual keyboard.
+    pub async fn type_text(&self, text: &str) -> Result<()> {
+        if let Some(c) = text.chars().find(|c| !(c.is_ascii_graphic() || matches!(c, ' ' | '\n' | '\t'))) {
+            bail!("can't type {c:?}: printable ASCII, tabs and newlines only (a US keyboard)");
+        }
+        if text.chars().count() > proto::MAX_TYPE_TEXT {
+            bail!("at most {} characters at a time; split it up", proto::MAX_TYPE_TEXT);
+        }
+        match self.request(Request::TypeText { text: text.into() }).await? {
+            Response::Ok => Ok(()),
+            other => Err(too_old(other, "typing")),
+        }
+    }
+
+    /// Entries under `dir` whose name contains `name`, searched on the console.
+    pub async fn find(&self, dir: &str, name: &str, max: u32) -> Result<(Vec<DirEntry>, bool)> {
+        match self.request(Request::Find { dir: dir.into(), name: name.into(), max }).await? {
+            Response::Found { entries, truncated } => Ok((entries, truncated)),
+            other => Err(too_old(other, "searching on the console")),
+        }
+    }
+
+    /// Lines containing `needle` in a file or the files under a folder, searched on the console; also how
+    /// many files were searched and whether it stopped early.
+    pub async fn grep(&self, path: &str, needle: &str, ignore_case: bool, max: u32) -> Result<(Vec<proto::GrepMatch>, u32, bool)> {
+        match self.request(Request::Grep { path: path.into(), needle: needle.into(), ignore_case, max }).await? {
+            Response::Matches { matches, files, truncated } => Ok((matches, files, truncated)),
+            other => Err(too_old(other, "searching on the console")),
+        }
+    }
+
     /// The running application, if any.
     pub async fn app_status(&self) -> Result<Option<proto::App>> {
         match self.request(Request::AppStatus).await? {
@@ -719,6 +812,16 @@ fn expect(resp: Response, ok: impl Fn(&Response) -> bool) -> Result<Response> {
 /// Succeeds if `resp` is a plain [`Response::Ok`].
 fn expect_ok(resp: Response) -> Result<()> {
     expect(resp, |r| matches!(r, Response::Ok)).map(|_| ())
+}
+
+/// [`unexpected`], but a request the daemon doesn't know (from before protocol 26) says to update it.
+fn too_old(resp: Response, what: &str) -> anyhow::Error {
+    match resp {
+        Response::Error(e) if e.kind == proto::ErrorKind::Unsupported && e.message.contains("doesn't know that request") => {
+            anyhow!("Kickstand on the console predates {what} (protocol 26): update it (`kickstand update --switch`, or `kickstand sysmodule install`)")
+        }
+        other => unexpected(other),
+    }
 }
 
 fn unexpected(resp: Response) -> anyhow::Error {

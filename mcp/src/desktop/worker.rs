@@ -45,7 +45,18 @@ pub enum Cmd {
     UpdateSwitch,
     /// The user's answer to an agent's question ([`crate::questions`]).
     Answer { id: String, answer: crate::questions::Answer },
+    /// Start recording the controllers for a macro.
+    RecordStart,
+    /// Stop recording and save it.
+    RecordStop { name: String, note: String },
+    /// Stop recording and throw it away.
+    RecordCancel,
+    PlayMacro { name: String },
+    DeleteMacro { name: String },
 }
+
+/// The longest recording the desktop app starts.
+pub const RECORD_MAX_S: u32 = 300;
 
 #[derive(Default)]
 pub struct Model {
@@ -75,6 +86,10 @@ pub struct Model {
     pub restart: Option<std::path::PathBuf>,
     /// Agents' questions for the user, oldest first, from AI apps that can't ask themselves.
     pub questions: Vec<crate::questions::Question>,
+    /// The saved macros, by name.
+    pub macros: Vec<crate::macros::Listed>,
+    /// When the recording running now began.
+    pub recording: Option<std::time::Instant>,
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
@@ -161,6 +176,7 @@ pub fn spawn(ctx: egui::Context) -> (Shared, mpsc::UnboundedSender<Cmd>) {
     let model: Shared = Arc::new(Mutex::new(Model {
         host: config::host(None).ok(),
         links: App::ALL.iter().map(|&app| (app, link::state(app))).collect(),
+        macros: crate::macros::list().unwrap_or_default(),
         ..Default::default()
     }));
     let (tx, rx) = mpsc::unbounded_channel();
@@ -366,6 +382,58 @@ impl Worker {
                     if let Err(e) = result {
                         m.notice = Some((format!("Couldn't pass on your answer: {e:#}"), true));
                     }
+                });
+            }
+            Cmd::RecordStart => {
+                let Some(client) = self.client.clone() else { return };
+                match client.record_start(RECORD_MAX_S * 1000).await {
+                    Ok(()) => self.update(|m| {
+                        m.recording = Some(std::time::Instant::now());
+                        m.notice = None;
+                    }),
+                    Err(e) => self.update(|m| m.notice = Some((format!("Couldn't start recording: {e:#}"), true))),
+                }
+            }
+            Cmd::RecordStop { name, note } => {
+                let Some(client) = self.client.clone() else { return };
+                self.update(|m| {
+                    m.recording = None;
+                    m.busy = Some("Saving the macro");
+                });
+                let result = async {
+                    let (inputs, ms, full) = client.record_stop().await?;
+                    let data = crate::macros::from_recording(&inputs, ms, note)?;
+                    crate::macros::save(&name, &data)?;
+                    anyhow::Ok(format!("Saved {name} ({}){}", crate::macros::length(data.ms), if full { ": it filled up and stopped early" } else { "" }))
+                }
+                .await;
+                self.update(|m| {
+                    m.busy = None;
+                    m.macros = crate::macros::list().unwrap_or_default();
+                    m.notice = Some(match result {
+                        Ok(text) => (text, false),
+                        Err(e) => (format!("Couldn't save it: {e:#}"), true),
+                    });
+                });
+            }
+            Cmd::RecordCancel => {
+                if let Some(client) = self.client.clone() {
+                    let _ = client.record_stop().await;
+                }
+                self.update(|m| m.recording = None);
+            }
+            Cmd::PlayMacro { name } => self.button("Playing the macro", move |client| async move {
+                let (data, _) = crate::macros::play(&client, &name).await?;
+                Ok(format!("Played {name} ({})", crate::macros::length(data.ms)))
+            }),
+            Cmd::DeleteMacro { name } => {
+                let result = crate::macros::delete(&name);
+                self.update(|m| {
+                    m.macros = crate::macros::list().unwrap_or_default();
+                    m.notice = Some(match result {
+                        Ok(()) => (format!("Deleted {name}"), false),
+                        Err(e) => (format!("{e:#}"), true),
+                    });
                 });
             }
             Cmd::UpdateSwitch => self.button("Updating the Switch", |client| async move {

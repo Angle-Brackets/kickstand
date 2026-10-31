@@ -52,6 +52,8 @@ pub enum Screen {
     Pair { addr: SocketAddr, name: String },
     Link,
     Home,
+    /// Recording and replaying macros.
+    Macros,
 }
 
 /// What a confirmation asks before doing.
@@ -71,6 +73,7 @@ impl Screen {
             Screen::Pair { .. } => 1,
             Screen::Link => 2,
             Screen::Home => 3,
+            Screen::Macros => 4,
         }
     }
 }
@@ -83,6 +86,11 @@ pub struct Kickstand {
     code: String,
     /// "Enter its address" is open, and what's typed in it.
     address: Option<String>,
+    /// The macros page's name and note fields.
+    macro_name: String,
+    macro_note: String,
+    /// The macro whose Delete was clicked once, waiting for the second click.
+    deleting: Option<String>,
     /// A confirmation is open, and which (kept while it fades out).
     confirming: bool,
     confirm: Confirm,
@@ -136,6 +144,9 @@ impl Kickstand {
             screen,
             code: String::new(),
             address: None,
+            macro_name: String::new(),
+            macro_note: String::new(),
+            deleting: None,
             confirming: false,
             confirm: Confirm::Reboot,
             raised: None,
@@ -203,7 +214,7 @@ impl Kickstand {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     match &self.screen {
-                        Screen::Home => {
+                        Screen::Home | Screen::Macros => {
                             if self.selector(ui, model).clicked() {
                                 self.go(model, Screen::Find);
                             }
@@ -432,6 +443,7 @@ impl eframe::App for Kickstand {
                     Screen::Pair { addr, name } => screens::pair(self, ui, &mut model, addr, &name),
                     Screen::Link => screens::link(self, ui, &mut model),
                     Screen::Home => screens::home(self, ui, &mut model),
+                    Screen::Macros => screens::macros(self, ui, &mut model),
                 }
             });
         });
