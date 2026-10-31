@@ -18,7 +18,6 @@ use services::power::MAX_PAYLOAD_SIZE;
 
 use crate::sd;
 
-
 struct Upload {
     path: String,
     file: FileAccessor,
@@ -38,7 +37,7 @@ pub struct Session {
     upload: Option<Upload>,
     after_reply: Option<AfterReply>,
     /// The last screenshot's JPEG, until the next one or the end of the connection.
-    screenshot: Option<alloc::vec::Vec<u8>>,
+    screenshot: Option<Vec<u8>>,
     /// The server's client slot, for [`crate::activity`].
     slot: usize,
     /// The client's address, for the log.
@@ -133,7 +132,7 @@ impl Session {
             Request::ReadMemory { address, len } => read_memory(self.memory_applet, address, len as usize),
             Request::WriteMemory { address, data } => write_memory(self.memory_applet, address, &data),
             Request::AppletStatus => match services::pm::album() {
-                Ok(app) => Response::App(app.map(|a| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl })),
+                Ok(app) => Response::App(app.map(to_app)),
                 Err(rc) => system_error("finding the Album's process (pm)", rc),
             },
             Request::CloseApplet => close_applet(),
@@ -254,7 +253,7 @@ impl Session {
         Response::Activity(proto::ActivityReport { clients, recent, keep_awake_s: crate::awake::remaining_ms() / 1000 })
     }
 
-    fn list_dir(&mut self, path: &str) -> Response {
+    fn list_dir(&self, path: &str) -> Response {
         let path = match path::check_read(path) {
             Ok(p) => p,
             Err(e) => return forbidden(e),
@@ -265,7 +264,7 @@ impl Session {
         }
     }
 
-    fn read_file(&mut self, path: &str, offset: u64, len: u32) -> Response {
+    fn read_file(&self, path: &str, offset: u64, len: u32) -> Response {
         let path = match path::check_read(path) {
             Ok(p) => p,
             Err(e) => return forbidden(e),
@@ -383,7 +382,7 @@ impl Session {
         }
         let status = sysmodule_status();
         if !status.installed {
-            return Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP));
+            return not_installed();
         }
         // An old instance would hold or contend for the port; replace it.
         if status.pid.is_some()
@@ -438,7 +437,7 @@ impl Session {
     fn screenshot(&mut self) -> Response {
         // Free the last one first: the heap has room for one capture buffer, not two.
         self.screenshot = None;
-        let mut buf = alloc::vec::Vec::new();
+        let mut buf = Vec::new();
         if buf.try_reserve_exact(services::caps::JPEG_BUFFER_SIZE).is_err() {
             return Response::error(ErrorKind::OutOfMemory, "no room for a 512 KiB capture buffer right now");
         }
@@ -544,9 +543,13 @@ fn to_hid_step(s: &InputStep) -> services::hid::Step {
     }
 }
 
+fn to_app(a: services::pm::Application) -> App {
+    App { pid: a.pid, program_id: a.program_id, hbl: a.hbl }
+}
+
 fn app_status() -> Response {
     match services::pm::application() {
-        Ok(app) => Response::App(app.map(|a| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl })),
+        Ok(app) => Response::App(app.map(to_app)),
         Err(rc) => system_error("finding the application (pm)", rc),
     }
 }
@@ -559,7 +562,7 @@ fn close_app() -> Response {
     };
     crate::log!("closing application {:016x} (pid {})", app.program_id, app.pid);
     match services::pm::terminate_process(app.pid) {
-        Ok(()) => Response::App(Some(App { pid: app.pid, program_id: app.program_id, hbl: app.hbl })),
+        Ok(()) => Response::App(Some(to_app(app))),
         Err(rc) => system_error("terminating the application (pm:shell)", rc),
     }
 }
@@ -593,13 +596,12 @@ fn running_app(applet: bool) -> Result<services::pm::Application, Response> {
 }
 
 fn status() -> Response {
-    let app = |a: services::pm::Application| App { pid: a.pid, program_id: a.program_id, hbl: a.hbl };
     let application = match services::pm::application() {
-        Ok(found) => found.map(app),
+        Ok(found) => found.map(to_app),
         Err(rc) => return system_error("finding the application (pm)", rc),
     };
     let applet = match services::pm::album() {
-        Ok(found) => found.map(app),
+        Ok(found) => found.map(to_app),
         Err(rc) => return system_error("finding the Album's process (pm)", rc),
     };
     Response::Status(proto::ConsoleStatus {
@@ -628,9 +630,16 @@ fn attach(pid: u64) -> Result<services::debug::Debugged, Response> {
     services::debug::Debugged::attach(pid).map_err(|rc| system_error("attaching to the application as its debugger", rc))
 }
 
+/// [`running_app`] and its debug handle.
+fn attach_running(applet: bool) -> Result<(services::pm::Application, services::debug::Debugged), Response> {
+    let app = running_app(applet)?;
+    let process = attach(app.pid)?;
+    Ok((app, process))
+}
+
 fn memory_map(applet: bool) -> Response {
-    let (app, process) = match running_app(applet).and_then(|app| Ok((attach(app.pid)?, app))) {
-        Ok((process, app)) => (app, process),
+    let (app, process) = match attach_running(applet) {
+        Ok(found) => found,
         Err(response) => return response,
     };
     let (mappings, truncated) = match process.mappings(MAX_MEMORY_REGIONS) {
@@ -655,13 +664,13 @@ fn memory_map(applet: bool) -> Response {
             Some(_) => break,
         }
     }
-    Response::Memory(MemoryMap { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, heap, regions, truncated })
+    Response::Memory(MemoryMap { app: to_app(app), heap, regions, truncated })
 }
 
 /// Pauses the process just long enough to read every thread's registers and walk its frame pointers.
 fn threads(applet: bool) -> Response {
-    let (app, process) = match running_app(applet).and_then(|app| Ok((attach(app.pid)?, app))) {
-        Ok((process, app)) => (app, process),
+    let (app, process) = match attach_running(applet) {
+        Ok(found) => found,
         Err(response) => return response,
     };
     if let Err(rc) = process.pause() {
@@ -697,7 +706,7 @@ fn threads(applet: bool) -> Response {
         threads.push(proto::ThreadInfo { id, pc: regs.pc, lr: regs.lr, sp: regs.sp, fp: regs.fp, frames });
     }
     drop(process);
-    Response::Threads { app: App { pid: app.pid, program_id: app.program_id, hbl: app.hbl }, threads }
+    Response::Threads { app: to_app(app), threads }
 }
 
 fn read_memory(applet: bool, address: u64, len: usize) -> Response {
@@ -747,13 +756,17 @@ fn sysmodule_status() -> SysmoduleStatus {
     }
 }
 
+fn not_installed() -> Response {
+    Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP))
+}
+
 fn sysmodule_start() -> Response {
     let status = sysmodule_status();
     if status.pid.is_some() {
         return Response::Sysmodule(status);
     }
     if !status.installed {
-        return Response::error(ErrorKind::NotFound, format!("not installed: upload it to {}", path::SYSMODULE_NSP));
+        return not_installed();
     }
     match crate::start_sysmodule() {
         Ok(pid) => {
@@ -812,7 +825,7 @@ fn resources() -> nx::result::Result<proto::Resources> {
         (LimitableResource::TransferMemories, "transfer memories"),
         (LimitableResource::Sessions, "sessions"),
     ];
-    let mut limits = alloc::vec::Vec::new();
+    let mut limits = Vec::new();
     let result: nx::result::Result<()> = (|| {
         for (kind, name) in kinds {
             let mut peak = 0;
