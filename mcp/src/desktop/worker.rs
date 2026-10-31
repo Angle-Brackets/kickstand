@@ -135,8 +135,13 @@ impl Worker {
         discovery.abort();
     }
 
-    /// Asks the paired console who's connected and what they're doing.
+    /// Asks the paired console who's connected and what they're doing, and looks again at which AI apps
+    /// are installed and linked (one may have been installed or set up since).
     async fn poll(&self) {
+        let links = tokio::task::spawn_blocking(|| App::ALL.iter().map(|&app| (app, link::state(app))).collect::<Vec<_>>()).await;
+        if let Ok(links) = links {
+            self.update(|m| m.links = links);
+        }
         let Some(client) = self.client.clone() else { return };
         let result = async {
             let info = client.hello().await?;
