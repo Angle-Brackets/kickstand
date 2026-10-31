@@ -3,8 +3,9 @@
 //! - Claude Code: `claude mcp add -s user kickstand -- <this program> serve`; whether it's there is read
 //!   from `~/.claude.json` (user scope `mcpServers`, or any project's), which `claude mcp get` would only
 //!   tell after starting every server to check it.
-//! - Claude Desktop, Gemini CLI, Antigravity and LM Studio: the `kickstand` entry of `mcpServers` in their
-//!   JSON config, every other key kept.
+//! - Claude Desktop, Gemini CLI, the Antigravity CLI (`agy`; `~/.gemini/config/mcp_config.json`, the file
+//!   `agy mcp add` writes), the Antigravity IDE and LM Studio: the `kickstand` entry of `mcpServers` in
+//!   their JSON config, every other key kept.
 //! - Codex (OpenAI's CLI, IDE extension and app share it): `[mcp_servers.kickstand]` in
 //!   `~/.codex/config.toml`, edited with toml_edit so comments and layout survive. Written from Codex's
 //!   documentation; not tried against Codex itself.
@@ -25,6 +26,7 @@ pub enum App {
     ClaudeCode,
     ClaudeDesktop,
     GeminiCli,
+    AntigravityCli,
     Antigravity,
     Codex,
     LmStudio,
@@ -64,13 +66,14 @@ enum Config {
 }
 
 impl App {
-    pub const ALL: [App; 6] = [App::ClaudeCode, App::ClaudeDesktop, App::GeminiCli, App::Antigravity, App::Codex, App::LmStudio];
+    pub const ALL: [App; 7] = [App::ClaudeCode, App::ClaudeDesktop, App::GeminiCli, App::AntigravityCli, App::Antigravity, App::Codex, App::LmStudio];
 
     pub fn name(self) -> &'static str {
         match self {
             App::ClaudeCode => "Claude Code",
             App::ClaudeDesktop => "Claude Desktop",
             App::GeminiCli => "Gemini CLI",
+            App::AntigravityCli => "Antigravity CLI",
             App::Antigravity => "Antigravity",
             App::Codex => "Codex",
             App::LmStudio => "LM Studio",
@@ -80,7 +83,7 @@ impl App {
     pub fn maker(self) -> Maker {
         match self {
             App::ClaudeCode | App::ClaudeDesktop => Maker::Claude,
-            App::GeminiCli | App::Antigravity => Maker::Gemini,
+            App::GeminiCli | App::AntigravityCli | App::Antigravity => Maker::Gemini,
             App::Codex => Maker::OpenAi,
             App::LmStudio => Maker::Custom,
         }
@@ -91,7 +94,8 @@ impl App {
         match self {
             App::ClaudeCode => "The terminal agent",
             App::ClaudeDesktop => "The desktop app",
-            App::GeminiCli => "The terminal agent",
+            App::GeminiCli => "The terminal agent (gemini)",
+            App::AntigravityCli => "The terminal agent (agy)",
             App::Antigravity => "Google's agent IDE",
             App::Codex => "CLI, IDE extension and app",
             App::LmStudio => "Local models, like DeepSeek or Qwen",
@@ -104,6 +108,7 @@ impl App {
             App::ClaudeCode => "code",
             App::ClaudeDesktop => "desktop",
             App::GeminiCli => "gemini",
+            App::AntigravityCli => "agy",
             App::Antigravity => "antigravity",
             App::Codex => "codex",
             App::LmStudio => "lmstudio",
@@ -118,7 +123,7 @@ impl App {
     /// What to do after linking or unlinking for it to take effect.
     fn restart(self) -> &'static str {
         match self {
-            App::ClaudeCode | App::GeminiCli | App::Codex => "start a new session",
+            App::ClaudeCode | App::GeminiCli | App::AntigravityCli | App::Codex => "start a new session",
             App::ClaudeDesktop | App::Antigravity | App::LmStudio => "restart it",
         }
     }
@@ -130,6 +135,7 @@ impl App {
             App::ClaudeCode => Config::ClaudeCli,
             App::ClaudeDesktop => Config::Json(desktop_config_path()?),
             App::GeminiCli => Config::Json(home?.join(".gemini/settings.json")),
+            App::AntigravityCli => Config::Json(home?.join(".gemini/config/mcp_config.json")),
             App::Antigravity => Config::Json(home?.join(".gemini/antigravity/mcp_config.json")),
             App::Codex => Config::CodexToml(std::env::var_os("CODEX_HOME").map(PathBuf::from).or(home.map(|h| h.join(".codex")))?.join("config.toml")),
             App::LmStudio => Config::Json(home?.join(".lmstudio/mcp.json")),
@@ -144,7 +150,9 @@ impl App {
             App::ClaudeCode => find_on_path("claude").is_some(),
             App::ClaudeDesktop => folder(desktop_config_path().and_then(|p| p.parent().map(Path::to_path_buf))),
             // ~/.gemini alone could be Antigravity's.
-            App::GeminiCli => find_on_path("gemini").is_some() || home.is_some_and(|h| h.join(".gemini/settings.json").is_file()),
+            App::GeminiCli => find_on_path("gemini").is_some() || home.as_ref().is_some_and(|h| h.join(".gemini/settings.json").is_file()),
+            // Its installer puts it in ~/.gemini/bin (and a copy on PATH, which a launcher may not have).
+            App::AntigravityCli => find_on_path("agy").is_some() || home.as_ref().is_some_and(|h| h.join(".gemini/bin/agy").is_file()),
             App::Antigravity => folder(home.map(|h| h.join(".gemini/antigravity"))),
             App::Codex => find_on_path("codex").is_some() || folder(home.map(|h| h.join(".codex"))),
             App::LmStudio => folder(home.map(|h| h.join(".lmstudio"))),
@@ -411,6 +419,8 @@ mod tests {
         assert_eq!(App::from_slug("claude-code"), Some(App::ClaudeCode));
         assert_eq!(App::from_slug("lm-studio"), Some(App::LmStudio));
         assert_eq!(App::from_slug("gemini"), Some(App::GeminiCli));
+        assert_eq!(App::from_slug("agy"), Some(App::AntigravityCli));
+        assert_eq!(App::from_slug("antigravity-cli"), Some(App::AntigravityCli));
         assert_eq!(App::from_slug("chatgpt"), None);
     }
 

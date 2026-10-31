@@ -37,8 +37,8 @@ cd daemon && cargo nx build --release -p kickstand-nro   # kickstand.nro (first 
 ## Set up
 Copy `kickstand.nro` to `/switch/kickstand/` on the SD card and open it from hbmenu. Its screen shows a
 pairing code. On a PC on the same Wi-Fi, run `kickstand` with no arguments: the desktop app finds the
-Switch, takes the code and links your AI app (tabs for Claude: Claude Code and Desktop; Gemini: Gemini CLI
-and Antigravity; OpenAI: Codex; Custom: LM Studio, plus the command and JSON for any other MCP app), then
+Switch, takes the code and links your AI app (tabs for Claude: Claude Code and Desktop; Gemini: Gemini CLI,
+the Antigravity CLI and Antigravity; OpenAI: Codex; Custom: LM Studio, plus the command and JSON for any other MCP app), then
 shows what the agent is doing.
 Or from a terminal:
 ```sh
@@ -50,7 +50,7 @@ Then install the background service:
 target/release/kickstand sysmodule install daemon/target/aarch64-nintendo-switch-freestanding/release/sys-kickstand.nsp
 target/release/kickstand sysmodule handover      # start the sysmodule; the NRO exits
 target/release/kickstand put daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro /switch/kickstand/kickstand.nro
-target/release/kickstand link code                # adds it to Claude Code (or desktop, gemini, antigravity, codex, lmstudio)
+target/release/kickstand link code                # adds it to Claude Code (or desktop, gemini, agy, antigravity, codex, lmstudio)
 ```
 Starting the sysmodule at boot (`boot2.flag`) is left to the user (`kickstand sysmodule enable`); the MCP
 tools never set it.

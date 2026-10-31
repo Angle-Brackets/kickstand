@@ -53,8 +53,8 @@ enum Command {
     Desktop,
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
-    /// Add Kickstand to an AI app: code (Claude Code), desktop (Claude Desktop), gemini (Gemini CLI),
-    /// antigravity, codex or lmstudio. Without one, show where it's linked.
+    /// Add Kickstand to an AI app: code (Claude Code), desktop (Claude Desktop), gemini (Gemini CLI), agy
+    /// (Antigravity CLI), antigravity, codex or lmstudio. Without one, show where it's linked.
     Link {
         app: Option<String>,
         /// Take it out instead.
