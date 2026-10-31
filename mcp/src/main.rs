@@ -424,7 +424,6 @@ fn stdin_is_pipe() -> bool {
 
 #[tokio::main]
 async fn run(cli: Cli, command: Command) -> Result<()> {
-
     match command {
         Command::Symbolize { elf, text, module } => {
             let symbols = symbolize::Symbolizer::new(&elf, module.as_deref())?;
@@ -488,7 +487,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             };
             use std::io::IsTerminal;
             anyhow::ensure!(std::io::stdin().is_terminal(), "type `kickstand allow` in a terminal yourself: it doesn't run from an agent or a script");
-            let folder = if write { check_path(&folder, true)? } else { check_path(&folder, false)? };
+            let folder = check_path(&folder, write)?;
             if remove {
                 let was = access::forget(&folder)?;
                 println!("{}", if was { format!("{folder} is no longer allowed") } else { format!("{folder} wasn't allowed") });
@@ -579,7 +578,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let (data, _) = client.read(&path, 0, size).await?;
             let secs = start.elapsed().as_secs_f64();
             std::fs::write(&local, &data).with_context(|| format!("writing {}", local.display()))?;
-            println!("{} bytes in {secs:.1}s ({:.2} MB/s) -> {}", data.len(), data.len() as f64 / 1e6 / secs.max(1e-6), local.display());
+            println!("{} bytes in {secs:.1}s ({}) -> {}", data.len(), mb_per_s(data.len() as u64, secs), local.display());
         }
         Command::Put { local, path } => {
             let path = check_path(&path, true)?;
@@ -587,7 +586,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let data = std::fs::read(&local).with_context(|| format!("reading {}", local.display()))?;
             let stats = client.upload(&path, &data).await?;
             let secs = stats.elapsed.as_secs_f64();
-            println!("{} bytes in {secs:.1}s ({:.2} MB/s)", stats.size, stats.size as f64 / 1e6 / secs.max(1e-6));
+            println!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size as u64, secs));
         }
         Command::Tail { path, lines, follow } => {
             use std::io::Write;
@@ -746,14 +745,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Wait { until, timeout, region, out } => {
             let until = if until == "still" { capture::Until::Still } else { capture::Until::Change };
-            let region = match region {
-                Some(r) => {
-                    let n: Vec<u32> = r.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
-                    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
-                    Some((x, y, w, h))
-                }
-                None => None,
-            };
+            let region = region.as_deref().map(parse_region).transpose()?;
             let waited = capture::wait(&client, until, region, std::time::Duration::from_secs_f64(timeout.clamp(0.0, capture::MAX_WAIT_SECONDS))).await?;
             println!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures);
             if let Some(out) = out {
@@ -770,10 +762,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let args = (!args.is_empty()).then_some(args);
             let run = project::test(&client, &project::get(&project)?, no_build, args, &output, &settings).await?;
             println!("{}", run.text);
-            if let (Some(out), Some(jpeg)) = (out, run.screenshot) {
-                std::fs::write(&out, jpeg)?;
-                println!("screenshot: {}", out.display());
-            }
+            save_screenshot(out, run.screenshot)?;
         }
         Command::Projects => {
             for (name, p) in project::load_all()? {
@@ -788,10 +777,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             };
             let report = watchdog::supervise(&client, None, &memory::Elf::load(elf.as_deref(), None)?, &settings).await?;
             println!("{}", report.text);
-            if let (Some(out), Some(jpeg)) = (out, report.screenshot) {
-                std::fs::write(&out, jpeg)?;
-                println!("screenshot: {}", out.display());
-            }
+            save_screenshot(out, report.screenshot)?;
         }
         Command::Threads { elf, module } => {
             print!("{}", memory::threads(&client, &memory::Elf::load(elf.as_deref(), module.as_deref())?).await?)
@@ -909,6 +895,27 @@ async fn update(host: Option<String>, port: u16, check: bool, switch_only: bool)
     println!("updating the Switch from {} to {} (its background service restarts, about 15 s)…", info.version, update::VERSION);
     for note in update::update_switch(&client).await? {
         println!("{note}");
+    }
+    Ok(())
+}
+
+/// `"x,y,w,h"` as the numbers.
+fn parse_region(text: &str) -> Result<(u32, u32, u32, u32)> {
+    let n: Vec<u32> = text.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
+    let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };
+    Ok((x, y, w, h))
+}
+
+/// "1.23 MB/s" for `bytes` moved in `secs`.
+fn mb_per_s(bytes: u64, secs: f64) -> String {
+    format!("{:.2} MB/s", bytes as f64 / 1e6 / secs.max(1e-6))
+}
+
+/// Saves a run's screenshot (a crash or hang) to `--out`, if both exist.
+fn save_screenshot(out: Option<PathBuf>, jpeg: Option<Vec<u8>>) -> Result<()> {
+    if let (Some(out), Some(jpeg)) = (out, jpeg) {
+        std::fs::write(&out, jpeg)?;
+        println!("screenshot: {}", out.display());
     }
     Ok(())
 }
