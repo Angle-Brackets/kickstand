@@ -31,7 +31,7 @@ pub fn run() -> Result<()> {
         .with_app_id("kickstand")
         .with_inner_size([1200.0, 760.0])
         // The smallest size every screen fits in side by side; the window itself doesn't scroll.
-        .with_min_inner_size([920.0, 740.0]);
+        .with_min_inner_size([920.0, 748.0]);
     let mut viewport = window::viewport(viewport);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
@@ -151,18 +151,17 @@ impl Kickstand {
     }
 
     fn header(&mut self, ui: &mut egui::Ui, model: &mut Model) {
-        let frame = Frame::new().fill(PAPER).inner_margin(Margin::symmetric(theme::GUTTER as i8, 20));
+        // Under the title bar, which makes up the rest of the space above.
+        let margin = Margin { left: theme::GUTTER as i8, right: theme::GUTTER as i8, top: 0, bottom: 16 };
+        let frame = Frame::new().fill(PAPER).inner_margin(margin);
         let panel = egui::Panel::top("header").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
-            // Dragging the header moves the window, which has no title bar of its own.
-            window::drag_area(ui, ui.max_rect().expand2(Vec2::new(theme::GUTTER, 20.0)));
+            // The header moves the window too.
+            window::drag_area(ui, ui.max_rect() + margin);
             ui.horizontal(|ui| {
                 // The same height on every screen (the console button is the tallest), so the line under
                 // it doesn't jump when the screen changes.
                 ui.set_min_height(44.0);
                 ui.spacing_mut().item_spacing.x = 12.0;
-                if window::MAC {
-                    ui.scope(window::controls);
-                }
                 // The mark and name open the overview.
                 let name = ui.painter().layout_job(theme::job("Kickstand", Face::Heavy, 22.0, INK, -0.01));
                 let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0 + 12.0 + name.size().x + 10.0, 36.0), Sense::click());
@@ -175,20 +174,15 @@ impl Kickstand {
                 if response.clicked() {
                     self.overview = true;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !window::MAC {
-                        ui.scope(window::controls);
-                    }
-                    match &self.screen {
-                        Screen::Home => {
-                            if self.selector(ui, model).clicked() {
-                                self.go(model, Screen::Find);
-                            }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &self.screen {
+                    Screen::Home => {
+                        if self.selector(ui, model).clicked() {
+                            self.go(model, Screen::Find);
                         }
-                        screen => {
-                            if let Some(next) = stepper(ui, screen, model) {
-                                self.go(model, next);
-                            }
+                    }
+                    screen => {
+                        if let Some(next) = stepper(ui, screen, model) {
+                            self.go(model, next);
                         }
                     }
                 });
@@ -217,7 +211,8 @@ impl Kickstand {
         x += name_galley.size().x + 10.0;
         painter.galley(egui::pos2(x, cy - host_galley.size().y / 2.0), host_galley.clone(), MUTED);
         x += host_galley.size().x + 10.0;
-        art::chevron(painter, egui::pos2(x, cy - 4.0));
+        // An arrow, not a menu's chevron: it goes to the list of consoles.
+        art::fold(painter, egui::pos2(x, cy - 6.0), 0.0, INK);
         response
     }
 
@@ -299,6 +294,7 @@ impl eframe::App for Kickstand {
             self.screen = if linked { Screen::Home } else { Screen::Link };
         }
         window::frame(ui.ctx());
+        window::title_bar(ui);
         self.header(ui, &mut model);
         self.footer(ui, &model);
         // A new screen fades in, sliding from the side it's on in Find, Pair, Link, Home.

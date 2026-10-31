@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The window's own title bar: the header moves the window, and its minimize, maximize and close buttons
-//! are drawn in the app's style (on the right, or on the left on macOS). Off macOS the window has no
-//! system frame, so its edges resize it here; macOS keeps its frame, with the title bar hidden.
+//! The window's own title bar: a strip along the top that moves the window, with minimize, maximize and
+//! close in its right corner, drawn in the app's style. Off macOS the window has no system frame, so its
+//! edges resize it here. macOS keeps its frame and its own buttons on the left, over the strip, with the
+//! system title bar hidden.
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
 use egui::viewport::ResizeDirection;
 
-use super::theme::{INK, PAPER, PRESSED_PAPER, RED, RULE};
+use super::theme::{INK, PAPER, PRESSED_PAPER, RED};
 
 pub const MAC: bool = cfg!(target_os = "macos");
 /// How far in from the window's edge a press resizes it.
 const EDGE: f32 = 6.0;
-const BUTTON: f32 = 36.0;
+/// The strip's height: on macOS, its title bar's, which its buttons are centred in.
+const BAR: f32 = if MAC { 28.0 } else { 32.0 };
+const BUTTON_WIDTH: f32 = 46.0;
 
 pub fn viewport(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
     if MAC {
-        viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false).with_titlebar_buttons_shown(false)
+        viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false)
     } else {
         viewport.with_decorations(false)
     }
@@ -76,10 +79,25 @@ pub fn frame(ctx: &egui::Context) {
     }
 }
 
-/// Makes `rect` (the header) move the window, and maximize or restore it on a double click. Called before
-/// the header's own widgets, which stay clickable on top of it.
+/// The strip along the top of the window.
+pub fn title_bar(ui: &mut egui::Ui) {
+    egui::Panel::top("title-bar").frame(egui::Frame::new().fill(PAPER)).exact_size(BAR).resizable(false).show_separator_line(false).show(ui, |ui| {
+        drag_area(ui, ui.max_rect());
+        if !MAC {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for control in [Control::Close, Control::Maximize, Control::Minimize] {
+                    button(ui, control);
+                }
+            });
+        }
+    });
+}
+
+/// Makes `rect` move the window, and maximize or restore it on a double click. Called before the widgets
+/// on it, which stay clickable on top of it.
 pub fn drag_area(ui: &mut egui::Ui, rect: Rect) {
-    let response = ui.interact(rect, egui::Id::unique("window-drag"), Sense::click_and_drag());
+    let response = ui.interact(rect, ui.scope_id().with("window-drag"), Sense::click_and_drag());
     if edge(ui.ctx()).is_some() {
         return;
     }
@@ -97,21 +115,6 @@ enum Control {
     Close,
 }
 
-/// Minimize, maximize and close, and a rule between them and the rest of the header. In a right-to-left
-/// layout (the right end of the header) close comes first, so it ends up at the window's corner; on macOS,
-/// in a left-to-right one, close is first on the left.
-pub fn controls(ui: &mut egui::Ui) {
-    ui.spacing_mut().item_spacing.x = 4.0;
-    let order = if MAC { [Control::Close, Control::Minimize, Control::Maximize] } else { [Control::Close, Control::Maximize, Control::Minimize] };
-    for control in order {
-        button(ui, control);
-    }
-    ui.add_space(12.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 24.0), Sense::hover());
-    ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, RULE));
-    ui.add_space(12.0);
-}
-
 fn button(ui: &mut egui::Ui, control: Control) {
     let max = maximized(ui.ctx());
     let tip = match control {
@@ -120,7 +123,7 @@ fn button(ui: &mut egui::Ui, control: Control) {
         Control::Maximize => "Maximize",
         Control::Close => "Close",
     };
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(BUTTON_WIDTH, BAR), Sense::click());
     let response = response.on_hover_text(tip);
     let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
     let painter = ui.painter();

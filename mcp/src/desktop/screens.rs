@@ -748,7 +748,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             "Background service",
             live.map_or_else(unknown, |l| match l.info.kind {
                 DaemonKind::Sysmodule => "Running".into(),
-                DaemonKind::Nro => "Off: Kickstand is open on the Switch".into(),
+                DaemonKind::Nro => "Off while the app is open".into(),
             }),
             false,
         ),

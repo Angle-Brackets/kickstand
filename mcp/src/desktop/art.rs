@@ -80,12 +80,6 @@ pub fn check(painter: &Painter, at: Pos2, color: Color32) {
     painter.add(Shape::line(vec![p(1.0, 5.5), p(5.0, 9.5), p(13.0, 1.5)], Stroke::new(2.2, color)));
 }
 
-/// A down chevron in a 12×8 box at `at`.
-pub fn chevron(painter: &Painter, at: Pos2) {
-    let p = |x: f32, y: f32| at + Vec2::new(x, y);
-    painter.add(Shape::line(vec![p(1.0, 1.5), p(6.0, 6.5), p(11.0, 1.5)], Stroke::new(2.0, INK)));
-}
-
 /// A section's fold mark in a 12×12 box at `at`: pointing down when `open` is 1, right when 0, turning
 /// in between.
 pub fn fold(painter: &Painter, at: Pos2, open: f32, color: Color32) {
