@@ -403,16 +403,16 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
 /// the least (one group of two).
 const LINKED_HEIGHT: f32 = 2.0 * (GROUP_ROW + 1.0) + 4.0 * (APP_ROW + 1.0);
 const LINKED_MIN_HEIGHT: f32 = GROUP_ROW + 1.0 + 2.0 * (APP_ROW + 1.0);
-/// Room for the linked apps' scroll bar, in the margin right of the column.
-const BAR_LANE: f32 = 18.0;
+/// Room for the linked apps' scroll bar (6 px) and the gap before it, in the margin right of the column.
+const BAR_LANE: f32 = 10.0;
 /// Space inside each row's ends, so the arrow and counts sit clear of its hover colour.
 const ROW_INSET: f32 = 12.0;
 /// A maker's row and an app's (each has a 1 px rule under it).
 const GROUP_ROW: f32 = 52.0;
 const APP_ROW: f32 = 44.0;
 /// The height of the Switch's section under them, with its buttons on one line or two.
-const SWITCH_HEIGHT: f32 = 330.0;
-const SWITCH_HEIGHT_WRAPPED: f32 = 390.0;
+const SWITCH_HEIGHT: f32 = 338.0;
+const SWITCH_HEIGHT_WRAPPED: f32 = 398.0;
 
 /// "1 AGENT", "3 AGENTS".
 fn agents_count(n: usize) -> String {
@@ -730,7 +730,8 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             }
         }
     });
-    ui.advance_cursor_after_rect(lane.min_rect());
+    // Only down: the lane is wider than the column, and the sections below keep the column's width.
+    ui.advance_cursor_after_rect(Rect::from_min_size(lane.min_rect().min, Vec2::new(width, lane.min_rect().height())));
     ui.add_space(34.0);
     theme::label(ui, "THIS SWITCH", true, 13.0, INK);
     ui.add_space(12.0);
@@ -760,16 +761,18 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             true,
         ),
     ];
+    // Laid out like the linked apps' rows: the same height, and the same room inside their ends.
     for (name, value, mono) in rows {
-        ui.add_space(11.0);
         ui.horizontal(|ui| {
+            ui.set_min_height(APP_ROW);
+            ui.add_space(ROW_INSET);
             ui.label(theme::job(name, Face::Regular, 15.0, MUTED, 0.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(ROW_INSET);
                 let face = if mono { Face::Mono } else { Face::Regular };
                 ui.label(theme::job(&value, face, if mono { 14.0 } else { 15.0 }, INK, 0.0));
             });
         });
-        ui.add_space(11.0);
         theme::rule(ui, 1.0, RULE_LIGHT);
     }
 
