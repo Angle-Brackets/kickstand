@@ -16,7 +16,7 @@
 
 **Kickstand** lets AI agents and developers autonomously build, deploy, run, play, and debug homebrew on a real Nintendo Switch running Atmosphère — with nobody holding the console.
 
-> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 43 MCP tools, their parameters, and matching CLI commands.
+> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 43 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
 
 ---
 

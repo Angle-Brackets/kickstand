@@ -554,6 +554,13 @@ Warm-reboot the Switch into Hekate via Atmosphère's `reboot-to-payload` (never 
 
 Every capability above is also available directly from your terminal via `kickstand <command>` (run `kickstand <command> --help` for full flag details):
 
+**For scripts, add `--json`** to any command that finishes with a result. It prints one JSON object: `{"ok": true, ...}` with the command's fields (and `"notes"` for anything it reported along the way), or `{"ok": false, "error": "..."}` with exit code 1. `run` and `tail -f` print JSON Lines instead, one object per event as it happens (`{"line": ..., "at": 1.234}` for each line of an NRO's stdout). Title and program ids are 16-digit hex strings. `serve`, `mock` and `watch` don't take it.
+
+```sh
+kickstand status --json | jq .application
+kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\(.line)"'
+```
+
 | Category | Command | Description |
 | :--- | :--- | :--- |
 | **App & Setup** | `kickstand` / `kickstand desktop` | Open the desktop GUI to find the Switch, pair, link AI apps, and watch live agent activity. |

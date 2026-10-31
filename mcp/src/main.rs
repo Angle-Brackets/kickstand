@@ -15,6 +15,7 @@ mod macros;
 mod memory;
 mod mock;
 mod nxlink;
+mod out;
 mod pairing;
 mod project;
 mod questions;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
+use serde_json::json;
 
 use client::{Client, check_path};
 
@@ -44,6 +46,10 @@ struct Cli {
     /// The daemon's port.
     #[arg(long, global = true, default_value_t = proto::DEFAULT_PORT)]
     port: u16,
+    /// Print the result as one JSON object ({"ok": true, ...}, or {"ok": false, "error": ...} with exit
+    /// code 1) for scripts; `run` and `tail -f` print one object per line as things happen.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -458,7 +464,14 @@ fn main() -> Result<()> {
     if let Command::Desktop = command {
         return desktop::run();
     }
-    run(cli, command)
+    let json = cli.json;
+    match run(cli, command) {
+        Err(e) if json => {
+            out::Out::error(&e);
+            std::process::exit(1);
+        }
+        other => other,
+    }
 }
 
 /// Whether an MCP client started this, talking over stdin (configs from before `serve` was spelled out).
@@ -479,6 +492,10 @@ fn stdin_is_pipe() -> bool {
 
 #[tokio::main]
 async fn run(cli: Cli, command: Command) -> Result<()> {
+    let out = out::Out::new(cli.json);
+    if out.json() && matches!(command, Command::Serve { .. } | Command::Mock { .. } | Command::Watch { .. }) {
+        anyhow::bail!("--json is for commands that finish with a result; serve, mock and watch keep running");
+    }
     match command {
         Command::Symbolize { elf, text, module } => {
             let symbols = symbolize::Symbolizer::new(&elf, module.as_deref())?;
@@ -486,14 +503,19 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 Some(t) => t,
                 None => std::io::read_to_string(std::io::stdin())?,
             };
-            print!("{}", symbols.annotate(&text));
+            let text = symbols.annotate(&text);
+            out.done(json!({ "text": text }), || text.clone());
             return Ok(());
         }
         Command::Token => {
             let (token, path) = config::ensure_token()?;
-            println!("token: {token}");
-            println!("saved in {}", path.display());
-            println!("`kickstand pair <code>` sends it to a Switch; by hand, add it as a line of {} on the SD card", proto::path::TOKEN_PATH);
+            out.done(json!({ "token": token, "path": path, "sd_path": proto::path::TOKEN_PATH }), || {
+                format!(
+                    "token: {token}\nsaved in {}\n`kickstand pair <code>` sends it to a Switch; by hand, add it as a line of {} on the SD card",
+                    path.display(),
+                    proto::path::TOKEN_PATH
+                )
+            });
             return Ok(());
         }
         Command::Mock { root, bind, pair_code } => {
@@ -507,37 +529,60 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Link { app, remove } => {
             let Some(app) = app else {
-                for app in link::App::ALL {
-                    let state = match link::state(app) {
-                        link::State::Missing => "not installed".to_string(),
-                        link::State::NotLinked => "not linked".to_string(),
-                        link::State::Linked { command } => format!("linked ({command})"),
-                    };
-                    println!("{} ({}): {state}", app.name(), app.slug());
-                }
+                let apps: Vec<(link::App, link::State)> = link::App::ALL.into_iter().map(|app| (app, link::state(app))).collect();
+                let value = apps
+                    .iter()
+                    .map(|(app, state)| {
+                        let (state, command) = match state {
+                            link::State::Missing => ("not_installed", None),
+                            link::State::NotLinked => ("not_linked", None),
+                            link::State::Linked { command } => ("linked", Some(command)),
+                        };
+                        json!({ "slug": app.slug(), "name": app.name(), "state": state, "command": command })
+                    })
+                    .collect::<Vec<_>>();
+                out.done(json!({ "apps": value }), || {
+                    let lines: Vec<String> = apps
+                        .iter()
+                        .map(|(app, state)| {
+                            let state = match state {
+                                link::State::Missing => "not installed".to_string(),
+                                link::State::NotLinked => "not linked".to_string(),
+                                link::State::Linked { command } => format!("linked ({command})"),
+                            };
+                            format!("{} ({}): {state}", app.name(), app.slug())
+                        })
+                        .collect();
+                    lines.join("\n")
+                });
                 return Ok(());
             };
             let Some(app) = link::App::from_slug(&app) else {
                 let names = link::App::ALL.map(|a| format!("{} ({})", a.slug(), a.name())).join(", ");
                 anyhow::bail!("{app:?} isn't one Kickstand knows: {names}. Any other MCP app can run `kickstand serve` itself");
             };
-            println!("{}", if remove { link::unlink(app)? } else { link::link(app)? });
+            let message = if remove { link::unlink(app)? } else { link::link(app)? };
+            out.done(json!({ "app": app.slug(), "linked": !remove, "message": message }), || message.clone());
             return Ok(());
         }
         Command::Install { remove } => {
-            println!("{}", install::run(remove)?);
+            let message = install::run(remove)?;
+            out.done(json!({ "installed": !remove, "message": message }), || message.clone());
             return Ok(());
         }
         Command::Allow { folder, write, remove } => {
             let Some(folder) = folder else {
                 let saved = access::saved();
-                println!("always: Kickstand's own folders ({}), reading crash reports, and the folders projects.json deploys to", proto::path::OWN_DIRS.join(", "));
-                for f in &saved.write {
-                    println!("{f}: read and write");
-                }
-                for f in saved.read.iter().filter(|f| !saved.write.contains(f)) {
-                    println!("{f}: read");
-                }
+                let read: Vec<&String> = saved.read.iter().filter(|f| !saved.write.contains(f)).collect();
+                out.done(json!({ "always": proto::path::OWN_DIRS, "write": saved.write, "read": read }), || {
+                    let mut lines = vec![format!(
+                        "always: Kickstand's own folders ({}), reading crash reports, and the folders projects.json deploys to",
+                        proto::path::OWN_DIRS.join(", ")
+                    )];
+                    lines.extend(saved.write.iter().map(|f| format!("{f}: read and write")));
+                    lines.extend(read.iter().map(|f| format!("{f}: read")));
+                    lines.join("\n")
+                });
                 return Ok(());
             };
             use std::io::IsTerminal;
@@ -545,11 +590,19 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let folder = check_path(&folder, write)?;
             if remove {
                 let was = access::forget(&folder)?;
-                println!("{}", if was { format!("{folder} is no longer allowed") } else { format!("{folder} wasn't allowed") });
+                out.done(json!({ "folder": folder, "removed": was }), || {
+                    if was { format!("{folder} is no longer allowed") } else { format!("{folder} wasn't allowed") }
+                });
             } else {
                 let need = if write { access::Need::Write } else { access::Need::Read };
                 access::save(&folder, need)?;
-                println!("agents may {} {} from now on without asking", if write { "read, write and delete in" } else { "read" }, access::describe(&folder));
+                out.done(json!({ "folder": folder, "access": if write { "write" } else { "read" } }), || {
+                    format!(
+                        "agents may {} {} from now on without asking",
+                        if write { "read, write and delete in" } else { "read" },
+                        access::describe(&folder)
+                    )
+                });
             }
             return Ok(());
         }
@@ -559,25 +612,44 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 None => None,
             };
             let found = pairing::discover(pairing::DISCOVER_WAIT, to).await?;
-            if found.is_empty() {
-                println!("no Switch running Kickstand answered (is it on the same network as this PC?)");
-            }
-            for f in found {
-                let a = &f.announce;
-                let kind = match a.kind {
-                    proto::DaemonKind::Sysmodule => "background service",
-                    proto::DaemonKind::Nro => "on-screen app",
-                };
-                let pairing = if a.pairing { ", showing a pairing code" } else { "" };
-                println!("{}: Kickstand {} ({kind}, protocol {}){pairing}", f.describe(), a.daemon_version, a.protocol);
-            }
+            let kind = |k: proto::DaemonKind| match k {
+                proto::DaemonKind::Sysmodule => "sysmodule",
+                proto::DaemonKind::Nro => "nro",
+            };
+            let value: Vec<_> = found
+                .iter()
+                .map(|f| {
+                    let a = &f.announce;
+                    json!({
+                        "host": f.addr.ip().to_string(), "port": f.addr.port(), "nickname": a.nickname,
+                        "version": a.daemon_version, "protocol": a.protocol, "kind": kind(a.kind), "pairing": a.pairing,
+                    })
+                })
+                .collect();
+            out.done(json!({ "consoles": value }), || {
+                if found.is_empty() {
+                    return "no Switch running Kickstand answered (is it on the same network as this PC?)".into();
+                }
+                let lines: Vec<String> = found
+                    .iter()
+                    .map(|f| {
+                        let a = &f.announce;
+                        let what = if a.kind == proto::DaemonKind::Sysmodule { "background service" } else { "on-screen app" };
+                        let pairing = if a.pairing { ", showing a pairing code" } else { "" };
+                        format!("{}: Kickstand {} ({what}, protocol {}){pairing}", f.describe(), a.daemon_version, a.protocol)
+                    })
+                    .collect();
+                lines.join("\n")
+            });
             return Ok(());
         }
-        Command::Update { check, switch } => return update(cli.host, cli.port, check, switch).await,
+        Command::Update { check, switch } => return update(&out, cli.host, cli.port, check, switch).await,
         Command::Pair { code } => {
             let host = pairing::pick(cli.host.as_deref(), cli.port).await?;
             let info = pairing::pair(&host, cli.port, &code).await?;
-            println!("paired with the Switch at {host} (Kickstand {}); this PC uses it from now on", info.version);
+            out.done(json!({ "host": host, "version": info.version }), || {
+                format!("paired with the Switch at {host} (Kickstand {}); this PC uses it from now on", info.version)
+            });
             return Ok(());
         }
         _ => {}
@@ -599,31 +671,47 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         Command::Unpair => {
             client.unpair().await?;
             let forgot = config::forget_host(&host)?;
-            println!("the Switch at {host} has forgotten this PC{}", if forgot { "; this PC no longer uses it" } else { "" });
+            out.done(json!({ "host": host, "forgot_host": forgot }), || {
+                format!("the Switch at {host} has forgotten this PC{}", if forgot { "; this PC no longer uses it" } else { "" })
+            });
         }
         Command::Ping => {
             let info = client.hello().await?;
             let (rtt, uptime) = client.ping().await?;
-            println!("daemon {} ({:?}, protocol {}): rtt {:.1} ms, uptime {}s", info.version, info.kind, info.protocol, rtt.as_secs_f64() * 1e3, uptime.as_secs());
+            let kind = if info.kind == proto::DaemonKind::Sysmodule { "sysmodule" } else { "nro" };
+            out.done(
+                json!({ "host": host, "version": info.version, "kind": kind, "protocol": info.protocol, "rtt_ms": rtt.as_secs_f64() * 1e3, "uptime_s": uptime.as_secs() }),
+                || format!("daemon {} ({:?}, protocol {}): rtt {:.1} ms, uptime {}s", info.version, info.kind, info.protocol, rtt.as_secs_f64() * 1e3, uptime.as_secs()),
+            );
         }
         Command::Ls { path } => {
             let path = check_path(&path, false)?;
             typed_or_allowed(&path, access::Need::Read, true)?;
             let (entries, truncated) = client.list_dir(&path).await?;
-            for e in entries {
-                if e.is_dir { println!("{}/", e.name) } else { println!("{}\t{}", e.name, e.size) }
-            }
-            if truncated {
-                println!("... (truncated)");
-            }
+            out.done(json!({ "path": path, "entries": entries, "truncated": truncated }), || {
+                let mut lines: Vec<String> = entries.iter().map(|e| if e.is_dir { format!("{}/", e.name) } else { format!("{}\t{}", e.name, e.size) }).collect();
+                if truncated {
+                    lines.push("... (truncated)".into());
+                }
+                lines.join("\n")
+            });
         }
         Command::Cat { path } => {
             let path = check_path(&path, false)?;
             typed_or_allowed(&path, access::Need::Read, false)?;
             let size = client.stat(&path).await?.size;
             let (data, _) = client.read(&path, 0, size).await?;
-            use std::io::Write;
-            std::io::stdout().write_all(&data)?;
+            if out.json() {
+                use base64::Engine;
+                let value = match std::str::from_utf8(&data) {
+                    Ok(text) => json!({ "path": path, "size": data.len(), "text": text }),
+                    Err(_) => json!({ "path": path, "size": data.len(), "base64": base64::engine::general_purpose::STANDARD.encode(&data) }),
+                };
+                out.done(value, String::new);
+            } else {
+                use std::io::Write;
+                std::io::stdout().write_all(&data)?;
+            }
         }
         Command::Get { path, local } => {
             let path = check_path(&path, false)?;
@@ -633,7 +721,9 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let (data, _) = client.read(&path, 0, size).await?;
             let secs = start.elapsed().as_secs_f64();
             std::fs::write(&local, &data).with_context(|| format!("writing {}", local.display()))?;
-            println!("{} bytes in {secs:.1}s ({}) -> {}", data.len(), mb_per_s(data.len() as u64, secs), local.display());
+            out.done(json!({ "path": path, "local": local, "bytes": data.len(), "seconds": secs }), || {
+                format!("{} bytes in {secs:.1}s ({}) -> {}", data.len(), mb_per_s(data.len() as u64, secs), local.display())
+            });
         }
         Command::Put { local, path } => {
             let path = check_path(&path, true)?;
@@ -641,87 +731,117 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let data = std::fs::read(&local).with_context(|| format!("reading {}", local.display()))?;
             let stats = client.upload(&path, &data).await?;
             let secs = stats.elapsed.as_secs_f64();
-            println!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size as u64, secs));
+            out.done(json!({ "local": local, "path": path, "bytes": stats.size, "seconds": secs }), || {
+                format!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size as u64, secs))
+            });
         }
         Command::Tail { path, lines, follow } => {
             use std::io::Write;
             let path = check_path(&path, false)?;
             typed_or_allowed(&path, access::Need::Read, false)?;
             let (text, mut next) = tail::last_lines(&client, &path, lines).await?;
-            print!("{text}");
             if !follow {
+                out.done(json!({ "path": path, "text": text, "next": next }), || text.clone());
                 return Ok(());
+            }
+            if out.json() {
+                out.event(json!({ "path": path, "text": text, "next": next }));
+            } else {
+                print!("{text}");
             }
             loop {
                 tokio::time::sleep(tail::POLL).await;
                 let (data, after, restarted) = tail::since(&client, &path, next).await?;
+                next = after;
+                if out.json() {
+                    if restarted || !data.is_empty() {
+                        out.event(json!({ "text": String::from_utf8_lossy(&data), "next": next, "restarted": restarted }));
+                    }
+                    continue;
+                }
                 if restarted {
                     eprintln!("({path} got shorter: reading it again from the start)");
                 }
                 std::io::stdout().write_all(&data)?;
                 std::io::stdout().flush()?;
-                next = after;
             }
         }
         Command::Rm { path, recursive } => {
             let path = check_path(&path, true)?;
             typed_or_allowed(&path, access::Need::Write, client.stat(&path).await.is_ok_and(|e| e.is_dir))?;
             let was_dir = client.delete(&path, recursive).await?;
-            println!("deleted {path}{}", if was_dir { "/" } else { "" });
+            out.done(json!({ "path": path, "was_dir": was_dir }), || format!("deleted {path}{}", if was_dir { "/" } else { "" }));
         }
         Command::Macro { action } => match action {
             MacroCmd::Record { name, note, seconds } => {
                 let name = macros::check_name(&name)?.to_string();
                 let seconds = seconds.clamp(1, proto::MAX_RECORD_MS / 1000);
                 client.record_start(seconds * 1000).await?;
-                println!("recording: play on the Switch now, then press Enter here (stops by itself after {seconds} s)");
+                eprintln!("recording: play on the Switch now, then press Enter here (stops by itself after {seconds} s)");
                 let mut line = String::new();
                 let enter = tokio::task::spawn_blocking(move || std::io::stdin().read_line(&mut line));
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(u64::from(seconds)), enter).await;
                 let (inputs, ms, full) = client.record_stop().await?;
                 let data = macros::from_recording(&inputs, ms, note)?;
                 let path = macros::save(&name, &data)?;
-                println!("saved {name:?}: {}, {} steps ({}){}", macros::length(data.ms), data.steps.split_whitespace().count(), path.display(), if full { "; the recording filled up and stopped early" } else { "" });
+                let steps = data.steps.split_whitespace().count();
+                out.done(json!({ "name": name, "path": path, "ms": data.ms, "steps": steps, "full": full, "macro": data }), || {
+                    format!(
+                        "saved {name:?}: {}, {steps} steps ({}){}",
+                        macros::length(data.ms),
+                        path.display(),
+                        if full { "; the recording filled up and stopped early" } else { "" }
+                    )
+                });
             }
             MacroCmd::Play { name } => {
                 let (data, took) = macros::play(&client, &name).await?;
-                println!("played {name:?} ({} in {:.1} s)", macros::length(data.ms), took.as_secs_f64());
+                out.done(json!({ "name": name, "ms": data.ms, "took_ms": took.as_millis() as u64 }), || {
+                    format!("played {name:?} ({} in {:.1} s)", macros::length(data.ms), took.as_secs_f64())
+                });
             }
             MacroCmd::List => {
-                for m in macros::list()? {
-                    println!("{}\t{}\t{}", m.name, macros::length(m.data.ms), m.data.note);
-                }
+                let all = macros::list()?;
+                let value: Vec<_> = all.iter().map(|m| json!({ "name": m.name, "recorded": m.data.recorded, "ms": m.data.ms, "note": m.data.note, "steps": m.data.steps })).collect();
+                out.done(json!({ "macros": value }), || {
+                    all.iter().map(|m| format!("{}\t{}\t{}", m.name, macros::length(m.data.ms), m.data.note)).collect::<Vec<_>>().join("\n")
+                });
             }
             MacroCmd::Delete { name } => {
                 macros::delete(&name)?;
-                println!("deleted {name:?}");
+                out.done(json!({ "name": name }), || format!("deleted {name:?}"));
             }
         },
         Command::Type { text, enter } => {
             let text = if enter { format!("{text}\n") } else { text };
             client.type_text(&text).await?;
-            println!("typed {} characters", text.chars().count());
+            let typed = text.chars().count();
+            out.done(json!({ "typed": typed }), || format!("typed {typed} characters"));
         }
         Command::Find { dir, name, max } => {
             let dir = check_path(&dir, false)?;
             typed_or_allowed(&dir, access::Need::Read, true)?;
             let (entries, truncated) = client.find(&dir, &name, max.clamp(1, proto::MAX_FIND)).await?;
-            for e in &entries {
-                if e.is_dir { println!("{}/", e.name) } else { println!("{}\t{}", e.name, e.size) }
-            }
-            if truncated {
+            if truncated && !out.json() {
                 eprintln!("(stopped early: more than {max}, out of time, or a folder over 1024 entries)");
             }
+            out.done(json!({ "dir": dir, "entries": entries, "truncated": truncated }), || {
+                entries.iter().map(|e| if e.is_dir { format!("{}/", e.name) } else { format!("{}\t{}", e.name, e.size) }).collect::<Vec<_>>().join("\n")
+            });
         }
         Command::Grep { text, path, ignore_case, max } => {
             let path = check_path(&path, false)?;
             let is_dir = client.stat(&path).await?.is_dir;
             typed_or_allowed(&path, access::Need::Read, is_dir)?;
             let (matches, files, truncated) = client.grep(&path, &text, ignore_case, max.clamp(1, proto::MAX_GREP)).await?;
-            for m in &matches {
-                if is_dir { println!("{}:{}: {}", m.path, m.line, m.text) } else { println!("{}: {}", m.line, m.text) }
+            if !out.json() {
+                eprintln!("{} matching lines in {files} file(s){}", matches.len(), if truncated { "; stopped early" } else { "" });
             }
-            eprintln!("{} matching lines in {files} file(s){}", matches.len(), if truncated { "; stopped early" } else { "" });
+            out.done(json!({ "path": path, "matches": matches, "files": files, "truncated": truncated }), || {
+                let lines: Vec<String> =
+                    matches.iter().map(|m| if is_dir { format!("{}:{}: {}", m.path, m.line, m.text) } else { format!("{}: {}", m.line, m.text) }).collect();
+                lines.join("\n")
+            });
         }
         Command::Sysmodule { action } => {
             let status = match action {
@@ -737,29 +857,35 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                     client.install_sysmodule(&data).await?;
                     if !no_restart {
                         for note in launch::restart_sysmodule(&client, nro).await? {
-                            println!("{note}");
+                            out.note(note);
                         }
                     }
                     client.sysmodule(proto::Request::SysmoduleStatus).await?
                 }
             };
-            println!("{status:?}");
+            out.done(json!({ "installed": status.installed, "boot2": status.boot2, "pid": status.pid }), || format!("{status:?}"));
         }
         Command::Reboot { target, yes } => {
             let entries = client.hekate_entries().await?;
-            println!("hekate entries:");
-            for (i, e) in entries.iter().enumerate() {
-                println!("  {}. {e}", i + 1);
-            }
-            let Some(target) = target else { return Ok(()) };
+            let listing = || {
+                let mut lines = vec!["hekate entries:".to_string()];
+                lines.extend(entries.iter().enumerate().map(|(i, e)| format!("  {}. {e}", i + 1)));
+                lines.join("\n")
+            };
+            let Some(target) = target else {
+                out.done(json!({ "entries": entries }), listing);
+                return Ok(());
+            };
             let target = client::parse_hekate_target(&target, &entries)?;
             let what = tools::describe_target(target, &entries);
             if !yes {
-                println!("would reboot into hekate: {what} (add --yes to do it)");
+                out.done(json!({ "entries": entries, "target": what, "rebooting": false }), || {
+                    format!("{}\nwould reboot into hekate: {what} (add --yes to do it)", listing())
+                });
                 return Ok(());
             }
             client.reboot_to_hekate(target).await?;
-            println!("rebooting into hekate: {what}");
+            out.done(json!({ "entries": entries, "target": what, "rebooting": true }), || format!("{}\nrebooting into hekate: {what}", listing()));
         }
         Command::IramPeek { offset, compare } => {
             let offset = match offset.strip_prefix("0x") {
@@ -767,101 +893,133 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 None => offset.parse()?,
             };
             let page = client.iram_peek(offset).await?;
+            let mut lines = Vec::new();
             for (i, row) in page.chunks(16).take(8).enumerate() {
                 let hex: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
-                println!("{:#07x}: {}", 0x4000_0000u32 + offset + i as u32 * 16, hex.join(" "));
+                lines.push(format!("{:#07x}: {}", 0x4000_0000u32 + offset + i as u32 * 16, hex.join(" ")));
             }
             if let Some(file) = compare {
                 let data = std::fs::read(&file)?;
                 let start = (offset as usize).checked_sub(0x10000).context("compare needs an offset of at least 0x10000")?;
                 let want = data.get(start..(start + page.len()).min(data.len())).unwrap_or(&[]);
                 let same = want.iter().zip(&page).filter(|(a, b)| a == b).count();
-                println!("{same} of {} bytes match {} at {start:#x}", want.len(), file.display());
+                lines.push(format!("{same} of {} bytes match {} at {start:#x}", want.len(), file.display()));
             }
+            let text = lines.join("\n");
+            out.done(json!({ "text": text }), || text.clone());
         }
         Command::Press { buttons, times, hold_ms } => {
-            let (buttons, times) = match buttons.as_str() {
+            let (parsed, times) = match buttons.as_str() {
                 "unlock" => (vec![proto::Button::B], 3),
                 spec => (client::parse_buttons(spec)?, times),
             };
-            client.press(buttons, times, hold_ms).await?;
-            println!("pressed");
+            client.press(parsed, times, hold_ms).await?;
+            out.done(json!({ "buttons": buttons, "times": times }), || "pressed".into());
         }
         Command::Input { steps } => {
-            client.input(client::parse_steps(&steps)?).await?;
-            println!("played");
+            let parsed = client::parse_steps(&steps)?;
+            let count = parsed.len();
+            client.input(parsed).await?;
+            out.done(json!({ "steps": count }), || "played".into());
         }
         Command::Status => {
-            if let Some(fatal) = client.fatal().await? {
-                println!("{fatal}");
-            }
-            println!("{}", client::describe_status(&client.status().await?));
+            let fatal = client.fatal().await?;
+            let status = client.status().await?;
+            let text = client::describe_status(&status);
+            out.done(
+                json!({
+                    "fatal": fatal, "uptime_ms": status.uptime_ms, "unlocking_ms": status.unlocking_ms, "keep_awake_s": status.keep_awake_s,
+                    "application": status.application.as_ref().map(out::app), "applet": status.applet.as_ref().map(out::app), "text": text,
+                }),
+                || match &fatal {
+                    Some(fatal) => format!("{fatal}\n{text}"),
+                    None => text.clone(),
+                },
+            );
         }
         Command::App => {
-            match client.app_status().await? {
-                Some(app) => println!("application: {}", client::describe_app(&app)),
-                None => println!("application: none"),
-            }
-            match client.applet_status().await? {
-                Some(a) => println!("applet: the Album, pid {}{}", a.pid, if a.hbl == Some(true) { ", hbloader" } else { "" }),
-                None => println!("applet: the Album isn't open"),
-            }
+            let app = client.app_status().await?;
+            let applet = client.applet_status().await?;
+            out.done(json!({ "application": app.as_ref().map(out::app), "applet": applet.as_ref().map(out::app) }), || {
+                let app = match &app {
+                    Some(app) => format!("application: {}", client::describe_app(app)),
+                    None => "application: none".into(),
+                };
+                let applet = match &applet {
+                    Some(a) => format!("applet: the Album, pid {}{}", a.pid, if a.hbl == Some(true) { ", hbloader" } else { "" }),
+                    None => "applet: the Album isn't open".into(),
+                };
+                format!("{app}\n{applet}")
+            });
         }
         Command::CloseApp { applet } => {
             let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
-            match launch::close_running(&client, mode).await? {
-                Some((app, how)) => println!("closed {} ({})", client::describe_app(&app), launch::describe_closed(how)),
-                None if applet => println!("the Album wasn't open"),
-                None => println!("no application was running"),
-            }
+            let closed = launch::close_running(&client, mode).await?;
+            let value = match &closed {
+                Some((app, how)) => json!({ "closed": out::app(app), "how": if matches!(how, launch::Closed::Exited) { "exited" } else { "terminated" } }),
+                None => json!({ "closed": null }),
+            };
+            out.done(value, || match &closed {
+                Some((app, how)) => format!("closed {} ({})", client::describe_app(app), launch::describe_closed(*how)),
+                None if applet => "the Album wasn't open".into(),
+                None => "no application was running".into(),
+            });
         }
         Command::Apps { max } => {
-            for (i, app) in client.list_apps(max).await?.iter().enumerate() {
-                println!("{i:>3}  {:016x}  {}", app.id, app.name);
-            }
+            let apps = client.list_apps(max).await?;
+            let value: Vec<_> = apps.iter().map(|a| json!({ "id": out::id(a.id), "name": a.name })).collect();
+            out.done(json!({ "apps": value }), || {
+                apps.iter().enumerate().map(|(i, app)| format!("{i:>3}  {:016x}  {}", app.id, app.name)).collect::<Vec<_>>().join("\n")
+            });
         }
         Command::Watch { http_port, bind, fps } => watch::serve(client.clone(), &bind, http_port, fps).await?,
         Command::Launch { title, user } => {
             let (app, notes) = launch::launch_title(&client, &title, user).await?;
-            for note in &notes {
-                println!("{note}");
-            }
-            println!("{} ({:016x}) is running", app.name, app.id);
+            notes.into_iter().for_each(|n| out.note(n));
+            out.done(json!({ "id": out::id(app.id), "name": app.name }), || format!("{} ({:016x}) is running", app.name, app.id));
         }
         Command::Hbmenu { full } => {
             let opened = launch::open_hbmenu(&client, if full { launch::Mode::Full } else { launch::Mode::Applet }).await?;
-            for note in &opened.notes {
-                println!("{note}");
-            }
-            match opened.host {
-                Some(host) => println!("hbmenu is open with full memory (host title {:016x} {})", host.id, host.name),
-                None => println!("hbmenu is open in applet mode"),
-            }
+            opened.notes.iter().for_each(|n| out.note(n.clone()));
+            let host_title = opened.host.as_ref().map(|h| json!({ "id": out::id(h.id), "name": h.name }));
+            out.done(json!({ "mode": if opened.host.is_some() { "full" } else { "applet" }, "host_title": host_title }), || match &opened.host {
+                Some(host) => format!("hbmenu is open with full memory (host title {:016x} {})", host.id, host.name),
+                None => "hbmenu is open in applet mode".into(),
+            });
         }
         Command::Crashes { limit } => {
-            for e in crash::list(&client, limit).await? {
-                println!("{}\n    {}", e.path, e.headline);
-            }
+            let all = crash::list(&client, limit).await?;
+            let value: Vec<_> = all.iter().map(|e| json!({ "path": e.path, "headline": e.headline })).collect();
+            out.done(json!({ "reports": value }), || all.iter().map(|e| format!("{}\n    {}", e.path, e.headline)).collect::<Vec<_>>().join("\n"));
         }
         Command::Crash { name, elf, module, screenshot } => {
             let fetched = crash::fetch(&client, &name).await?;
             let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref())).transpose()?;
-            print!("{}", crash::describe(&fetched, symbols.as_ref())?);
-            if let (Some(path), Some(jpg)) = (screenshot, &fetched.jpg) {
-                std::fs::write(&path, jpg)?;
-                println!("screenshot saved to {}", path.display());
-            }
+            let text = crash::describe(&fetched, symbols.as_ref())?;
+            let saved = match (screenshot, &fetched.jpg) {
+                (Some(path), Some(jpg)) => {
+                    std::fs::write(&path, jpg)?;
+                    Some(path)
+                }
+                _ => None,
+            };
+            out.done(json!({ "name": name, "text": text, "screenshot": saved }), || match &saved {
+                Some(path) => format!("{text}screenshot saved to {}", path.display()),
+                None => text.clone(),
+            });
         }
-        Command::Wait { until, timeout, region, out } => {
+        Command::Wait { until, timeout, region, out: local } => {
             let until = if until == "still" { capture::Until::Still } else { capture::Until::Change };
             let region = region.as_deref().map(parse_region).transpose()?;
             let waited = capture::wait(&client, until, region, std::time::Duration::from_secs_f64(timeout.clamp(0.0, capture::MAX_WAIT_SECONDS))).await?;
-            println!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures);
-            if let Some(out) = out {
-                std::fs::write(&out, &waited.jpeg)?;
+            if let Some(local) = &local {
+                std::fs::write(local, &waited.jpeg)?;
             }
+            out.done(json!({ "met": waited.met, "seconds": waited.elapsed.as_secs_f64(), "captures": waited.captures, "screenshot": local }), || {
+                format!("{} after {:.1} s, {} captures", if waited.met { "met" } else { "timed out" }, waited.elapsed.as_secs_f64(), waited.captures)
+            });
         }
-        Command::Test { project, no_build, seconds, quiet, out, args } => {
+        Command::Test { project, no_build, seconds, quiet, out: local, args } => {
             let settings = watchdog::Settings {
                 max: std::time::Duration::from_secs(seconds),
                 quiet: std::time::Duration::from_secs(quiet.max(1)),
@@ -870,35 +1028,50 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let output = Arc::new(std::sync::Mutex::new(launch::OutputLog::default()));
             let args = (!args.is_empty()).then_some(args);
             let run = project::test(&client, &project::get(&project)?, no_build, args, &output, &settings).await?;
-            println!("{}", run.text);
-            save_screenshot(out, run.screenshot)?;
+            let saved = save_screenshot(local, run.screenshot)?;
+            out.done(json!({ "project": project, "outcome": out::outcome(&run.text), "text": run.text, "screenshot": saved }), || with_screenshot(&run.text, &saved));
         }
         Command::Projects => {
-            for (name, p) in project::load_all()? {
-                println!("{name}: {} (build: {}; {} -> {})", p.dir.display(), p.build.as_deref().unwrap_or("none"), p.nro.display(), p.dest);
-            }
+            let all = project::load_all()?;
+            let value: serde_json::Map<String, serde_json::Value> = all
+                .iter()
+                .map(|(name, p)| (name.clone(), json!({ "dir": p.dir, "build": p.build, "nro": p.nro, "elf": p.elf, "dest": p.dest, "args": p.args, "module": p.module })))
+                .collect();
+            out.done(json!({ "projects": value }), || {
+                let lines: Vec<String> = all
+                    .iter()
+                    .map(|(name, p)| format!("{name}: {} (build: {}; {} -> {})", p.dir.display(), p.build.as_deref().unwrap_or("none"), p.nro.display(), p.dest))
+                    .collect();
+                lines.join("\n")
+            });
         }
-        Command::Supervise { seconds, quiet, elf, no_reboot, out } => {
+        Command::Supervise { seconds, quiet, elf, no_reboot, out: local } => {
             let settings = watchdog::Settings {
                 max: std::time::Duration::from_secs(seconds),
                 quiet: std::time::Duration::from_secs(quiet.max(1)),
                 reboot_on_fatal: !no_reboot,
             };
             let report = watchdog::supervise(&client, None, &memory::Elf::load(elf.as_deref(), None)?, &settings).await?;
-            println!("{}", report.text);
-            save_screenshot(out, report.screenshot)?;
+            let saved = save_screenshot(local, report.screenshot)?;
+            out.done(json!({ "outcome": out::outcome(&report.text), "text": report.text, "screenshot": saved }), || with_screenshot(&report.text, &saved));
         }
         Command::Threads { elf, module } => {
-            print!("{}", memory::threads(&client, &memory::Elf::load(elf.as_deref(), module.as_deref())?).await?)
+            let text = memory::threads(&client, &memory::Elf::load(elf.as_deref(), module.as_deref())?).await?;
+            out.done(json!({ "text": text }), || text.clone());
         }
-        Command::Memory { elf } => print!("{}", memory::map(&client, &memory::Elf::load(elf.as_deref(), None)?).await?),
+        Command::Memory { elf } => {
+            let text = memory::map(&client, &memory::Elf::load(elf.as_deref(), None)?).await?;
+            out.done(json!({ "text": text }), || text.clone());
+        }
         Command::Peek { address, len, format, elf, module } => {
             let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
-            print!("{}", memory::peek(&client, &elf, &address, len, memory::Format::parse(&format)?).await?);
+            let text = memory::peek(&client, &elf, &address, len, memory::Format::parse(&format)?).await?;
+            out.done(json!({ "address": address, "text": text }), || text.clone());
         }
         Command::Poke { address, value, format, elf, module } => {
             let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
-            println!("{}", memory::poke(&client, &elf, &address, &value, memory::Format::parse(&format)?).await?);
+            let text = memory::poke(&client, &elf, &address, &value, memory::Format::parse(&format)?).await?;
+            out.done(json!({ "address": address, "text": text }), || text.clone());
         }
         Command::Run { nro, applet, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
@@ -917,37 +1090,60 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref()).map(symbolize::Symbolizer::shared)).transpose()?;
             let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
             let started = launch::run_nro(&client, program, args, mode).await?;
-            for note in &started.notes {
-                eprintln!("{note}");
+            if out.json() {
+                started.notes.iter().for_each(|n| out.note(n.clone()));
+                out.event(json!({ "started": true, "pid": started.pid, "stdout": started.output.is_some() }));
+            } else {
+                for note in &started.notes {
+                    eprintln!("{note}");
+                }
             }
             if let Some(output) = started.output {
                 use std::io::Write as _;
+                let begun = std::time::Instant::now();
                 let mut lines = launch::Lines::new(output, symbols);
                 while let Some(line) = lines.next().await {
-                    print!("{line}");
-                    let _ = std::io::stdout().flush();
+                    if out.json() {
+                        out.event(json!({ "at": begun.elapsed().as_secs_f64(), "line": line.trim_end_matches('\n') }));
+                    } else {
+                        print!("{line}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
-                eprintln!("(the NRO closed its stdout)");
+                if out.json() {
+                    out.event(json!({ "closed": true, "at": begun.elapsed().as_secs_f64() }));
+                } else {
+                    eprintln!("(the NRO closed its stdout)");
+                }
             }
         }
         Command::Screenshot { local } => {
             let jpeg = client.screenshot().await?;
             std::fs::write(&local, &jpeg)?;
-            println!("saved {} ({} bytes)", local.display(), jpeg.len());
+            out.done(json!({ "path": local, "bytes": jpeg.len() }), || format!("saved {} ({} bytes)", local.display(), jpeg.len()));
         }
         Command::Gif { local, seconds, fps, width } => {
             let shots = capture::record(&client, seconds, fps).await?;
             let gif = tokio::task::spawn_blocking(move || capture::gif(&shots, width).map(|g| (g, shots.len())));
             let (gif, frames) = gif.await??;
             std::fs::write(&local, &gif)?;
-            println!("saved {} ({frames} frames, {} bytes)", local.display(), gif.len());
+            out.done(json!({ "path": local, "frames": frames, "bytes": gif.len() }), || format!("saved {} ({frames} frames, {} bytes)", local.display(), gif.len()));
         }
-        Command::IndicatorAt { x, y } => client.indicator_position(x, y).await?,
-        Command::KeepAwake { minutes } => println!("{}", describe_keep_awake(client.keep_awake(minutes).await?)),
-        Command::Resources => print!("{}", client::describe_resources(&client.resources().await?)),
+        Command::IndicatorAt { x, y } => {
+            client.indicator_position(x, y).await?;
+            out.done(json!({ "x": x, "y": y }), String::new);
+        }
+        Command::KeepAwake { minutes } => {
+            let left = client.keep_awake(minutes).await?;
+            out.done(json!({ "remaining_s": left }), || describe_keep_awake(left));
+        }
+        Command::Resources => {
+            let resources = client.resources().await?;
+            out.done(serde_json::to_value(&resources)?, || client::describe_resources(&resources));
+        }
         Command::Exit => {
             client.exit().await?;
-            println!("the NRO daemon is exiting");
+            out.done(json!({}), || "the NRO daemon is exiting".into());
         }
         Command::Token
         | Command::Mock { .. }
@@ -964,21 +1160,28 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
 }
 
 /// `kickstand update`: the PC first; a new copy then updates the Switch itself, with its own version.
-async fn update(host: Option<String>, port: u16, check: bool, switch_only: bool) -> Result<()> {
+async fn update(out: &out::Out, host: Option<String>, port: u16, check: bool, switch_only: bool) -> Result<()> {
+    let mut pc_latest = None;
     if !switch_only {
         let newer = tokio::task::spawn_blocking(update::newer).await??;
         match newer {
-            None => println!("Kickstand {} on this PC is the latest", update::VERSION),
+            None => out.note(format!("Kickstand {} on this PC is the latest", update::VERSION)),
             Some(release) if check => {
-                println!("Kickstand {} is out (this PC has {}): run `kickstand update`. What's new: {}", release.version, update::VERSION, release.page)
+                pc_latest = Some(release.version.to_string());
+                out.note(format!("Kickstand {} is out (this PC has {}): run `kickstand update`. What's new: {}", release.version, update::VERSION, release.page))
             }
             Some(release) => {
-                println!("updating this PC from {} to {}…", update::VERSION, release.version);
+                // Said straight away: the new copy finishes the job and prints its own result.
+                let say = |line: String| if out.json() { eprintln!("{line}") } else { println!("{line}") };
+                say(format!("updating this PC from {} to {}…", update::VERSION, release.version));
                 let exe = tokio::task::spawn_blocking(move || update::update_pc(&release)).await??;
-                println!("updated {}", exe.display());
+                say(format!("updated {}", exe.display()));
                 // The new copy puts its own version on the Switch.
                 let mut next = std::process::Command::new(exe);
                 next.args(["update", "--switch"]);
+                if out.json() {
+                    next.arg("--json");
+                }
                 if let Some(host) = &host {
                     next.args(["--host", host]);
                 }
@@ -987,24 +1190,27 @@ async fn update(host: Option<String>, port: u16, check: bool, switch_only: bool)
             }
         }
     }
+    let pc = json!({ "version": update::VERSION, "latest": pc_latest.clone().unwrap_or_else(|| update::VERSION.to_string()) });
     let Ok(host) = config::host(host) else {
-        println!("no Switch paired, so only this PC was checked");
+        out.note("no Switch paired, so only this PC was checked");
+        out.done(json!({ "pc": pc, "switch": null }), String::new);
         return Ok(());
     };
     let client = Client::new(format!("{host}:{port}"), config::load_token()?);
     let info = client.hello().await.with_context(|| format!("reaching the Switch at {host}"))?;
-    if !update::switch_behind(&info.version) {
-        println!("the Switch has Kickstand {} already", info.version);
-        return Ok(());
+    let behind = update::switch_behind(&info.version);
+    if !behind {
+        out.note(format!("the Switch has Kickstand {} already", info.version));
+    } else if check {
+        out.note(format!("the Switch has Kickstand {}: `kickstand update --switch` puts {} on it", info.version, update::VERSION));
+    } else {
+        out.note(format!("updating the Switch from {} to {} (its background service restarts, about 15 s)…", info.version, update::VERSION));
+        for note in update::update_switch(&client).await? {
+            out.note(note);
+        }
     }
-    if check {
-        println!("the Switch has Kickstand {}: `kickstand update --switch` puts {} on it", info.version, update::VERSION);
-        return Ok(());
-    }
-    println!("updating the Switch from {} to {} (its background service restarts, about 15 s)…", info.version, update::VERSION);
-    for note in update::update_switch(&client).await? {
-        println!("{note}");
-    }
+    let now = if behind && !check { update::VERSION.to_string() } else { info.version.clone() };
+    out.done(json!({ "pc": pc, "switch": { "host": host, "was": info.version, "version": now, "behind": behind && check } }), String::new);
     Ok(())
 }
 
@@ -1020,13 +1226,19 @@ fn mb_per_s(bytes: u64, secs: f64) -> String {
     format!("{:.2} MB/s", bytes as f64 / 1e6 / secs.max(1e-6))
 }
 
-/// Saves a run's screenshot (a crash or hang) to `--out`, if both exist.
-fn save_screenshot(out: Option<PathBuf>, jpeg: Option<Vec<u8>>) -> Result<()> {
-    if let (Some(out), Some(jpeg)) = (out, jpeg) {
-        std::fs::write(&out, jpeg)?;
-        println!("screenshot: {}", out.display());
+/// Saves a run's screenshot (a crash or hang) to `--out`, if both exist; where it went.
+fn save_screenshot(out: Option<PathBuf>, jpeg: Option<Vec<u8>>) -> Result<Option<PathBuf>> {
+    let (Some(out), Some(jpeg)) = (out, jpeg) else { return Ok(None) };
+    std::fs::write(&out, jpeg)?;
+    Ok(Some(out))
+}
+
+/// A report's text, with where its screenshot was saved.
+fn with_screenshot(text: &str, saved: &Option<PathBuf>) -> String {
+    match saved {
+        Some(path) => format!("{text}\nscreenshot: {}", path.display()),
+        None => text.to_string(),
     }
-    Ok(())
 }
 
 /// The CLI uses `path` outside the folders agents may use freely (access.rs) only when a person typed
