@@ -29,12 +29,17 @@ pub fn host(arg: Option<String>) -> Result<String> {
     }
 }
 
-/// Makes `host` the console to use (`~/.config/kickstand/host`).
-pub fn save_host(host: &str) -> Result<()> {
+/// Writes `text` to the config file `name`, making the folder first.
+fn save(name: &str, text: &str) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("host"), format!("{host}\n"))?;
+    std::fs::write(dir.join(name), text)?;
     Ok(())
+}
+
+/// Makes `host` the console to use (`~/.config/kickstand/host`).
+pub fn save_host(host: &str) -> Result<()> {
+    save("host", &format!("{host}\n"))
 }
 
 /// Stops using `host` if it's the console in use (after unpairing it). Returns whether it was.
@@ -89,10 +94,7 @@ pub fn host_title() -> Option<u64> {
 }
 
 pub fn save_host_title(id: u64, name: &str) -> Result<()> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("host-title"), format!("{id:016x} {name}\n"))?;
-    Ok(())
+    save("host-title", &format!("{id:016x} {name}\n"))
 }
 
 /// The desktop app's theme when it was set by hand (dark: `Some(true)`); `None` follows the system.
@@ -105,16 +107,11 @@ pub fn dark_theme() -> Option<bool> {
 }
 
 pub fn save_dark_theme(dark: Option<bool>) -> Result<()> {
-    let dir = config_dir()?;
-    let path = dir.join("theme");
     match dark {
-        Some(dark) => {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(path, if dark { "dark\n" } else { "light\n" })?;
-        }
+        Some(dark) => save("theme", if dark { "dark\n" } else { "light\n" }),
         None => {
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(config_dir()?.join("theme"));
+            Ok(())
         }
     }
-    Ok(())
 }
