@@ -326,7 +326,7 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
             let chosen = app.tab == maker;
             let color = if chosen { INK } else { MUTED };
             let galley = ui.painter().layout_job(theme::job(maker.name(), if chosen { Face::Bold } else { Face::Semi }, 16.0, color, 0.0));
-            let icon = 20.0;
+            let icon = super::brands::SIZE;
             let size = Vec2::new(icon + 8.0 + galley.size().x, 40.0);
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -596,7 +596,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         ui.horizontal(|ui| {
             ui.set_min_height(32.0);
             ui.spacing_mut().item_spacing.x = 10.0;
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(super::brands::SIZE), Sense::hover());
             app.brands.paint(ui.painter(), rect, which.maker());
             ui.label(theme::job(which.name(), Face::Semi, 17.0, INK, 0.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
