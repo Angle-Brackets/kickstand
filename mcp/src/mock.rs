@@ -328,12 +328,15 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
             Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
-            Request::Press { .. } | Request::Input { .. } | Request::Hold { .. } | Request::HblOverride { .. } => Response::Ok,
+            Request::Press { .. }
+            | Request::Input { .. }
+            | Request::Hold { .. }
+            | Request::HblOverride { .. }
+            | Request::MemoryTarget { .. }
+            | Request::IndicatorPosition { .. } => Response::Ok,
             Request::FatalReports => Response::Dir { entries: Vec::new(), truncated: false },
-            Request::AppStatus | Request::CloseApp => Response::App(None),
+            Request::AppStatus | Request::CloseApp | Request::AppletStatus | Request::CloseApplet => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
-            Request::AppletStatus | Request::CloseApplet => Response::App(None),
-            Request::MemoryTarget { .. } => Response::Ok,
             Request::Status => Response::Status(proto::ConsoleStatus {
                 uptime_ms: 1,
                 unlocking_ms: None,
@@ -378,7 +381,6 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 }
                 None => Response::error(ErrorKind::System, "unmapped"),
             },
-            Request::IndicatorPosition { .. } => Response::Ok,
             Request::Screenshot | Request::ScreenshotRead { .. } => {
                 Response::error(ErrorKind::Unsupported, "the mock has no screen")
             }
@@ -388,11 +390,8 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 process_used: 1 << 20,
                 process_total: 4 << 20,
             }),
-            Request::RebootToHekate { .. } => {
-                stream.write_all(&proto::encode(&Response::Ok)?).await?;
-                return Ok(());
-            }
-            Request::Exit | Request::Handover => {
+            // The daemon accepts these, then goes away.
+            Request::RebootToHekate { .. } | Request::Exit | Request::Handover => {
                 stream.write_all(&proto::encode(&Response::Ok)?).await?;
                 return Ok(());
             }
