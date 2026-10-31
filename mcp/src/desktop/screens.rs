@@ -9,7 +9,7 @@ use proto::DaemonKind;
 use super::theme::{self, BODY, FIELD, Face, INK, Kind, MUTED, RED, RULE, RULE_LIGHT};
 use super::worker::{Cmd, Live, Model, Pairing, Reach, capitalize};
 use super::{Kickstand, Screen, art, columns};
-use crate::link::{App, State};
+use crate::link::{Maker, State};
 
 /// The page's padding.
 fn page(ui: &mut Ui, top: f32, add: impl FnOnce(&mut Ui)) {
@@ -297,10 +297,12 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 return;
             }
             ui.spacing_mut().item_spacing.y = 0.0;
-            theme::label(ui, "AI APPS ON THIS COMPUTER", true, 13.0, INK);
-            ui.add_space(12.0);
-            theme::rule(ui, 1.5, INK);
-            linked_rows(app, ui, model, true);
+            tabs(app, ui, model);
+            let tab = app.tab;
+            app_rows(app, ui, model, tab);
+            if tab == Maker::Custom {
+                any_app(ui, model);
+            }
             notice(ui, model);
             ui.add_space(28.0);
             let any = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
@@ -315,22 +317,55 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     });
 }
 
-/// One row per AI app: linked, a Link button, or not installed.
-fn linked_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, large: bool) {
-    for (which, state) in &model.links {
-        ui.add_space(if large { 14.0 } else { 10.0 });
+/// Claude, Gemini, OpenAI, Custom: each with its mark, the chosen one underlined in red; a dot marks a tab
+/// with something linked.
+fn tabs(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 22.0;
+        for maker in Maker::ALL {
+            let chosen = app.tab == maker;
+            let color = if chosen { INK } else { MUTED };
+            let galley = ui.painter().layout_job(theme::job(maker.name(), if chosen { Face::Bold } else { Face::Semi }, 16.0, color, 0.0));
+            let icon = 20.0;
+            let size = Vec2::new(icon + 8.0 + galley.size().x, 40.0);
+            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let color = if response.hovered() { INK } else { color };
+            let mid = rect.top() + 14.0;
+            app.brands.paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + icon / 2.0, mid), Vec2::splat(icon)), maker);
+            ui.painter().galley(egui::pos2(rect.left() + icon + 8.0, mid - galley.size().y / 2.0), galley, color);
+            let linked = model.links.iter().any(|(a, s)| a.maker() == maker && matches!(s, State::Linked { .. }));
+            if linked {
+                ui.painter().circle_filled(egui::pos2(rect.right() + 6.0, mid - 7.0), 3.0, RED);
+            }
+            if chosen {
+                ui.painter().rect_filled(Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom()), 0.0, RED);
+            }
+            if response.clicked() {
+                app.tab = maker;
+            }
+        }
+    });
+    theme::rule(ui, 1.5, INK);
+}
+
+/// One row per app of `maker`: linked (with Remove), a Link button, or not installed.
+fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
+    for (which, state) in model.links.iter().filter(|(a, _)| a.maker() == maker) {
+        ui.add_space(14.0);
         ui.horizontal(|ui| {
             ui.set_min_height(44.0);
-            ui.label(theme::job(which.name(), Face::Semi, if large { 19.0 } else { 17.0 }, INK, 0.0));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(theme::job(which.name(), Face::Semi, 19.0, INK, 0.0));
+                ui.label(theme::job(which.detail(), Face::Mono, 12.0, MUTED, 0.0));
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match state {
                 State::Linked { command } => {
-                    if large && theme::link(ui, "Remove", 13.0, Face::Mono).clicked() {
+                    if theme::link(ui, "Remove", 13.0, Face::Mono).clicked() {
                         app.send(Cmd::Unlink(*which));
                     }
-                    let response = theme::label(ui, "LINKED", false, 13.0, INK);
-                    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 11.0), Sense::hover());
-                    art::check(ui.painter(), rect.min, INK);
-                    response.on_hover_text(format!("Runs {command}"));
+                    linked_mark(ui, command);
                 }
                 State::NotLinked => {
                     if theme::button(ui, "Link", Kind::Primary, false, true).clicked() {
@@ -338,15 +373,50 @@ fn linked_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, large: bool) {
                     }
                 }
                 State::Missing => {
-                    theme::label(ui, "NOT INSTALLED", false, 13.0, MUTED).on_hover_text(match which {
-                        App::ClaudeCode => "Install Claude Code, then come back",
-                        App::ClaudeDesktop => "Install Claude Desktop, then come back",
-                    });
+                    theme::label(ui, "NOT INSTALLED", false, 13.0, MUTED).on_hover_text(format!("Install {}, then come back", which.name()));
                 }
             });
         });
-        ui.add_space(if large { 14.0 } else { 10.0 });
+        ui.add_space(14.0);
         theme::rule(ui, 1.0, RULE);
+    }
+}
+
+/// ✓ LINKED, naming the command it runs on hover. (Right to left.)
+fn linked_mark(ui: &mut Ui, command: &str) {
+    let response = theme::label(ui, "LINKED", false, 13.0, INK);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 11.0), Sense::hover());
+    art::check(ui.painter(), rect.min, INK);
+    response.on_hover_text(format!("Runs {command}"));
+}
+
+/// The Custom tab's part for apps Kickstand doesn't know: the command, and the JSON most of them take.
+fn any_app(ui: &mut Ui, model: &mut Model) {
+    let Ok((command, args)) = crate::link::server_command() else { return };
+    let line = std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+    let config = serde_json::json!({ "mcpServers": { crate::link::NAME: { "command": command, "args": args } } });
+    // Shown on one line to keep the window still; copied laid out.
+    let (shown, json) = (config.to_string(), serde_json::to_string_pretty(&config).unwrap_or_default());
+    ui.add_space(28.0);
+    theme::label(ui, "ANY OTHER MCP APP", true, 13.0, INK);
+    ui.add_space(10.0);
+    theme::text(ui, "Cursor, VS Code, Jan, or a local model's chat app: add a server that runs this command (stdio).", Face::Regular, 15.0, BODY);
+    for (shown, copied, what) in [(line.clone(), line, "the command"), (shown, json, "the JSON")] {
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if theme::button(ui, "Copy", Kind::Outline, false, true).clicked() {
+                ui.ctx().copy_text(copied);
+                model.notice = Some((format!("Copied {what}"), false));
+            }
+            let frame = egui::Frame::new().fill(theme::FIELD).stroke(Stroke::new(1.0, RULE)).inner_margin(Margin::symmetric(12, 10));
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width() - 12.0);
+                    ui.add(egui::Label::new(theme::job(&shown, Face::Mono, 12.5, INK, 0.0)).wrap());
+                });
+            });
+        });
     }
 }
 
@@ -502,13 +572,42 @@ fn duration(ms: u64) -> String {
 }
 
 /// The right column: linked apps, the console's details and the buttons.
-fn console(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
+fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 0.0;
-    theme::label(ui, "LINKED TO", true, 13.0, INK);
-    ui.add_space(12.0);
+    let mut go_link = false;
+    ui.horizontal(|ui| {
+        theme::label(ui, "LINKED TO", true, 13.0, INK);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            go_link = theme::link(ui, "Link an app", 13.0, Face::Mono).clicked();
+        });
+    });
+    ui.add_space(10.0);
     theme::rule(ui, 1.5, INK);
-    linked_rows(app, ui, model, false);
-
+    let mut linked = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).peekable();
+    if linked.peek().is_none() {
+        ui.add_space(14.0);
+        theme::text(ui, "No AI app yet.", Face::Regular, 16.0, BODY);
+        ui.add_space(14.0);
+        theme::rule(ui, 1.0, RULE);
+    }
+    // Compact, so several linked apps still fit above the buttons.
+    for (which, state) in linked {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.set_min_height(32.0);
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            app.brands.paint(ui.painter(), rect, which.maker());
+            ui.label(theme::job(which.name(), Face::Semi, 17.0, INK, 0.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let State::Linked { command } = state {
+                    linked_mark(ui, command);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        theme::rule(ui, 1.0, RULE);
+    }
     ui.add_space(34.0);
     theme::label(ui, "THIS SWITCH", true, 13.0, INK);
     ui.add_space(12.0);
@@ -566,6 +665,9 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
         }
     });
     notice(ui, model);
+    if go_link {
+        app.go(model, Screen::Link);
+    }
 }
 
 pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context) {

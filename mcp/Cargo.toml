@@ -23,3 +23,4 @@ object = { version = "0.37", default-features = false, features = ["read", "std"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # The desktop app (`kickstand` with no command, from a terminal or a launcher).
 eframe = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "clipboard", "default_fonts"] }
+toml_edit = "0.23"

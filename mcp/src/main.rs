@@ -53,8 +53,8 @@ enum Command {
     Desktop,
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
-    /// Add Kickstand to Claude Code or Claude Desktop ("code" or "desktop"); without one, show where it's
-    /// linked.
+    /// Add Kickstand to an AI app: code (Claude Code), desktop (Claude Desktop), gemini (Gemini CLI),
+    /// antigravity, codex or lmstudio. Without one, show where it's linked.
     Link {
         app: Option<String>,
         /// Take it out instead.
@@ -432,14 +432,13 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                         link::State::NotLinked => "not linked".to_string(),
                         link::State::Linked { command } => format!("linked ({command})"),
                     };
-                    println!("{}: {state}", app.name());
+                    println!("{} ({}): {state}", app.name(), app.slug());
                 }
                 return Ok(());
             };
-            let app = match app.to_ascii_lowercase().as_str() {
-                "code" | "claude-code" => link::App::ClaudeCode,
-                "desktop" | "claude-desktop" => link::App::ClaudeDesktop,
-                other => anyhow::bail!("{other:?}: say \"code\" (Claude Code) or \"desktop\" (Claude Desktop)"),
+            let Some(app) = link::App::from_slug(&app) else {
+                let names = link::App::ALL.map(|a| format!("{} ({})", a.slug(), a.name())).join(", ");
+                anyhow::bail!("{app:?} isn't one Kickstand knows: {names}. Any other MCP app can run `kickstand serve` itself");
             };
             println!("{}", if remove { link::unlink(app)? } else { link::link(app)? });
             return Ok(());

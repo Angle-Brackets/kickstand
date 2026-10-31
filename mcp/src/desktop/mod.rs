@@ -4,6 +4,7 @@
 //! [`worker::Cmd`]s.
 
 mod art;
+mod brands;
 mod screens;
 mod theme;
 mod worker;
@@ -58,14 +59,25 @@ pub struct Kickstand {
     /// "Enter its address" is open, and what's typed in it.
     address: Option<String>,
     confirm_reboot: bool,
+    /// The Link screen's tab.
+    tab: crate::link::Maker,
+    brands: brands::Brands,
 }
 
 impl Kickstand {
     fn new(ctx: &egui::Context) -> Self {
         theme::install(ctx);
         let (model, tx) = worker::spawn(ctx.clone());
-        let screen = if model.lock().unwrap().host.is_some() { Screen::Home } else { Screen::Find };
-        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false }
+        let (screen, tab) = {
+            let model = model.lock().unwrap();
+            let screen = if model.host.is_some() { Screen::Home } else { Screen::Find };
+            // The tab of an app that's linked, else of one that's installed, else Claude's.
+            let linked = model.links.iter().find(|(_, s)| matches!(s, crate::link::State::Linked { .. }));
+            let installed = || model.links.iter().find(|(_, s)| !matches!(s, crate::link::State::Missing));
+            (screen, linked.or_else(installed).map_or(crate::link::Maker::Claude, |(app, _)| app.maker()))
+        };
+        let brands = brands::Brands::load(ctx);
+        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, brands }
     }
 
     fn send(&self, cmd: Cmd) {
