@@ -26,7 +26,7 @@ pub struct Found {
 }
 
 impl Found {
-    /// "Ankit's Switch (192.168.86.191)".
+    /// "Living Room Switch (192.168.1.20)".
     pub fn describe(&self) -> String {
         let name = if self.announce.nickname.is_empty() { "Switch" } else { &self.announce.nickname };
         format!("{name} ({})", self.addr.ip())

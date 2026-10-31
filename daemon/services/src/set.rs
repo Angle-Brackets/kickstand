@@ -31,7 +31,7 @@ impl service::IService for SetSysService {
     }
 }
 
-/// The console's nickname ("Ankit's Switch").
+/// The console's nickname ("Living Room Switch").
 pub fn nickname() -> Result<String> {
     let srv = service::new_service_object::<SetSysService>()?;
     let mut buf = [0u8; 0x80];

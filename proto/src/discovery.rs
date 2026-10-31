@@ -39,7 +39,7 @@ pub struct Announce {
     pub kind: DaemonKind,
     /// The TCP port to connect to.
     pub port: u16,
-    /// The name set in System Settings ("Ankit's Switch"), empty if unknown.
+    /// The name set in System Settings ("Living Room Switch"), empty if unknown.
     pub nickname: String,
     /// The console is showing a pairing code ([`crate::Request::Pair`] is accepted).
     pub pairing: bool,
