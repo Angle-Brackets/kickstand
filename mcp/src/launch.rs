@@ -37,6 +37,8 @@ const AFTER_CLOSE: Duration = Duration::from_millis(1500);
 const PROCESS_WAIT: Duration = Duration::from_secs(5);
 /// How long the Album gets to exit after HOME.
 const EXIT_WAIT: Duration = Duration::from_secs(4);
+/// How long the Album gets to show up after A.
+const ALBUM_WAIT: Duration = Duration::from_secs(8);
 
 pub struct Opened {
     /// The title hbmenu runs in place of, in full-memory mode.
@@ -59,11 +61,11 @@ pub enum Mode {
 impl Mode {
     /// `name`, or `default` if none was given.
     pub fn parse(name: Option<&str>, default: Mode) -> Result<Self> {
-        let Some(name) = name else { return Ok(default) };
         match name {
-            "applet" => Ok(Mode::Applet),
-            "full" => Ok(Mode::Full),
-            other => bail!("mode is \"applet\" or \"full\", not {other:?}"),
+            None => Ok(default),
+            Some("applet") => Ok(Mode::Applet),
+            Some("full") => Ok(Mode::Full),
+            Some(other) => bail!("mode is \"applet\" or \"full\", not {other:?}"),
         }
     }
 }
@@ -84,9 +86,6 @@ pub async fn open_hbmenu(client: &Client, mode: Mode) -> Result<Opened> {
         Mode::Full => open_full(client).await,
     }
 }
-
-/// How long the Album gets to show up after A.
-const ALBUM_WAIT: Duration = Duration::from_secs(8);
 
 /// `at_home`: the Album was just closed, which leaves the home menu showing with its first tile selected.
 /// HOME then would resume a suspended game instead.
@@ -293,6 +292,7 @@ async fn dismiss_dialogs(client: &Client) -> Result<()> {
     client.input(steps).await
 }
 
+/// Waits up to [`PROCESS_WAIT`] for an application process to exist; `None` if none appeared.
 async fn wait_for_app(client: &Client) -> Result<Option<App>> {
     let start = tokio::time::Instant::now();
     loop {
@@ -449,6 +449,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
                 notes.push("closed the running hbloader (hbmenu or an NRO)".into());
                 closed = true;
             }
+            // Applet mode needs to know the Album was just closed (the home menu is showing); full memory doesn't.
             let opened = match mode {
                 Mode::Applet => open_applet(client, closed).await?,
                 Mode::Full => open_full(client).await?,
