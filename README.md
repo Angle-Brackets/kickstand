@@ -67,12 +67,16 @@ cd daemon && cargo nx build --release -p kickstand-nro   # -> daemon/target/aarc
 
 1. Copy `kickstand.nro` to `/switch/kickstand/kickstand.nro` on your Switch's SD card and open it from **hbmenu**. The screen will display a 6-digit pairing code.
 2. On a PC connected to the same Wi-Fi network, run `kickstand` with no arguments to launch the desktop app.
-3. The app automatically discovers the Switch, accepts the pairing code, installs the background sysmodule, and links your AI client with one click:
+3. The app automatically discovers the Switch, accepts the pairing code, and links your AI client with one click (the background sysmodule is installed from the command line, below):
    - **Claude:** Claude Code (`code`), Claude Desktop (`desktop`)
    - **Gemini:** Gemini CLI (`gemini`), Antigravity CLI (`agy`), Antigravity IDE (`antigravity`)
    - **OpenAI:** Codex (`codex`)
    - **Custom:** LM Studio (`lmstudio`), plus ready-to-copy command and JSON snippets for any other MCP client.
 4. Once linked, the desktop window shows a live feed of connected agents and their actions on the console.
+
+To unpair, click **Unpair** beside *This Switch* in the desktop app, or run `kickstand unpair`: the Switch forgets this PC's token (other paired PCs keep working). You can also delete the PC's line from `/kickstand/token.txt` on the SD card; the daemon reads that file again on every connection, so either way takes effect at once.
+
+Discovery uses UDP port 28791 (broadcast) and the daemon listens on TCP port 28790. Both are fixed, so any PC and Switch running Kickstand find each other without setup; allow them through a firewall on the PC if discovery comes up empty.
 
 To add Kickstand to your OS application launcher (Linux & macOS):
 ```sh

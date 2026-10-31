@@ -43,6 +43,8 @@ pub struct Session {
     slot: usize,
     /// The client's address, for the log.
     who: core::net::Ipv4Addr,
+    /// The token it connected with, for [`Request::Unpair`].
+    token: Option<String>,
 }
 
 /// Something to do once the current reply has been sent.
@@ -60,7 +62,7 @@ impl Session {
     /// [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
     pub fn new(kind: DaemonKind, slot: usize, who: core::net::Ipv4Addr) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None }
+        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None, token: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -159,6 +161,7 @@ impl Session {
             Request::Resources => resources().map_or_else(|rc| system_error("reading resource limits", rc), Response::Resources),
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
+            Request::Unpair => self.unpair(),
         }
     }
 
@@ -166,14 +169,29 @@ impl Session {
         if !proto::compatible(version) {
             return too_old(version);
         }
-        if !crate::tokens::any() {
-            let msg = format!("this console isn't paired with any PC: open Kickstand from hbmenu on it and pair, or put a token in {}", path::TOKEN_PATH);
-            return Response::error(ErrorKind::Unauthorized, msg);
+        match crate::tokens::check(token) {
+            Err(()) => {
+                let msg = format!("this console isn't paired with any PC: open Kickstand from hbmenu on it and pair, or put a token in {}", path::TOKEN_PATH);
+                Response::error(ErrorKind::Unauthorized, msg)
+            }
+            Ok(false) => Response::error(ErrorKind::Unauthorized, "wrong token (pair this PC again)"),
+            Ok(true) => self.welcome(token),
         }
-        if !crate::tokens::accepts(token) {
-            return Response::error(ErrorKind::Unauthorized, "wrong token (pair this PC again)");
+    }
+
+    fn unpair(&mut self) -> Response {
+        let Some(token) = self.token.take() else { return Response::error(ErrorKind::Unauthorized, "send Hello with the token first") };
+        match crate::tokens::remove(&token) {
+            Ok(()) => {
+                crate::log!("{} unpaired", self.who);
+                self.authed = false;
+                Response::Ok
+            }
+            Err(e) => {
+                self.token = Some(token);
+                Response::Error(e)
+            }
         }
-        self.welcome()
     }
 
     fn pair(&mut self, version: u32, code: &str, token: &str) -> Response {
@@ -182,13 +200,14 @@ impl Session {
         }
         let who = format!("{}", self.who);
         match crate::pairing::pair(code, token, &who) {
-            Ok(()) => self.welcome(),
+            Ok(()) => self.welcome(token),
             Err(e) => Response::Error(e),
         }
     }
 
-    fn welcome(&mut self) -> Response {
+    fn welcome(&mut self, token: &str) -> Response {
         self.authed = true;
+        self.token = Some(String::from(token));
         Response::Hello { version: PROTOCOL_VERSION, daemon_version: String::from(crate::VERSION), kind: self.kind }
     }
 

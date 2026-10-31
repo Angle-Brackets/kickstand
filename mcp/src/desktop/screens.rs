@@ -8,7 +8,7 @@ use proto::DaemonKind;
 
 use super::theme::{self, body, field, Face, ink, Kind, muted, RED, rule, rule_light};
 use super::worker::{Cmd, Live, Model, Pairing, Reach, capitalize};
-use super::{Kickstand, Screen, art, columns};
+use super::{Confirm, Kickstand, Screen, art, columns};
 use crate::link::{App, Maker, State};
 
 /// The page's padding.
@@ -735,7 +735,15 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Only down: the lane is wider than the column, and the sections below keep the column's width.
     ui.advance_cursor_after_rect(Rect::from_min_size(lane.min_rect().min, Vec2::new(width, lane.min_rect().height())));
     ui.add_space(34.0);
-    theme::label(ui, "THIS SWITCH", true, 13.0, ink());
+    ui.horizontal(|ui| {
+        theme::label(ui, "THIS SWITCH", true, 13.0, ink());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let unpair = theme::link(ui, "Unpair", 13.0, Face::Mono).on_hover_text("Make this Switch forget this computer");
+            if unpair.clicked() && model.busy.is_none() {
+                app.ask(Confirm::Unpair);
+            }
+        });
+    });
     ui.add_space(12.0);
     theme::hrule(ui, 1.5, ink());
     let live = match &model.reach {
@@ -789,7 +797,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             app.send(Cmd::KeepAwake { minutes: 60 });
         }
         if theme::button(ui, "Restart into hekate", Kind::Dashed, false, ready).clicked() {
-            app.confirm_reboot = true;
+            app.ask(Confirm::Reboot);
         }
     });
     notice(ui, model);
@@ -798,39 +806,50 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 }
 
-/// `open` runs from 0 to 1 as it opens and back as it closes; it only takes clicks while open.
-pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
+/// The open confirmation ([`Kickstand::confirm`]). `open` runs from 0 to 1 as it opens and back as it
+/// closes; it only takes clicks while open.
+pub fn confirm(app: &mut Kickstand, ctx: &egui::Context, open: f32, name: &str) {
+    let (title, text, action, cmd) = match app.confirm {
+        Confirm::Reboot => (
+            "Restart into hekate?".to_string(),
+            "The Switch restarts into hekate's menu. Whatever is running closes without saving. To come back, boot Atmosphère from hekate.".to_string(),
+            "Restart",
+            Cmd::Reboot,
+        ),
+        Confirm::Unpair => (
+            "Unpair this computer?".to_string(),
+            format!(
+                "{name} forgets this computer. Agents here can't use it until you pair again with the code on its screen. Other computers paired with it keep working."
+            ),
+            "Unpair",
+            Cmd::Unpair,
+        ),
+    };
     // The frame fades with what's in it.
     let frame = egui::Frame::new().fill(theme::paper().gamma_multiply(open)).stroke(Stroke::new(1.5, ink().gamma_multiply(open))).inner_margin(Margin::same(28));
-    let id = egui::Id::unique("reboot");
+    let id = egui::Id::unique("confirm");
     // Rises a little as it fades in.
     let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(theme::scrim().gamma_multiply(open)).show(ctx, |ui| {
         ui.multiply_opacity(open);
         ui.set_max_width(ui.available_width().min(440.0));
         ui.spacing_mut().item_spacing.y = 16.0;
-        theme::heading(ui, "Restart into hekate?", 30.0);
-        theme::text(
-            ui,
-            "The Switch restarts into hekate's menu. Whatever is running closes without saving. To come back, boot Atmosphère from hekate.",
-            Face::Regular,
-            16.0,
-            body(),
-        );
+        theme::heading(ui, &title, 30.0);
+        theme::text(ui, &text, Face::Regular, 16.0, body());
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
             // Not while it's closing.
-            if theme::button(ui, "Restart", Kind::Primary, true, true).clicked() && app.confirm_reboot {
-                app.send(Cmd::Reboot);
-                app.confirm_reboot = false;
+            if theme::button(ui, action, Kind::Primary, true, true).clicked() && app.confirming {
+                app.send(cmd);
+                app.confirming = false;
             }
             if theme::link(ui, "Cancel", 16.0, Face::Semi).clicked() {
-                app.confirm_reboot = false;
+                app.confirming = false;
             }
         });
     });
     if modal.should_close() {
-        app.confirm_reboot = false;
+        app.confirming = false;
     }
 }

@@ -216,6 +216,8 @@ struct Upload {
 async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()> {
     let root = console.root.as_path();
     let mut authed = false;
+    // The token this connection presented.
+    let mut session_token = None;
     let mut upload: Option<Upload> = None;
     let mut memory = mock_memory();
     loop {
@@ -240,6 +242,7 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                     Response::error(ErrorKind::Unauthorized, "wrong token")
                 } else {
                     authed = true;
+                    session_token = Some(t);
                     Response::Hello { version: PROTOCOL_VERSION, daemon_version: "mock".into(), kind: DaemonKind::Nro }
                 }
             }
@@ -251,9 +254,10 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Some(_) => {
                     let mut tokens = console.tokens.lock().unwrap();
                     if !tokens.contains(&token) {
-                        tokens.push(token);
+                        tokens.push(token.clone());
                     }
                     authed = true;
+                    session_token = Some(token);
                     Response::Hello { version: PROTOCOL_VERSION, daemon_version: "mock".into(), kind: DaemonKind::Nro }
                 }
             },
@@ -262,6 +266,12 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             Request::Agents => Response::Agents(console.agents(id)),
             Request::Introduce { app } => {
                 console.introduce(id, app);
+                Response::Ok
+            }
+            Request::Unpair => {
+                let token = session_token.take().unwrap_or_default();
+                console.tokens.lock().unwrap().retain(|t| t != &token);
+                authed = false;
                 Response::Ok
             }
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },

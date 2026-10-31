@@ -54,6 +54,13 @@ pub enum Screen {
     Home,
 }
 
+/// What a confirmation asks before doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    Reboot,
+    Unpair,
+}
+
 impl Screen {
     /// Its place in the order Find, Pair, Link, Home: a later screen comes in from the right.
     fn order(&self) -> usize {
@@ -74,7 +81,9 @@ pub struct Kickstand {
     code: String,
     /// "Enter its address" is open, and what's typed in it.
     address: Option<String>,
-    confirm_reboot: bool,
+    /// A confirmation is open, and which (kept while it fades out).
+    confirming: bool,
+    confirm: Confirm,
     /// The Link screen's tab.
     tab: crate::link::Maker,
     /// Which makers' groups are folded in the home screen's linked apps (by [`crate::link::Maker::index`]).
@@ -123,7 +132,8 @@ impl Kickstand {
             screen,
             code: String::new(),
             address: None,
-            confirm_reboot: false,
+            confirming: false,
+            confirm: Confirm::Reboot,
             tab,
             folded: [false; 4],
             dark: crate::config::dark_theme(),
@@ -144,6 +154,12 @@ impl Kickstand {
 
     fn send(&self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// Opens the confirmation for `what`.
+    fn ask(&mut self, what: Confirm) {
+        self.confirm = what;
+        self.confirming = true;
     }
 
     /// Shows `screen`. (`model` is the locked model the frame is drawn from.)
@@ -329,6 +345,10 @@ impl eframe::App for Kickstand {
             let linked = model.links.iter().any(|(_, s)| matches!(s, crate::link::State::Linked { .. }));
             self.screen = if linked { Screen::Home } else { Screen::Link };
         }
+        if model.unpaired {
+            model.unpaired = false;
+            self.screen = Screen::Find;
+        }
         // Before anything is drawn, so the whole frame has one palette. A change floods in from the top
         // (see `flood`), except as the window opens.
         let dark = self.dark.unwrap_or(ui.ctx().system_theme() == Some(egui::Theme::Dark));
@@ -399,11 +419,12 @@ impl eframe::App for Kickstand {
                 }
             });
         });
+        let name = model.name.clone().unwrap_or_else(|| "The Switch".into());
         drop(model);
         // Shown while it fades out too.
-        let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-reboot"), self.confirm_reboot, OPEN_S, egui::emath::easing::cubic_out);
+        let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-open"), self.confirming, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {
-            screens::confirm_reboot(self, ui.ctx(), open);
+            screens::confirm(self, ui.ctx(), open, &name);
         }
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("overview-open"), self.overview, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {

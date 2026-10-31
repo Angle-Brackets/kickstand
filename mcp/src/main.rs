@@ -83,6 +83,9 @@ enum Command {
     /// Pair with the Switch showing CODE (open Kickstand from hbmenu on it to see the code), and use it from
     /// now on. Finds it on the network unless --host is given.
     Pair { code: String },
+    /// Make the Switch forget this PC: agents here can't use it until you pair again with the code on its
+    /// screen. Other PCs paired with it keep working.
+    Unpair,
     /// Check the daemon answers.
     Ping,
     /// List a directory on the SD card.
@@ -526,6 +529,11 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             }
             let service = tools::Tools::new(client).serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
+        }
+        Command::Unpair => {
+            client.unpair().await?;
+            let forgot = config::forget_host(&host)?;
+            println!("the Switch at {host} has forgotten this PC{}", if forgot { "; this PC no longer uses it" } else { "" });
         }
         Command::Ping => {
             let info = client.hello().await?;

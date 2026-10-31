@@ -540,6 +540,21 @@ impl Client {
         expect(resp?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
+    /// Makes the console forget this PC's token ([`Request::Unpair`]): it can't connect again until it pairs
+    /// again with the code on the console's screen.
+    pub async fn unpair(&self) -> Result<()> {
+        let resp = self.request(Request::Unpair).await;
+        *self.conn.lock().await = None;
+        match resp? {
+            Response::Ok => Ok(()),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Err(anyhow!(
+                "this Switch's Kickstand is too old to unpair (it needs protocol 25): update it, or take this PC's line out of {} on its SD card",
+                proto::path::TOKEN_PATH
+            )),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Sends one request, reconnecting and retrying once if the connection had gone stale.
     async fn request(&self, req: Request) -> Result<Response> {
         let mut guard = self.conn.lock().await;

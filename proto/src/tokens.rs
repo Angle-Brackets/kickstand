@@ -45,6 +45,30 @@ pub fn add(text: &str, token: &str, who: &str) -> Result<Option<String>, AddErro
     Ok(Some(out))
 }
 
+/// `text` without `token`, nor the `# paired:` comment [`add`] put above it, or `None` if it isn't there.
+/// The other lines are kept as they are.
+pub fn remove(text: &str, token: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut drop = alloc::vec![false; lines.len()];
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == token {
+            drop[i] = true;
+            if i > 0 && lines[i - 1].trim_start().starts_with("# paired:") {
+                drop[i - 1] = true;
+            }
+        }
+    }
+    if !drop.contains(&true) {
+        return None;
+    }
+    let mut out = String::new();
+    for (line, _) in lines.iter().zip(&drop).filter(|(_, d)| !**d) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// Compares in time independent of where the first difference is.
 pub fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -72,6 +96,18 @@ mod tests {
         assert_eq!(add("", "short", "x"), Err(AddError::Invalid));
         assert_eq!(add("", &alloc::format!("{A}\nevil"), "x"), Err(AddError::Invalid));
         assert_eq!(add("", A, "a\nb").unwrap().unwrap(), alloc::format!("# paired: ab\n{A}\n"));
+    }
+
+    #[test]
+    fn removes_a_token_and_its_comment() {
+        let file = alloc::format!("# mine\n{A}\n# paired: 192.168.1.5\n{B}\n");
+        assert_eq!(remove(&file, B).unwrap(), alloc::format!("# mine\n{A}\n"));
+        // A token of the user's own keeps the comment above it, which isn't one of ours.
+        assert_eq!(remove(&file, A).unwrap(), alloc::format!("# mine\n# paired: 192.168.1.5\n{B}\n"));
+        assert_eq!(remove(&file, "0123"), None);
+        assert_eq!(remove(&alloc::format!("  {A}  "), A).unwrap(), "");
+        let added = add("", A, "x").unwrap().unwrap();
+        assert_eq!(parse(&remove(&added, A).unwrap()), [] as [&str; 0]);
     }
 
     #[test]

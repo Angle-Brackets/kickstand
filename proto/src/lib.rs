@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -245,6 +245,11 @@ pub enum Request {
     /// the app called itself in MCP's handshake. Cut to [`MAX_APP_NAME`] bytes. Passive like
     /// [`Request::Activity`]. Answers [`Response::Ok`].
     Introduce { app: String },
+    /// (25) Forgets the token this connection presented: it comes out of the console's token file (with
+    /// its `# paired:` comment), so the PC has to pair again with the code on the console's screen. A token
+    /// given on the NRO's command line can't be forgotten this way. Answers [`Response::Ok`]; the
+    /// connection isn't authenticated after it.
+    Unpair,
 }
 
 /// Longest lease of one [`Request::Hold`].
@@ -255,6 +260,7 @@ impl Request {
     pub fn describe(&self) -> &'static str {
         match self {
             Request::Hello { .. } | Request::Pair { .. } => "connecting",
+            Request::Unpair => "unpairing a computer",
             Request::Ping { .. }
             | Request::Status
             | Request::AppStatus
@@ -816,6 +822,7 @@ mod tests {
                 Request::Hold { .. } => 39,
                 Request::Agents => 40,
                 Request::Introduce { .. } => 41,
+                Request::Unpair => 42,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -887,6 +894,7 @@ mod tests {
             Request::Hold { step: InputStep::default() },
             Request::Agents,
             Request::Introduce { app: s() },
+            Request::Unpair,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");

@@ -35,6 +35,8 @@ pub enum Cmd {
     Screenshot,
     KeepAwake { minutes: u32 },
     Reboot,
+    /// Make the console in use forget this PC, and stop using it.
+    Unpair,
 }
 
 #[derive(Default)]
@@ -57,6 +59,8 @@ pub struct Model {
     /// The last button's outcome: (text, is an error).
     pub notice: Option<(String, bool)>,
     pub labels: Labels,
+    /// The console in use has just been unpaired: the UI goes back to finding one.
+    pub unpaired: bool,
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
@@ -285,6 +289,7 @@ impl Worker {
                 let left = client.keep_awake(Some(minutes)).await?;
                 Ok(format!("The Switch stays awake for {} min", left.div_ceil(60)))
             }),
+            Cmd::Unpair => self.unpair().await,
             Cmd::Reboot => self.button("Restarting", |client| async move {
                 client.reboot_to_hekate(HekateTarget::Menu).await?;
                 Ok("The Switch is restarting into hekate's menu".into())
@@ -311,6 +316,32 @@ impl Worker {
                 });
             });
         });
+    }
+
+    async fn unpair(&mut self) {
+        let (Some(client), Some(host)) = (self.client.clone(), self.model.lock().unwrap().host.clone()) else { return };
+        self.update(|m| m.busy = Some("Unpairing"));
+        let result = async {
+            client.unpair().await?;
+            config::forget_host(&host)
+        }
+        .await;
+        match result {
+            Ok(_) => {
+                self.client = None;
+                self.update(|m| {
+                    m.busy = None;
+                    m.host = None;
+                    m.name = None;
+                    m.reach = Reach::Unknown;
+                    m.unpaired = true;
+                });
+            }
+            Err(e) => self.update(|m| {
+                m.busy = None;
+                m.notice = Some((format!("Couldn't unpair: {e:#}"), true));
+            }),
+        }
     }
 
     fn use_host(&mut self, host: String) {

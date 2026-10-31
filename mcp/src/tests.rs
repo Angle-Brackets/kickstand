@@ -399,6 +399,19 @@ async fn pairs_with_the_code_then_connects_with_the_token() {
 }
 
 #[tokio::test]
+async fn unpairing_shuts_out_only_this_pc() {
+    let (addr, _) = start_pairing().await;
+    let token = "fedcba9876543210fedcba9876543210";
+    Client::new(addr.clone(), token.into()).pair("123456").await.unwrap();
+    let client = Client::new(addr.clone(), token.into());
+    client.unpair().await.unwrap();
+    let err = client.ping().await.unwrap_err();
+    assert!(format!("{err:#}").contains("Unauthorized"), "{err:#}");
+    // Another PC's token still works.
+    Client::new(addr, "tok".into()).ping().await.unwrap();
+}
+
+#[tokio::test]
 async fn pairing_needs_the_screen() {
     let (client, _root) = start("tok").await;
     let err = client.pair("123456").await.unwrap_err();

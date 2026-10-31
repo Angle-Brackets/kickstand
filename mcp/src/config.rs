@@ -37,6 +37,18 @@ pub fn save_host(host: &str) -> Result<()> {
     Ok(())
 }
 
+/// Stops using `host` if it's the console in use (after unpairing it). Returns whether it was.
+pub fn forget_host(host: &str) -> Result<bool> {
+    let path = config_dir()?.join("host");
+    match std::fs::read_to_string(&path) {
+        Ok(saved) if saved.trim() == host => {
+            std::fs::remove_file(&path)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 pub fn load_token() -> Result<String> {
     if let Ok(t) = std::env::var("KICKSTAND_TOKEN")
         && !t.trim().is_empty()
