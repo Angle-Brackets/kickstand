@@ -19,6 +19,14 @@ fn page(ui: &mut Ui, top: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// A section's title in bold caps, with `right` laid out right to left at the other end of the line.
+fn section_header(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        theme::label(ui, title, true, 13.0, ink());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
+    });
+}
+
 pub fn find(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     page(ui, 56.0, |ui| {
         columns(ui, &[1.0, 1.3], &[300.0, 420.0], 56.0, |ui, column| {
@@ -45,13 +53,10 @@ pub fn find(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 
 fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.horizontal(|ui| {
-        theme::label(ui, "ON THIS NETWORK", true, 13.0, ink());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            theme::label(ui, "LOOKING", false, 13.0, muted());
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 12.0), Sense::hover());
-            art::looking(ui.painter(), rect.min, ui.input(|i| i.time));
-        });
+    section_header(ui, "ON THIS NETWORK", |ui| {
+        theme::label(ui, "LOOKING", false, 13.0, muted());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 12.0), Sense::hover());
+        art::looking(ui.painter(), rect.min, ui.input(|i| i.time));
     });
     ui.add_space(12.0);
     theme::hrule(ui, 1.5, ink());
@@ -636,12 +641,7 @@ fn duration(ms: u64) -> String {
 fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut go_link = false;
-    ui.horizontal(|ui| {
-        theme::label(ui, "LINKED TO", true, 13.0, ink());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            go_link = theme::link(ui, "Link an app", 13.0, Face::Mono).clicked();
-        });
-    });
+    section_header(ui, "LINKED TO", |ui| go_link = theme::link(ui, "Link an app", 13.0, Face::Mono).clicked());
     ui.add_space(10.0);
     theme::hrule(ui, 1.5, ink());
     let linked: Vec<_> = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).collect();
@@ -732,23 +732,20 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Only down: the lane is wider than the column, and the sections below keep the column's width.
     ui.advance_cursor_after_rect(Rect::from_min_size(lane.min_rect().min, Vec2::new(width, lane.min_rect().height())));
     ui.add_space(34.0);
-    ui.horizontal(|ui| {
-        theme::label(ui, "THIS SWITCH", true, 13.0, ink());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let unpair = theme::link(ui, "Unpair", 13.0, Face::Mono).on_hover_text("Make this Switch forget this computer");
-            if unpair.clicked() && model.busy.is_none() {
-                app.ask(Confirm::Unpair);
+    section_header(ui, "THIS SWITCH", |ui| {
+        let unpair = theme::link(ui, "Unpair", 13.0, Face::Mono).on_hover_text("Make this Switch forget this computer");
+        if unpair.clicked() && model.busy.is_none() {
+            app.ask(Confirm::Unpair);
+        }
+        if let Some(live) = model.reach.live()
+            && crate::update::switch_behind(&live.info.version)
+        {
+            ui.add_space(18.0);
+            let update = theme::link(ui, "Update", 13.0, Face::Mono).on_hover_text(format!("Put Kickstand {} on this Switch", crate::update::VERSION));
+            if update.clicked() && model.busy.is_none() {
+                app.ask(Confirm::UpdateSwitch);
             }
-            if let Some(live) = model.reach.live()
-                && crate::update::switch_behind(&live.info.version)
-            {
-                ui.add_space(18.0);
-                let update = theme::link(ui, "Update", 13.0, Face::Mono).on_hover_text(format!("Put Kickstand {} on this Switch", crate::update::VERSION));
-                if update.clicked() && model.busy.is_none() {
-                    app.ask(Confirm::UpdateSwitch);
-                }
-            }
-        });
+        }
     });
     ui.add_space(12.0);
     theme::hrule(ui, 1.5, ink());
