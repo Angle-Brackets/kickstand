@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use eframe::egui::{self, Event, Key, Margin, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use proto::DaemonKind;
 
-use super::theme::{self, BODY, FIELD, Face, INK, Kind, MUTED, RED, RULE, RULE_LIGHT};
+use super::theme::{self, body, field, Face, ink, Kind, muted, RED, rule, rule_light};
 use super::worker::{Cmd, Live, Model, Pairing, Reach, capitalize};
 use super::{Kickstand, Screen, art, columns};
 use crate::link::{App, Maker, State};
@@ -31,7 +31,7 @@ pub fn find(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                     "Open Kickstand from the Homebrew Menu on your Switch. It appears here as soon as it's on the same Wi-Fi as this computer.",
                     Face::Regular,
                     18.0,
-                    BODY,
+                    body(),
                 );
                 ui.add_space(14.0);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(260.0, 170.0), Sense::hover());
@@ -46,15 +46,15 @@ pub fn find(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 0.0;
     ui.horizontal(|ui| {
-        theme::label(ui, "ON THIS NETWORK", true, 13.0, INK);
+        theme::label(ui, "ON THIS NETWORK", true, 13.0, ink());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            theme::label(ui, "LOOKING", false, 13.0, MUTED);
+            theme::label(ui, "LOOKING", false, 13.0, muted());
             let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 12.0), Sense::hover());
             art::looking(ui.painter(), rect.min, ui.input(|i| i.time));
         });
     });
     ui.add_space(12.0);
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
 
     let paired = model.host.clone();
     for found in &model.found.clone() {
@@ -68,7 +68,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 ui.set_max_width(ui.available_width() - 130.0);
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.horizontal(|ui| {
-                    ui.label(theme::job(&name, Face::Bold, 22.0, INK, 0.0));
+                    ui.label(theme::job(&name, Face::Bold, 22.0, ink(), 0.0));
                     if found.announce.pairing {
                         theme::tag(ui, "SHOWING A CODE", false);
                     }
@@ -80,7 +80,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 if found.announce.kind == DaemonKind::Sysmodule {
                     meta.push_str(" · background service");
                 }
-                ui.add(egui::Label::new(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0)).wrap());
+                ui.add(egui::Label::new(theme::job(&meta, Face::Mono, 14.0, muted(), 0.0)).wrap());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if is_paired {
@@ -99,7 +99,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             });
         });
         ui.add_space(22.0);
-        theme::rule(ui, 1.0, RULE);
+        theme::hrule(ui, 1.0, rule());
     }
     if model.found.is_empty() {
         ui.add_space(22.0);
@@ -108,9 +108,9 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             (None, true) => "Nothing yet. Kickstand has to be open on the Switch, on the same Wi-Fi as this computer.".into(),
             (None, false) => "Looking…".into(),
         };
-        theme::text(ui, &text, Face::Regular, 16.0, BODY);
+        theme::text(ui, &text, Face::Regular, 16.0, body());
         ui.add_space(22.0);
-        theme::rule(ui, 1.0, RULE);
+        theme::hrule(ui, 1.0, rule());
     }
 
     ui.add_space(20.0);
@@ -119,16 +119,16 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     let Some(mut address) = app.address.take() else {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            theme::text(ui, "Not listed?", Face::Regular, 15.0, BODY);
+            theme::text(ui, "Not listed?", Face::Regular, 15.0, body());
             if theme::link(ui, "Enter its address", 15.0, Face::Regular).clicked() {
                 app.address = Some(String::new());
             }
-            theme::text(ui, "instead.", Face::Regular, 15.0, BODY);
+            theme::text(ui, "instead.", Face::Regular, 15.0, body());
         });
         return;
     };
     ui.multiply_opacity(shown);
-    theme::label(ui, "THE SWITCH'S IP ADDRESS", true, 13.0, INK);
+    theme::label(ui, "THE SWITCH'S IP ADDRESS", true, 13.0, ink());
     ui.add_space(10.0);
     let mut go = false;
     ui.horizontal(|ui| {
@@ -149,7 +149,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
     if !address.trim().is_empty() && parsed.is_none() {
         ui.add_space(8.0);
-        theme::text(ui, "That isn't an IP address, like 192.168.1.20.", Face::Regular, 14.0, MUTED);
+        theme::text(ui, "That isn't an IP address, like 192.168.1.20.", Face::Regular, 14.0, muted());
     }
     app.address = Some(address);
 }
@@ -176,14 +176,14 @@ pub fn pair(app: &mut Kickstand, ui: &mut Ui, model: &mut Model, addr: SocketAdd
                 let width = ui.available_width().min(460.0);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(width, width * 230.0 / 440.0), Sense::hover());
                 art::front(ui.painter(), rect, "482 913");
-                theme::label(ui, "WHERE TO LOOK: KICKSTAND ON THE SWITCH", false, 12.0, MUTED);
+                theme::label(ui, "WHERE TO LOOK: KICKSTAND ON THE SWITCH", false, 12.0, muted());
                 return;
             }
             ui.spacing_mut().item_spacing.y = 22.0;
-            theme::label(ui, &format!("{} · {}", name.to_uppercase(), addr.ip()), false, 13.0, MUTED);
+            theme::label(ui, &format!("{} · {}", name.to_uppercase(), addr.ip()), false, 13.0, muted());
             theme::heading(ui, "Type the code from your Switch", 52.0);
             ui.add_space(4.0);
-            theme::label(ui, "PAIRING CODE", true, 13.0, INK);
+            theme::label(ui, "PAIRING CODE", true, 13.0, ink());
             digit_boxes(ui, &app.code, !running);
             ui.set_max_width(ui.available_width().min(460.0));
             theme::text(
@@ -191,7 +191,7 @@ pub fn pair(app: &mut Kickstand, ui: &mut Ui, model: &mut Model, addr: SocketAdd
                 &format!("Six digits, on the Kickstand screen on your Switch. After {} wrong tries it shows a new one.", proto::PAIR_MAX_TRIES),
                 Face::Regular,
                 15.0,
-                BODY,
+                body(),
             );
             if let Pairing::Failed(error) = &model.pairing {
                 problem(ui, error);
@@ -255,19 +255,19 @@ fn digit_boxes(ui: &mut Ui, code: &str, active: bool) {
         let color = if current {
             RED
         } else if i < digits.len() {
-            INK
+            ink()
         } else {
-            RULE
+            rule()
         };
-        painter.rect_filled(cap, 0.0, FIELD);
+        painter.rect_filled(cap, 0.0, field());
         painter.rect_stroke(cap, 0.0, Stroke::new(if current { 2.5 } else { 1.5 }, color), StrokeKind::Inside);
         painter.rect_filled(Rect::from_min_max(egui::pos2(cap.left(), cap.bottom() - 6.0 * s), cap.max), 0.0, color);
         let face = cap.with_max_y(cap.bottom() - 6.0 * s);
         if let Some(d) = digits.get(i) {
-            painter.text(face.center(), egui::Align2::CENTER_CENTER, d, Face::MonoSemi.size(40.0 * s), INK);
+            painter.text(face.center(), egui::Align2::CENTER_CENTER, d, Face::MonoSemi.size(40.0 * s), ink());
         } else if current && blink {
             let caret = Rect::from_center_size(face.center(), Vec2::new(2.5, 40.0) * s);
-            painter.rect_filled(caret, 0.0, INK);
+            painter.rect_filled(caret, 0.0, ink());
         }
         x += 74.0 * s;
     }
@@ -276,7 +276,7 @@ fn digit_boxes(ui: &mut Ui, code: &str, active: bool) {
 /// A red-edged note saying what went wrong.
 fn problem(ui: &mut Ui, text: &str) {
     egui::Frame::new().inner_margin(Margin { left: 14, right: 0, top: 2, bottom: 2 }).show(ui, |ui| {
-        let response = theme::text(ui, &capitalize(text), Face::Regular, 15.0, INK);
+        let response = theme::text(ui, &capitalize(text), Face::Regular, 15.0, ink());
         let rect = response.rect;
         let bar = Rect::from_min_max(egui::pos2(rect.left() - 14.0, rect.top() - 2.0), egui::pos2(rect.left() - 10.0, rect.bottom() + 2.0));
         ui.painter().rect_filled(bar, 0.0, RED);
@@ -295,7 +295,7 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                     "Kickstand gives the AI app on this computer its tools for the Switch: it can copy homebrew over, run it, see the screen and press buttons. Linking adds Kickstand to the app's settings.",
                     Face::Regular,
                     18.0,
-                    BODY,
+                    body(),
                 );
                 return;
             }
@@ -337,13 +337,13 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = 22.0;
         for maker in Maker::ALL {
             let chosen = app.tab == maker;
-            let color = if chosen { INK } else { MUTED };
+            let color = if chosen { ink() } else { muted() };
             let galley = ui.painter().layout_job(theme::job(maker.name(), if chosen { Face::Bold } else { Face::Semi }, 16.0, color, 0.0));
             let icon = super::brands::SIZE;
             let size = Vec2::new(icon + 8.0 + galley.size().x, 40.0);
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let color = if response.hovered() { INK } else { color };
+            let color = if response.hovered() { ink() } else { color };
             let mid = rect.top() + 14.0;
             app.brands.paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + icon / 2.0, mid), Vec2::splat(icon)), maker);
             ui.painter().galley(egui::pos2(rect.left() + icon + 8.0, mid - galley.size().y / 2.0), galley, color);
@@ -363,7 +363,7 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui) {
         let right = start + ctx.animate_value_with_time(egui::Id::unique("tab-right"), rect.right() - start, 0.2);
         ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, rect.bottom() - 3.0..=rect.bottom()), 0.0, RED);
     }
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
 }
 
 /// One row per app of `maker`: linked (with Remove), a Link button, or not installed.
@@ -374,8 +374,8 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
             ui.set_min_height(44.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                ui.label(theme::job(which.name(), Face::Semi, 19.0, INK, 0.0));
-                ui.label(theme::job(which.detail(), Face::Mono, 12.0, MUTED, 0.0));
+                ui.label(theme::job(which.name(), Face::Semi, 19.0, ink(), 0.0));
+                ui.label(theme::job(which.detail(), Face::Mono, 12.0, muted(), 0.0));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match state {
                 State::Linked { command } => {
@@ -390,12 +390,12 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
                     }
                 }
                 State::Missing => {
-                    theme::label(ui, "NOT INSTALLED", false, 13.0, MUTED).on_hover_text(format!("Install {}, then come back", which.name()));
+                    theme::label(ui, "NOT INSTALLED", false, 13.0, muted()).on_hover_text(format!("Install {}, then come back", which.name()));
                 }
             });
         });
         ui.add_space(14.0);
-        theme::rule(ui, 1.0, RULE);
+        theme::hrule(ui, 1.0, rule());
     }
 }
 
@@ -421,9 +421,9 @@ fn agents_count(n: usize) -> String {
 
 /// ✓ LINKED, naming the command it runs on hover. (Right to left.)
 fn linked_mark(ui: &mut Ui, command: &str) {
-    let response = theme::label(ui, "LINKED", false, 13.0, INK);
+    let response = theme::label(ui, "LINKED", false, 13.0, ink());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 11.0), Sense::hover());
-    art::check(ui.painter(), rect.min, INK);
+    art::check(ui.painter(), rect.min, ink());
     response.on_hover_text(format!("Runs {command}"));
 }
 
@@ -435,9 +435,9 @@ fn any_app(ui: &mut Ui, model: &mut Model) {
     // Shown on one line to keep the window still; copied laid out.
     let (shown, json) = (config.to_string(), serde_json::to_string_pretty(&config).unwrap_or_default());
     ui.add_space(28.0);
-    theme::label(ui, "ANY OTHER MCP APP", true, 13.0, INK);
+    theme::label(ui, "ANY OTHER MCP APP", true, 13.0, ink());
     ui.add_space(10.0);
-    theme::text(ui, "Cursor, VS Code, Jan, or a local model's chat app: add a server that runs this command (stdio).", Face::Regular, 15.0, BODY);
+    theme::text(ui, "Cursor, VS Code, Jan, or a local model's chat app: add a server that runs this command (stdio).", Face::Regular, 15.0, body());
     for (shown, copied, what) in [(line.clone(), line, "the command"), (shown, json, "the JSON")] {
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -446,11 +446,11 @@ fn any_app(ui: &mut Ui, model: &mut Model) {
                 ui.ctx().copy_text(copied);
                 model.notice = Some((format!("Copied {what}"), false));
             }
-            let frame = egui::Frame::new().fill(theme::FIELD).stroke(Stroke::new(1.0, RULE)).inner_margin(Margin::symmetric(12, 10));
+            let frame = egui::Frame::new().fill(theme::field()).stroke(Stroke::new(1.0, rule())).inner_margin(Margin::symmetric(12, 10));
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 frame.show(ui, |ui| {
                     ui.set_width(ui.available_width() - 12.0);
-                    ui.add(egui::Label::new(theme::job(&shown, Face::Mono, 12.5, INK, 0.0)).wrap());
+                    ui.add(egui::Label::new(theme::job(&shown, Face::Mono, 12.5, ink(), 0.0)).wrap());
                 });
             });
         });
@@ -460,13 +460,13 @@ fn any_app(ui: &mut Ui, model: &mut Model) {
 fn notice(ui: &mut Ui, model: &Model) {
     if let Some(busy) = model.busy {
         ui.add_space(16.0);
-        theme::label(ui, &format!("{}…", busy.to_uppercase()), false, 13.0, MUTED);
+        theme::label(ui, &format!("{}…", busy.to_uppercase()), false, 13.0, muted());
     } else if let Some((text, error)) = &model.notice {
         ui.add_space(16.0);
         if *error {
             problem(ui, text);
         } else {
-            theme::text(ui, text, Face::Mono, 13.0, BODY);
+            theme::text(ui, text, Face::Mono, 13.0, body());
         }
     }
 }
@@ -486,7 +486,7 @@ pub fn home(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         // The rule between the columns, down to the footer.
         let x = ui.min_rect().left() + (ui.available_width()) * 1.25 / 2.25;
         let bottom = ui.clip_rect().bottom();
-        ui.painter().vline(x, top..=bottom, Stroke::new(1.5, INK));
+        ui.painter().vline(x, top..=bottom, Stroke::new(1.5, ink()));
     }
 }
 
@@ -500,12 +500,12 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     let agents = live.and_then(|l| l.agents.as_ref()).map(|a| a.agents.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
     let busiest = agents.iter().min_by_key(|c| c.idle_ms);
     let (status, status_color, heading, standing) = match (&model.reach, busiest) {
-        (Reach::Unknown, _) => ("CONNECTING", MUTED, "Getting in touch".to_string(), false),
-        (Reach::Unreachable(_), _) => ("CAN'T REACH IT", MUTED, "Your Switch isn't answering".to_string(), false),
+        (Reach::Unknown, _) => ("CONNECTING", muted(), "Getting in touch".to_string(), false),
+        (Reach::Unreachable(_), _) => ("CAN'T REACH IT", muted(), "Your Switch isn't answering".to_string(), false),
         // Until its first request an agent's "doing" is "connecting", which read as the Switch connecting.
         (Reach::Connected(_), Some(c)) if c.idle_ms < 90_000 && c.requests > 0 => ("AGENT CONNECTED", RED, capitalize(&c.doing), true),
         (Reach::Connected(_), Some(_)) => ("AGENT CONNECTED", RED, "Waiting on the agent".to_string(), true),
-        (Reach::Connected(_), None) => ("READY", INK, "Ready for an agent".to_string(), true),
+        (Reach::Connected(_), None) => ("READY", ink(), "Ready for an agent".to_string(), true),
     };
 
     ui.horizontal(|ui| {
@@ -528,9 +528,9 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 "Wake it up and check it's on the same Wi-Fi as this computer. Without the background service, Kickstand also has to be open on it (Homebrew Menu, then Kickstand).",
                 Face::Regular,
                 16.0,
-                BODY,
+                body(),
             );
-            theme::text(ui, error, Face::Mono, 12.0, MUTED);
+            theme::text(ui, error, Face::Mono, 12.0, muted());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
                 if theme::button(ui, "Try again", Kind::Primary, true, true).clicked() {
@@ -549,7 +549,7 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 /// `seen`: [`Kickstand::seen`], to fade in entries that are new here.
 fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::AgentInfo>, seen: &mut Vec<(f64, f64)>) {
     let Some(report) = &live.agents else {
-        theme::text(ui, "Update Kickstand on the Switch to see what the agent is doing here.", Face::Regular, 16.0, BODY);
+        theme::text(ui, "Update Kickstand on the Switch to see what the agent is doing here.", Face::Regular, 16.0, body());
         return;
     };
     let me = report.agents.iter().find(|c| c.you).map(|c| c.ip);
@@ -564,18 +564,18 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Age
             if linked { "Ask an agent to use the Switch and it shows up here".into() } else { "Link an AI app, then ask it to use the Switch".into() }
         }
     };
-    ui.label(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0));
+    ui.label(theme::job(&meta, Face::Mono, 14.0, muted(), 0.0));
 
     ui.add_space(14.0);
     ui.spacing_mut().item_spacing.y = 0.0;
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
     ui.add_space(12.0);
-    theme::label(ui, "ACTIVITY", true, 13.0, INK);
+    theme::label(ui, "ACTIVITY", true, 13.0, ink());
     ui.add_space(12.0);
-    theme::rule(ui, 1.0, RULE);
+    theme::hrule(ui, 1.0, rule());
     if report.recent.is_empty() {
         ui.add_space(12.0);
-        theme::text(ui, "Nothing yet.", Face::Mono, 13.0, MUTED);
+        theme::text(ui, "Nothing yet.", Face::Mono, 13.0, muted());
     }
     let now = chrono::Local::now();
     let elapsed = live.at.elapsed().as_millis() as i64;
@@ -603,19 +603,19 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Age
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
-                    ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
+                    ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), muted());
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if let Some(label) = model.labels.get(event.id) {
-                        ui.label(theme::job(&format!("[{label}]"), Face::Mono, 13.0, MUTED, 0.0));
+                        ui.label(theme::job(&format!("[{label}]"), Face::Mono, 13.0, muted(), 0.0));
                     }
                     let mut what = capitalize(&event.what);
                     if Some(event.ip) != me {
                         what = format!("{what} ({})", who(event.ip));
                     }
-                    ui.add(egui::Label::new(theme::job(&what, Face::Mono, 13.0, INK, 0.0)).wrap());
+                    ui.add(egui::Label::new(theme::job(&what, Face::Mono, 13.0, ink(), 0.0)).wrap());
                 });
                 ui.add_space(10.0);
-                theme::rule(ui, 1.0, RULE_LIGHT);
+                theme::hrule(ui, 1.0, rule_light());
             });
         }
     });
@@ -638,13 +638,13 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut go_link = false;
     ui.horizontal(|ui| {
-        theme::label(ui, "LINKED TO", true, 13.0, INK);
+        theme::label(ui, "LINKED TO", true, 13.0, ink());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             go_link = theme::link(ui, "Link an app", 13.0, Face::Mono).clicked();
         });
     });
     ui.add_space(10.0);
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
     let linked: Vec<_> = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).collect();
     // Agents connected now, by the app they're in.
     let running = |which: App| -> usize {
@@ -657,9 +657,9 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     };
     if linked.is_empty() {
         ui.add_space(14.0);
-        theme::text(ui, "No AI app yet.", Face::Regular, 16.0, BODY);
+        theme::text(ui, "No AI app yet.", Face::Regular, 16.0, body());
         ui.add_space(14.0);
-        theme::rule(ui, 1.0, RULE);
+        theme::hrule(ui, 1.0, rule());
     }
     // Grouped by maker, each group folding; scrolls in what the Switch's section below leaves.
     let below = if ui.available_width() < 440.0 { SWITCH_HEIGHT_WRAPPED } else { SWITCH_HEIGHT };
@@ -685,16 +685,16 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
             let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
             let painter = ui.painter();
-            painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
+            painter.rect_filled(rect, 0.0, theme::pressed_paper().gamma_multiply(hover));
             let mid = rect.center().y;
-            art::fold(painter, egui::pos2(rect.left() + ROW_INSET, mid - 6.0), openness, INK);
+            art::fold(painter, egui::pos2(rect.left() + ROW_INSET, mid - 6.0), openness, ink());
             let size = super::brands::SIZE;
             app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + ROW_INSET + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
-            let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, INK, 0.0));
-            painter.galley(egui::pos2(rect.left() + ROW_INSET + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, INK);
+            let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, ink(), 0.0));
+            painter.galley(egui::pos2(rect.left() + ROW_INSET + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, ink());
             let total: usize = apps.iter().map(|(which, _)| running(*which)).sum();
-            let count = painter.layout_job(theme::job(&agents_count(total), Face::Mono, 13.0, if total > 0 { INK } else { MUTED }, 0.04));
-            painter.galley(egui::pos2(rect.right() - ROW_INSET - count.size().x, mid - count.size().y / 2.0), count, MUTED);
+            let count = painter.layout_job(theme::job(&agents_count(total), Face::Mono, 13.0, if total > 0 { ink() } else { muted() }, 0.04));
+            painter.galley(egui::pos2(rect.right() - ROW_INSET - count.size().x, mid - count.size().y / 2.0), count, muted());
             if response.clicked() {
                 app.folded[maker.index()] = open;
                 fold.set_open(!open);
@@ -703,23 +703,23 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                     app.reveal = Some(maker);
                 }
             }
-            theme::rule(ui, 1.0, RULE);
+            theme::hrule(ui, 1.0, rule());
             fold.show_body_unindented(ui, |ui| {
                 ui.multiply_opacity(openness);
                 for (which, state) in apps {
                     ui.horizontal(|ui| {
                         ui.set_min_height(APP_ROW);
                         ui.add_space(ROW_INSET + 24.0 + size + 10.0);
-                        ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
+                        ui.label(theme::job(which.name(), Face::Regular, 15.0, body(), 0.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(ROW_INSET);
                             if let State::Linked { command } = state {
                                 let n = running(*which);
-                                theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { INK } else { MUTED }).on_hover_text(format!("Linked: runs {command}"));
+                                theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { ink() } else { muted() }).on_hover_text(format!("Linked: runs {command}"));
                             }
                         });
                     });
-                    theme::rule(ui, 1.0, RULE_LIGHT);
+                    theme::hrule(ui, 1.0, rule_light());
                 }
             });
             if app.reveal == Some(maker) {
@@ -733,9 +733,9 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Only down: the lane is wider than the column, and the sections below keep the column's width.
     ui.advance_cursor_after_rect(Rect::from_min_size(lane.min_rect().min, Vec2::new(width, lane.min_rect().height())));
     ui.add_space(34.0);
-    theme::label(ui, "THIS SWITCH", true, 13.0, INK);
+    theme::label(ui, "THIS SWITCH", true, 13.0, ink());
     ui.add_space(12.0);
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
     let live = match &model.reach {
         Reach::Connected(live) => Some(live),
         _ => None,
@@ -766,14 +766,14 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         ui.horizontal(|ui| {
             ui.set_min_height(APP_ROW);
             ui.add_space(ROW_INSET);
-            ui.label(theme::job(name, Face::Regular, 15.0, MUTED, 0.0));
+            ui.label(theme::job(name, Face::Regular, 15.0, muted(), 0.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(ROW_INSET);
                 let face = if mono { Face::Mono } else { Face::Regular };
-                ui.label(theme::job(&value, face, if mono { 14.0 } else { 15.0 }, INK, 0.0));
+                ui.label(theme::job(&value, face, if mono { 14.0 } else { 15.0 }, ink(), 0.0));
             });
         });
-        theme::rule(ui, 1.0, RULE_LIGHT);
+        theme::hrule(ui, 1.0, rule_light());
     }
 
     ui.add_space(34.0);
@@ -799,11 +799,11 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 /// `open` runs from 0 to 1 as it opens and back as it closes; it only takes clicks while open.
 pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
     // The frame fades with what's in it.
-    let frame = egui::Frame::new().fill(theme::PAPER.gamma_multiply(open)).stroke(Stroke::new(1.5, INK.gamma_multiply(open))).inner_margin(Margin::same(28));
+    let frame = egui::Frame::new().fill(theme::paper().gamma_multiply(open)).stroke(Stroke::new(1.5, ink().gamma_multiply(open))).inner_margin(Margin::same(28));
     let id = egui::Id::unique("reboot");
     // Rises a little as it fades in.
     let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
-    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(INK.gamma_multiply(0.35 * open)).show(ctx, |ui| {
+    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(theme::scrim().gamma_multiply(open)).show(ctx, |ui| {
         ui.multiply_opacity(open);
         ui.set_max_width(ui.available_width().min(440.0));
         ui.spacing_mut().item_spacing.y = 16.0;
@@ -813,7 +813,7 @@ pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
             "The Switch restarts into hekate's menu. Whatever is running closes without saving. To come back, boot Atmosphère from hekate.",
             Face::Regular,
             16.0,
-            BODY,
+            body(),
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {

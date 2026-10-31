@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
-use theme::{Face, INK, MUTED, PAPER, RED, RULE};
+use theme::{Face, ink, muted, paper, RED, rule};
 use worker::{Cmd, Model};
 
 pub fn run() -> Result<()> {
@@ -79,6 +79,8 @@ pub struct Kickstand {
     tab: crate::link::Maker,
     /// Which makers' groups are folded in the home screen's linked apps (by [`crate::link::Maker::index`]).
     folded: [bool; 4],
+    /// Dark or light as chosen with the header's sun/moon button; `None` follows the system.
+    dark: Option<bool>,
     /// A group just opened there, to scroll into view once its rows are laid out.
     reveal: Option<crate::link::Maker>,
     brands: brands::Brands,
@@ -122,6 +124,7 @@ impl Kickstand {
             confirm_reboot: false,
             tab,
             folded: [false; 4],
+            dark: crate::config::dark_theme(),
             reveal: None,
             brands,
             shown: None,
@@ -153,7 +156,7 @@ impl Kickstand {
     fn header(&mut self, ui: &mut egui::Ui, model: &mut Model) {
         // Under the title bar, which makes up the rest of the space above.
         let margin = Margin { left: theme::GUTTER as i8, right: theme::GUTTER as i8, top: 0, bottom: 16 };
-        let frame = Frame::new().fill(PAPER).inner_margin(margin);
+        let frame = Frame::new().fill(paper()).inner_margin(margin);
         let panel = egui::Panel::top("header").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
             // The header moves the window too.
             window::drag_area(ui, ui.max_rect() + margin);
@@ -163,61 +166,90 @@ impl Kickstand {
                 ui.set_min_height(44.0);
                 ui.spacing_mut().item_spacing.x = 12.0;
                 // The mark and name open the overview.
-                let name = ui.painter().layout_job(theme::job("Kickstand", Face::Heavy, 22.0, INK, -0.01));
+                let name = ui.painter().layout_job(theme::job("Kickstand", Face::Heavy, 22.0, ink(), -0.01));
                 let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0 + 12.0 + name.size().x + 10.0, 36.0), Sense::click());
                 let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("What Kickstand does, and its commands");
                 let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
                 let painter = ui.painter();
-                painter.rect_filled(rect.expand(4.0), 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
+                painter.rect_filled(rect.expand(4.0), 0.0, theme::pressed_paper().gamma_multiply(hover));
                 art::mark(painter, Rect::from_min_size(rect.min, Vec2::splat(36.0)));
-                painter.galley(egui::pos2(rect.left() + 48.0, rect.center().y - name.size().y / 2.0), name, INK);
+                painter.galley(egui::pos2(rect.left() + 48.0, rect.center().y - name.size().y / 2.0), name, ink());
                 if response.clicked() {
                     self.overview = true;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &self.screen {
-                    Screen::Home => {
-                        if self.selector(ui, model).clicked() {
-                            self.go(model, Screen::Find);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match &self.screen {
+                        Screen::Home => {
+                            if self.selector(ui, model).clicked() {
+                                self.go(model, Screen::Find);
+                            }
+                        }
+                        screen => {
+                            if let Some(next) = stepper(ui, screen, model) {
+                                self.go(model, next);
+                            }
                         }
                     }
-                    screen => {
-                        if let Some(next) = stepper(ui, screen, model) {
-                            self.go(model, next);
+                    ui.add_space(8.0);
+                    if self.theme_button(ui).clicked() {
+                        // Back to following the system when the choice matches it.
+                        let dark = !theme::dark();
+                        let system = ui.ctx().system_theme() == Some(egui::Theme::Dark);
+                        self.dark = (dark != system).then_some(dark);
+                        if let Err(e) = crate::config::save_dark_theme(self.dark) {
+                            model.notice = Some((format!("couldn't save the theme: {e:#}"), true));
                         }
                     }
                 });
             });
         });
         let rect = panel.response.rect;
-        ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.5, INK));
+        ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.5, ink()));
+    }
+
+    /// A moon in light (to switch to dark), a sun in dark.
+    fn theme_button(&self, ui: &mut egui::Ui) -> egui::Response {
+        let dark = theme::dark();
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+        let tip = if dark { "Light mode" } else { "Dark mode" };
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, theme::pressed_paper().gamma_multiply(hover));
+        if dark {
+            art::sun(painter, rect.center(), theme::ink());
+        } else {
+            art::moon(painter, rect.center(), theme::ink());
+        }
+        response
     }
 
     /// The header's button naming the console in use; it leads back to the list.
     fn selector(&self, ui: &mut egui::Ui, model: &Model) -> egui::Response {
         let name = model.name.clone().unwrap_or_else(|| "Your Switch".into());
         let host = model.host.clone().unwrap_or_default();
-        let name_galley = ui.painter().layout_job(theme::job(&name, Face::Semi, 15.0, INK, 0.0));
-        let host_galley = ui.painter().layout_job(theme::job(&host, Face::Mono, 12.0, MUTED, 0.0));
+        let name_galley = ui.painter().layout_job(theme::job(&name, Face::Semi, 15.0, ink(), 0.0));
+        let host_galley = ui.painter().layout_job(theme::job(&host, Face::Mono, 12.0, muted(), 0.0));
         let width = 14.0 + name_galley.size().x + 10.0 + host_galley.size().x + 10.0 + 12.0 + 14.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 44.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Use a different Switch");
         let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
         let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, INK), egui::StrokeKind::Inside);
+        painter.rect_filled(rect, 0.0, theme::pressed_paper().gamma_multiply(hover));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, ink()), egui::StrokeKind::Inside);
         let mut x = rect.left() + 14.0;
         let cy = rect.center().y;
-        painter.galley(egui::pos2(x, cy - name_galley.size().y / 2.0), name_galley.clone(), INK);
+        painter.galley(egui::pos2(x, cy - name_galley.size().y / 2.0), name_galley.clone(), ink());
         x += name_galley.size().x + 10.0;
-        painter.galley(egui::pos2(x, cy - host_galley.size().y / 2.0), host_galley.clone(), MUTED);
+        painter.galley(egui::pos2(x, cy - host_galley.size().y / 2.0), host_galley.clone(), muted());
         x += host_galley.size().x + 10.0;
         // An arrow, not a menu's chevron: it goes to the list of consoles.
-        art::fold(painter, egui::pos2(x, cy - 6.0), 0.0, INK);
+        art::fold(painter, egui::pos2(x, cy - 6.0), 0.0, ink());
         response
     }
 
     fn footer(&self, ui: &mut egui::Ui, model: &Model) {
-        let frame = Frame::new().fill(PAPER).inner_margin(Margin::symmetric(theme::GUTTER as i8, 14));
+        let frame = Frame::new().fill(paper()).inner_margin(Margin::symmetric(theme::GUTTER as i8, 14));
         let panel = egui::Panel::bottom("footer").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let console = match &model.reach {
@@ -225,12 +257,12 @@ impl Kickstand {
                     _ => String::new(),
                 };
                 let left = format!("KICKSTAND {}{console}", env!("CARGO_PKG_VERSION"));
-                theme::label(ui, &left, false, 12.0, MUTED);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| theme::label(ui, "GPL-3.0", false, 12.0, MUTED));
+                theme::label(ui, &left, false, 12.0, muted());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| theme::label(ui, "GPL-3.0", false, 12.0, muted()));
             });
         });
         let rect = panel.response.rect;
-        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, RULE));
+        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, rule()));
     }
 }
 
@@ -254,16 +286,16 @@ fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> 
     for (i, step) in ["01 FIND", "02 PAIR", "03 LINK"].iter().enumerate().rev() {
         let target = if i == current { None } else { targets[i].clone() };
         let sense = if target.is_some() { Sense::click() } else { Sense::hover() };
-        let (face, color) = if i == current { (Face::MonoSemi, INK) } else { (Face::Mono, MUTED) };
+        let (face, color) = if i == current { (Face::MonoSemi, ink()) } else { (Face::Mono, muted()) };
         let galley = ui.painter().layout_job(theme::job(step, face, 13.0, color, 0.04));
         let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(0.0, 7.0), sense);
-        let color = if response.hovered() && target.is_some() { INK } else { color };
+        let color = if response.hovered() && target.is_some() { ink() } else { color };
         ui.painter().galley(rect.min, galley, color);
         let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.max);
         if i == current {
             underline = Some(bar);
         } else if response.hovered() && target.is_some() {
-            ui.painter().rect_filled(bar.with_min_y(bar.max.y - 1.5), 0.0, INK);
+            ui.painter().rect_filled(bar.with_min_y(bar.max.y - 1.5), 0.0, ink());
         }
         if target.is_some() {
             if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -293,6 +325,11 @@ impl eframe::App for Kickstand {
             let linked = model.links.iter().any(|(_, s)| matches!(s, crate::link::State::Linked { .. }));
             self.screen = if linked { Screen::Home } else { Screen::Link };
         }
+        // Before anything is drawn, so the whole frame has one palette.
+        let dark = self.dark.unwrap_or(ui.ctx().system_theme() == Some(egui::Theme::Dark));
+        if dark != theme::dark() {
+            theme::set_dark(ui.ctx(), dark);
+        }
         window::frame(ui.ctx());
         window::title_bar(ui);
         self.header(ui, &mut model);
@@ -317,7 +354,7 @@ impl eframe::App for Kickstand {
         if t < 1.0 {
             ui.ctx().request_repaint();
         }
-        let frame = Frame::new().fill(PAPER);
+        let frame = Frame::new().fill(paper());
         egui::CentralPanel::no_frame().frame(frame).show(ui, |ui| {
             let rect = ui.max_rect().translate(Vec2::new((1.0 - t) * 36.0 * self.from, 0.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {

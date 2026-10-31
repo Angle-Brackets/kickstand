@@ -8,7 +8,7 @@
 use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{self, Color32, Painter, Rect, Stroke, TextureHandle, pos2};
 
-use super::theme::{self, INK};
+use super::theme::{self, ink};
 use crate::link::Maker;
 
 /// The marks' size, in points.
@@ -53,12 +53,12 @@ impl Brands {
         let (mark, color) = match maker {
             Maker::Claude => (&self.claude, CLAUDE_ORANGE),
             Maker::Gemini => (&self.gemini, GEMINI_PURPLE),
-            Maker::OpenAi => (&self.openai, INK),
+            Maker::OpenAi => (&self.openai, ink()),
             Maker::Custom => {
                 let rect = rect.shrink(1.0);
-                theme::dashed_rect(painter, rect, Stroke::new(1.5, INK));
+                theme::dashed_rect(painter, rect, Stroke::new(1.5, ink()));
                 let (c, arm) = (rect.center(), rect.width() * 0.22);
-                let stroke = Stroke::new(1.8, INK);
+                let stroke = Stroke::new(1.8, ink());
                 painter.line_segment([pos2(c.x - arm, c.y), pos2(c.x + arm, c.y)], stroke);
                 painter.line_segment([pos2(c.x, c.y - arm), pos2(c.x, c.y + arm)], stroke);
                 return;

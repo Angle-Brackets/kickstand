@@ -6,7 +6,7 @@ use clap::CommandFactory;
 use eframe::egui::{self, Margin, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::Kickstand;
-use super::theme::{self, BODY, Face, INK, MUTED, RED, RULE, RULE_LIGHT};
+use super::theme::{self, body, Face, ink, muted, RED, rule, rule_light};
 
 /// An area of tools: its name, a line about it, and each tool with a line on what it does.
 type Area = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
@@ -89,11 +89,11 @@ fn tab_names() -> Vec<&'static str> {
 /// Draws the overview; `open` runs from 0 to 1 as it opens and back as it closes.
 pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
     // The frame fades with what's in it.
-    let frame = egui::Frame::new().fill(theme::PAPER.gamma_multiply(open)).stroke(Stroke::new(1.5, INK.gamma_multiply(open))).inner_margin(Margin::same(32));
+    let frame = egui::Frame::new().fill(theme::paper().gamma_multiply(open)).stroke(Stroke::new(1.5, ink().gamma_multiply(open))).inner_margin(Margin::same(32));
     let id = egui::Id::unique("overview");
     let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
     let screen = ctx.content_rect();
-    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(INK.gamma_multiply(0.35 * open)).show(ctx, |ui| {
+    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(theme::scrim().gamma_multiply(open)).show(ctx, |ui| {
         ui.multiply_opacity(open);
         let width = (screen.width() - 140.0).clamp(480.0, 760.0);
         ui.set_width(width);
@@ -107,7 +107,7 @@ pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
             });
         });
         ui.add_space(6.0);
-        theme::text(ui, "Let an AI agent use your Switch.", Face::Regular, 17.0, BODY);
+        theme::text(ui, "Let an AI agent use your Switch.", Face::Regular, 17.0, body());
         ui.add_space(20.0);
         tabs(app, ui);
         ui.add_space(4.0);
@@ -126,7 +126,7 @@ pub fn show(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
                     i if i <= TOOLS.len() => {
                         let (_, about, tools) = TOOLS[i - 1];
                         ui.add_space(16.0);
-                        theme::text(ui, about, Face::Regular, 15.0, BODY);
+                        theme::text(ui, about, Face::Regular, 15.0, body());
                         ui.add_space(8.0);
                         rows(ui, tools.iter().map(|(name, what)| (name.to_string(), what.to_string())));
                     }
@@ -148,10 +148,10 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui) {
         ui.spacing_mut().item_spacing = Vec2::new(20.0, 4.0);
         for (i, name) in tab_names().into_iter().enumerate() {
             let chosen = app.overview_tab == i;
-            let galley = ui.painter().layout_job(theme::job(name, if chosen { Face::Bold } else { Face::Semi }, 15.0, INK, 0.0));
+            let galley = ui.painter().layout_job(theme::job(name, if chosen { Face::Bold } else { Face::Semi }, 15.0, ink(), 0.0));
             let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x, 34.0), Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let color = if chosen || response.hovered() { INK } else { MUTED };
+            let color = if chosen || response.hovered() { ink() } else { muted() };
             ui.painter().galley(egui::pos2(rect.left(), rect.top() + 6.0), galley, color);
             if chosen {
                 underline = Some(rect);
@@ -169,15 +169,15 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui) {
         let right = start + ctx.animate_value_with_time(egui::Id::unique("overview-tab-right"), rect.right() - start, 0.2);
         ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, rect.bottom() - 3.0..=rect.bottom()), 0.0, RED);
     }
-    theme::rule(ui, 1.5, INK);
+    theme::hrule(ui, 1.5, ink());
 }
 
 fn overview(ui: &mut Ui) {
     let section = |ui: &mut Ui, title: &str| {
         ui.add_space(26.0);
-        theme::label(ui, title, true, 13.0, INK);
+        theme::label(ui, title, true, 13.0, ink());
         ui.add_space(10.0);
-        theme::rule(ui, 1.0, RULE);
+        theme::hrule(ui, 1.0, rule());
     };
     ui.add_space(18.0);
     theme::text(
@@ -185,7 +185,7 @@ fn overview(ui: &mut Ui) {
         "Kickstand lets an AI agent work on your Switch for you. It can copy homebrew over, run it, watch the screen, press buttons and read crash reports, so it can test and debug on real hardware while you're away.",
         Face::Regular,
         16.0,
-        BODY,
+        body(),
     );
     section(ui, "HOW IT WORKS");
     ui.add_space(18.0);
@@ -196,7 +196,7 @@ fn overview(ui: &mut Ui) {
         "This window sets it all up: it finds your Switch, pairs with it and links your AI apps. After that, it shows you what the agents are doing.",
         Face::Regular,
         15.0,
-        BODY,
+        body(),
     );
     section(ui, "STAYING SAFE");
     rows(
@@ -229,8 +229,8 @@ fn diagram(ui: &mut Ui) {
     let laid: Vec<_> = BOXES
         .iter()
         .map(|(title, what)| {
-            let title = painter.layout_job(theme::job(title, Face::Bold, 16.0, INK, 0.0));
-            let mut job = theme::job(what, Face::Regular, 13.5, BODY, 0.0);
+            let title = painter.layout_job(theme::job(title, Face::Bold, 16.0, ink(), 0.0));
+            let mut job = theme::job(what, Face::Regular, 13.5, body(), 0.0);
             job.wrap.max_width = box_width - 2.0 * PAD;
             (title, painter.layout_job(job))
         })
@@ -240,22 +240,22 @@ fn diagram(ui: &mut Ui) {
     for (i, (title, what)) in laid.into_iter().enumerate() {
         let left = rect.left() + i as f32 * (box_width + GAP);
         let cell = Rect::from_min_size(egui::pos2(left, rect.top()), Vec2::new(box_width, height));
-        painter.rect_stroke(cell, 0.0, Stroke::new(1.5, INK), egui::StrokeKind::Inside);
+        painter.rect_stroke(cell, 0.0, Stroke::new(1.5, ink()), egui::StrokeKind::Inside);
         let title_height = title.size().y;
-        painter.galley(cell.min + Vec2::splat(PAD), title, INK);
-        painter.galley(cell.min + Vec2::new(PAD, PAD + title_height + 6.0), what, BODY);
+        painter.galley(cell.min + Vec2::splat(PAD), title, ink());
+        painter.galley(cell.min + Vec2::new(PAD, PAD + title_height + 6.0), what, body());
         if let Some(link) = LINKS.get(i) {
             // Both ways: the agent asks, the Switch answers.
             let y = cell.center().y;
             let (from, to) = (cell.right() + 8.0, cell.right() + GAP - 8.0);
-            painter.line_segment([egui::pos2(from, y), egui::pos2(to, y)], Stroke::new(1.5, INK));
+            painter.line_segment([egui::pos2(from, y), egui::pos2(to, y)], Stroke::new(1.5, ink()));
             for (tip, dir) in [(to, 1.0), (from, -1.0)] {
                 let back = tip - dir * 6.0;
-                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y - 4.0)], Stroke::new(1.5, INK));
-                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y + 4.0)], Stroke::new(1.5, INK));
+                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y - 4.0)], Stroke::new(1.5, ink()));
+                painter.line_segment([egui::pos2(tip, y), egui::pos2(back, y + 4.0)], Stroke::new(1.5, ink()));
             }
-            let label = painter.layout_job(theme::job(link, Face::Mono, 11.0, MUTED, 0.06));
-            painter.galley(egui::pos2((from + to) / 2.0 - label.size().x / 2.0, y - 8.0 - label.size().y), label, MUTED);
+            let label = painter.layout_job(theme::job(link, Face::Mono, 11.0, muted(), 0.06));
+            painter.galley(egui::pos2((from + to) / 2.0 - label.size().x / 2.0, y - 8.0 - label.size().y), label, muted());
         }
     }
 }
@@ -263,7 +263,7 @@ fn diagram(ui: &mut Ui) {
 /// The terminal commands, as `kickstand --help` lists them.
 fn commands(ui: &mut Ui) {
     ui.add_space(16.0);
-    theme::text(ui, "Everything here works from a terminal too. Add --help to any command for the details.", Face::Regular, 15.0, BODY);
+    theme::text(ui, "Everything here works from a terminal too. Add --help to any command for the details.", Face::Regular, 15.0, body());
     ui.add_space(8.0);
     let cli = crate::Cli::command();
     let commands = cli.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| {
@@ -279,15 +279,15 @@ fn rows(ui: &mut Ui, rows: impl IntoIterator<Item = (String, String)>) {
         ui.add_space(11.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
-            let galley = ui.painter().layout_job(theme::job(&name, Face::MonoSemi, 13.5, INK, 0.0));
+            let galley = ui.painter().layout_job(theme::job(&name, Face::MonoSemi, 13.5, ink(), 0.0));
             // Centred on the description's first line.
-            let line = ui.painter().layout_job(theme::job("Ag", Face::Regular, 15.0, BODY, 0.0)).size().y;
+            let line = ui.painter().layout_job(theme::job("Ag", Face::Regular, 15.0, body(), 0.0)).size().y;
             let (rect, _) = ui.allocate_exact_size(Vec2::new(130.0, line), Sense::hover());
-            ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, INK);
-            ui.add(egui::Label::new(theme::job(&what, Face::Regular, 15.0, BODY, 0.0)).wrap());
+            ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, ink());
+            ui.add(egui::Label::new(theme::job(&what, Face::Regular, 15.0, body(), 0.0)).wrap());
         });
         ui.add_space(11.0);
-        theme::rule(ui, 1.0, RULE_LIGHT);
+        theme::hrule(ui, 1.0, rule_light());
     }
 }
 

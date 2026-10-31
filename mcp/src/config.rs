@@ -82,3 +82,27 @@ pub fn save_host_title(id: u64, name: &str) -> Result<()> {
     std::fs::write(dir.join("host-title"), format!("{id:016x} {name}\n"))?;
     Ok(())
 }
+
+/// The desktop app's theme when it was set by hand (dark: `Some(true)`); `None` follows the system.
+pub fn dark_theme() -> Option<bool> {
+    match std::fs::read_to_string(config_dir().ok()?.join("theme")).ok()?.trim() {
+        "dark" => Some(true),
+        "light" => Some(false),
+        _ => None,
+    }
+}
+
+pub fn save_dark_theme(dark: Option<bool>) -> Result<()> {
+    let dir = config_dir()?;
+    let path = dir.join("theme");
+    match dark {
+        Some(dark) => {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(path, if dark { "dark\n" } else { "light\n" })?;
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(())
+}

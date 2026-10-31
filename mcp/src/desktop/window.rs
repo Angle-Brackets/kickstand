@@ -7,7 +7,7 @@
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
 use egui::viewport::ResizeDirection;
 
-use super::theme::{INK, PAPER, PRESSED_PAPER, RED};
+use super::theme::{DEVICE_TEXT, RED, ink, paper, pressed_paper};
 
 pub const MAC: bool = cfg!(target_os = "macos");
 /// How far in from the window's edge a press resizes it.
@@ -75,13 +75,13 @@ pub fn frame(ctx: &egui::Context) {
     }
     if !maximized(ctx) {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("window-outline")));
-        painter.rect_stroke(ctx.content_rect(), 0.0, Stroke::new(1.0, INK), egui::StrokeKind::Inside);
+        painter.rect_stroke(ctx.content_rect(), 0.0, Stroke::new(1.0, ink()), egui::StrokeKind::Inside);
     }
 }
 
 /// The strip along the top of the window.
 pub fn title_bar(ui: &mut egui::Ui) {
-    egui::Panel::top("title-bar").frame(egui::Frame::new().fill(PAPER)).exact_size(BAR).resizable(false).show_separator_line(false).show(ui, |ui| {
+    egui::Panel::top("title-bar").frame(egui::Frame::new().fill(paper())).exact_size(BAR).resizable(false).show_separator_line(false).show(ui, |ui| {
         drag_area(ui, ui.max_rect());
         if !MAC {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -101,9 +101,11 @@ pub fn drag_area(ui: &mut egui::Ui, rect: Rect) {
     if edge(ui.ctx()).is_some() {
         return;
     }
+    let only_hovered = ui.ctx().interaction_snapshot(|s| s.hovered.len() == 1 && s.hovered.contains(&response.id));
+    let moved_while_down = response.is_pointer_button_down_on() && only_hovered && ui.input(|i| i.pointer.primary_down() && i.pointer.delta() != Vec2::ZERO);
     if response.double_clicked() {
         ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized(ui.ctx())));
-    } else if response.drag_started_by(egui::PointerButton::Primary) {
+    } else if moved_while_down || response.drag_started_by(egui::PointerButton::Primary) {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
 }
@@ -128,8 +130,8 @@ fn button(ui: &mut egui::Ui, control: Control) {
     let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
     let painter = ui.painter();
     let (fill, ink) = match control {
-        Control::Close => (RED, lerp(INK, PAPER, hover)),
-        _ => (PRESSED_PAPER, INK),
+        Control::Close => (RED, lerp(ink(), DEVICE_TEXT, hover)),
+        _ => (pressed_paper(), ink()),
     };
     painter.rect_filled(rect, 0.0, fill.gamma_multiply(hover));
     glyph(painter, rect.center(), control, max, ink);
