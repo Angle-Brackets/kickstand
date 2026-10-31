@@ -483,6 +483,7 @@ Every capability above is also available directly from your terminal via `kickst
 | | `kickstand install [--remove]` | Add (or remove) Kickstand in your OS application menu with its icon. |
 | | `kickstand discover [--to <ip>]` | Find Switches running Kickstand on the local network. |
 | | `kickstand pair <code>` | Pair with the Switch displaying `CODE` and save its address and shared token. |
+| | `kickstand update [--check] [--switch]` | Update this PC's copy to the latest signed release, then the Switch to the PC's version (only while it's idle). |
 | | `kickstand unpair` | Make the Switch forget this PC's token and stop using it; pair again with the code to come back. |
 | | `kickstand link [app] [--remove]` | Link Kickstand to `code`, `desktop`, `gemini`, `agy`, `antigravity`, `codex`, or `lmstudio`. |
 | | `kickstand token` | Print (or generate) the shared authentication token and its SD card location. |

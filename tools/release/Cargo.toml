@@ -1,0 +1,13 @@
+[package]
+name = "kickstand-release"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+description = "Signs Kickstand releases (keygen, sign) with the key kept on the releaser's PC."
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.3"

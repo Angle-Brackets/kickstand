@@ -78,6 +78,12 @@ To unpair, click **Unpair** beside *This Switch* in the desktop app, or run `kic
 
 Discovery uses UDP port 28791 (broadcast) and the daemon listens on TCP port 28790. Both are fixed, so any PC and Switch running Kickstand find each other without setup; allow them through a firewall on the PC if discovery comes up empty.
 
+### Updating
+
+The desktop app looks for a new release when it opens and every 6 hours, and shows **Update to X** in its footer; one click downloads it, checks its signature and reopens. When the Switch is then behind the PC, **Update** appears beside *This Switch*: the PC puts its own version's sysmodule and NRO on the Switch over the usual connection (the Switch never goes online itself), restarting the background service in about 15 seconds without a reboot. It waits until nothing is running on the Switch and no agent is at work. From a terminal: `kickstand update` (both), `kickstand update --check`, `kickstand update --switch`. Agents can't update anything.
+
+Releases are only installed if their `SHA256SUMS` is signed by Kickstand's release key, which is kept off GitHub. A copy built from source updates with `git pull` and `cargo build` instead.
+
 To add Kickstand to your OS application launcher (Linux & macOS):
 ```sh
 kickstand install            # Install desktop entry and icon (--remove to uninstall)
@@ -168,3 +174,9 @@ Kickstand is designed so an AI agent can iterate autonomously without risking co
 - **Kickstand:** `GPL-3.0-only` (see [`LICENSE`](LICENSE)).
 - **`third_party/nx`:** MIT License.
 - **Fonts (`assets/fonts/`):** Archivo and JetBrains Mono are licensed under the SIL Open Font License 1.1 (see the license files alongside them).
+
+## Releasing
+
+1. `scripts/bump-version.sh 0.2.0` sets the PC and Switch versions, commits and tags `v0.2.0`.
+2. `git push && git push origin v0.2.0`: the `release` workflow builds the PC app (Linux x86_64, macOS arm64 and x86_64), the sysmodule and the NRO, and makes a **draft** release with `SHA256SUMS`.
+3. `scripts/publish-release.sh v0.2.0` checks the files, signs `SHA256SUMS` with the key in `~/.config/kickstand-release/` (made once with `cargo run -p kickstand-release -- keygen`; back it up) and publishes. Installed copies see the release only from then on.

@@ -59,6 +59,8 @@ pub enum Screen {
 pub enum Confirm {
     Reboot,
     Unpair,
+    UpdatePc,
+    UpdateSwitch,
 }
 
 impl Screen {
@@ -267,7 +269,7 @@ impl Kickstand {
         response
     }
 
-    fn footer(&self, ui: &mut egui::Ui, model: &Model) {
+    fn footer(&mut self, ui: &mut egui::Ui, model: &Model) {
         let frame = Frame::new().fill(paper()).inner_margin(Margin::symmetric(theme::GUTTER as i8, 14));
         let panel = egui::Panel::bottom("footer").frame(frame).resizable(false).show_separator_line(false).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -277,7 +279,18 @@ impl Kickstand {
                 };
                 let left = format!("KICKSTAND {}{console}", env!("CARGO_PKG_VERSION"));
                 theme::label(ui, &left, false, 12.0, muted());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| theme::label(ui, "GPL-3.0", false, 12.0, muted()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::label(ui, "GPL-3.0", false, 12.0, muted());
+                    if let Some(release) = &model.update {
+                        ui.add_space(18.0);
+                        let text = format!("UPDATE TO {}", release.version);
+                        if crate::update::from_source() {
+                            theme::label(ui, &format!("{} IS OUT", release.version), false, 12.0, ink()).on_hover_text("This copy was built from source: update it with git pull and cargo build");
+                        } else if theme::link(ui, &text, 12.0, Face::Mono).clicked() && model.busy.is_none() {
+                            self.ask(Confirm::UpdatePc);
+                        }
+                    }
+                });
             });
         });
         let rect = panel.response.rect;
@@ -419,12 +432,19 @@ impl eframe::App for Kickstand {
                 }
             });
         });
-        let name = model.name.clone().unwrap_or_else(|| "The Switch".into());
+        let words = screens::confirm_words(self.confirm, &model);
+        if let Some(exe) = model.restart.take() {
+            // The new copy opens its own window as this one closes.
+            match std::process::Command::new(&exe).arg("desktop").stdin(std::process::Stdio::null()).spawn() {
+                Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => model.notice = Some((format!("Updated, but couldn't start it again ({e}): open Kickstand again"), true)),
+            }
+        }
         drop(model);
         // Shown while it fades out too.
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-open"), self.confirming, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {
-            screens::confirm(self, ui.ctx(), open, &name);
+            screens::confirm(self, ui.ctx(), open, words);
         }
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("overview-open"), self.overview, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {

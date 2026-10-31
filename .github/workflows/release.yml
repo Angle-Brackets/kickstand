@@ -1,0 +1,124 @@
+# Builds a release when a version tag (v1.2.3) is pushed: the PC app for each platform and the Switch's
+# sysmodule and NRO, with SHA256SUMS over all of them, as a DRAFT release. Nothing installed picks it up
+# until scripts/publish-release.sh signs SHA256SUMS with the key on the releaser's PC and publishes it
+# (the key never comes to CI, so a GitHub compromise alone can't ship code to anyone's Switch).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # cargo-nx as used to build every installed version (see ~/.cargo/.crates2.json on the dev PC).
+  CARGO_NX_REV: 0dfe4a3ca6de4dcb0dfabed7dbfe9cacbbe21fcc
+
+jobs:
+  version:
+    name: tag matches the crates
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pc=$(grep -m1 '^version' mcp/Cargo.toml | cut -d'"' -f2)
+          switch=$(sed -n '/\[workspace.package\]/,/^\[/p' daemon/Cargo.toml | grep -m1 '^version' | cut -d'"' -f2)
+          echo "tag $tag, PC $pc, Switch $switch"
+          if [ "$tag" != "$pc" ] || [ "$tag" != "$switch" ]; then
+            echo "::error::the tag must match mcp/Cargo.toml and daemon/Cargo.toml (scripts/bump-version.sh sets both)"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  switch:
+    name: Switch (sysmodule and NRO)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # daemon/rust-toolchain.toml pins the nightly; rustup installs it (with rust-src) on first use.
+      - name: Toolchain
+        working-directory: daemon
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+          cache-directories: ~/.cargo/bin
+      - name: cargo-nx
+        run: command -v cargo-nx || cargo install cargo-nx --git https://github.com/aarch64-switch-rs/cargo-nx --rev "$CARGO_NX_REV" --locked
+      - name: Build
+        working-directory: daemon
+        run: |
+          cargo nx build --release -p sys-kickstand
+          cargo nx build --release -p kickstand-nro
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp daemon/target/aarch64-nintendo-switch-freestanding/release/sys-kickstand.nsp dist/
+          cp daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: switch
+          path: dist/*
+
+  pc:
+    name: PC (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 22.04 for an older glibc, so the binary runs on more distributions.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Test
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --locked -p kickstand -p kickstand-proto
+      - name: Build
+        run: cargo build --locked --release -p kickstand --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="kickstand-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "pkg/$name" dist
+          cp "target/${{ matrix.target }}/release/kickstand" LICENSE README.md "pkg/$name/"
+          tar -C pkg -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pc-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Draft release
+    needs: [version, switch, pc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --generate-notes \
+            --title "Kickstand ${{ needs.version.outputs.version }}"

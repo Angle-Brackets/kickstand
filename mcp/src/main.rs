@@ -20,6 +20,7 @@ mod symbolize;
 mod tail;
 mod tools;
 mod until;
+mod update;
 mod watch;
 mod watchdog;
 
@@ -83,6 +84,16 @@ enum Command {
     /// Pair with the Switch showing CODE (open Kickstand from hbmenu on it to see the code), and use it from
     /// now on. Finds it on the network unless --host is given.
     Pair { code: String },
+    /// Update Kickstand: this PC's copy to the latest release, then the Switch to the PC's version (its
+    /// background service restarts, about 15 s; only while nothing is running on it).
+    Update {
+        /// Only say whether there's something to update.
+        #[arg(long)]
+        check: bool,
+        /// Only update the Switch (to this PC's version).
+        #[arg(long)]
+        switch: bool,
+    },
     /// Make the Switch forget this PC: agents here can't use it until you pair again with the code on its
     /// screen. Other PCs paired with it keep working.
     Unpair,
@@ -508,6 +519,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             }
             return Ok(());
         }
+        Command::Update { check, switch } => return update(cli.host, cli.port, check, switch).await,
         Command::Pair { code } => {
             let host = pairing::pick(cli.host.as_deref(), cli.port).await?;
             let info = pairing::pair(&host, cli.port, &code).await?;
@@ -847,10 +859,56 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         | Command::Symbolize { .. }
         | Command::Discover { .. }
         | Command::Pair { .. }
+        | Command::Update { .. }
         | Command::Link { .. }
         | Command::Install { .. } => {
             unreachable!()
         }
+    }
+    Ok(())
+}
+
+/// `kickstand update`: the PC first; a new copy then updates the Switch itself, with its own version.
+async fn update(host: Option<String>, port: u16, check: bool, switch_only: bool) -> Result<()> {
+    if !switch_only {
+        let newer = tokio::task::spawn_blocking(update::newer).await??;
+        match newer {
+            None => println!("Kickstand {} on this PC is the latest", update::VERSION),
+            Some(release) if check => {
+                println!("Kickstand {} is out (this PC has {}): run `kickstand update`. What's new: {}", release.version, update::VERSION, release.page)
+            }
+            Some(release) => {
+                println!("updating this PC from {} to {}…", update::VERSION, release.version);
+                let exe = tokio::task::spawn_blocking(move || update::update_pc(&release)).await??;
+                println!("updated {}", exe.display());
+                // The new copy puts its own version on the Switch.
+                let mut next = std::process::Command::new(exe);
+                next.args(["update", "--switch"]);
+                if let Some(host) = &host {
+                    next.args(["--host", host]);
+                }
+                let status = next.arg("--port").arg(port.to_string()).status()?;
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+    }
+    let Ok(host) = config::host(host) else {
+        println!("no Switch paired, so only this PC was checked");
+        return Ok(());
+    };
+    let client = Client::new(format!("{host}:{port}"), config::load_token()?);
+    let info = client.hello().await.with_context(|| format!("reaching the Switch at {host}"))?;
+    if !update::switch_behind(&info.version) {
+        println!("the Switch has Kickstand {} already", info.version);
+        return Ok(());
+    }
+    if check {
+        println!("the Switch has Kickstand {}: `kickstand update --switch` puts {} on it", info.version, update::VERSION);
+        return Ok(());
+    }
+    println!("updating the Switch from {} to {} (its background service restarts, about 15 s)…", info.version, update::VERSION);
+    for note in update::update_switch(&client).await? {
+        println!("{note}");
     }
     Ok(())
 }

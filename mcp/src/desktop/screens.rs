@@ -742,6 +742,15 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             if unpair.clicked() && model.busy.is_none() {
                 app.ask(Confirm::Unpair);
             }
+            if let Reach::Connected(live) = &model.reach
+                && crate::update::switch_behind(&live.info.version)
+            {
+                ui.add_space(18.0);
+                let update = theme::link(ui, "Update", 13.0, Face::Mono).on_hover_text(format!("Put Kickstand {} on this Switch", crate::update::VERSION));
+                if update.clicked() && model.busy.is_none() {
+                    app.ask(Confirm::UpdateSwitch);
+                }
+            }
         });
     });
     ui.add_space(12.0);
@@ -806,24 +815,52 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 }
 
-/// The open confirmation ([`Kickstand::confirm`]). `open` runs from 0 to 1 as it opens and back as it
-/// closes; it only takes clicks while open.
-pub fn confirm(app: &mut Kickstand, ctx: &egui::Context, open: f32, name: &str) {
-    let (title, text, action, cmd) = match app.confirm {
+/// The open confirmation's title and text, from the model (drawn after it's unlocked).
+pub fn confirm_words(what: Confirm, model: &Model) -> (String, String) {
+    let name = model.name.clone().unwrap_or_else(|| "The Switch".into());
+    match what {
         Confirm::Reboot => (
-            "Restart into hekate?".to_string(),
-            "The Switch restarts into hekate's menu. Whatever is running closes without saving. To come back, boot Atmosphère from hekate.".to_string(),
-            "Restart",
-            Cmd::Reboot,
+            "Restart into hekate?".into(),
+            "The Switch restarts into hekate's menu. Whatever is running closes without saving. To come back, boot Atmosphère from hekate.".into(),
         ),
         Confirm::Unpair => (
-            "Unpair this computer?".to_string(),
-            format!(
-                "{name} forgets this computer. Agents here can't use it until you pair again with the code on its screen. Other computers paired with it keep working."
-            ),
-            "Unpair",
-            Cmd::Unpair,
+            "Unpair this computer?".into(),
+            format!("{name} forgets this computer. Agents here can't use it until you pair again with the code on its screen. Other computers paired with it keep working."),
         ),
+        Confirm::UpdatePc => {
+            let version = model.update.as_ref().map_or_else(String::new, |r| r.version.to_string());
+            (
+                format!("Update to {version}?"),
+                format!(
+                    "Kickstand on this computer goes from {} to {version}: it downloads it, checks it's signed by Kickstand's key, and opens again. Agents already running keep the old version until they restart. Then the Switch can be updated from here.",
+                    crate::update::VERSION
+                ),
+            )
+        }
+        Confirm::UpdateSwitch => {
+            let from = match &model.reach {
+                Reach::Connected(live) => live.info.version.clone(),
+                _ => "its version".into(),
+            };
+            (
+                "Update the Switch?".into(),
+                format!(
+                    "{name} goes from Kickstand {from} to {}. Its background service restarts, which takes about 15 seconds; nothing reboots. Only while nothing is running on it and no agent is at work.",
+                    crate::update::VERSION
+                ),
+            )
+        }
+    }
+}
+
+/// The open confirmation ([`Kickstand::confirm`]), with [`confirm_words`]. `open` runs from 0 to 1 as it
+/// opens and back as it closes; it only takes clicks while open.
+pub fn confirm(app: &mut Kickstand, ctx: &egui::Context, open: f32, (title, text): (String, String)) {
+    let (action, cmd) = match app.confirm {
+        Confirm::Reboot => ("Restart", Cmd::Reboot),
+        Confirm::Unpair => ("Unpair", Cmd::Unpair),
+        Confirm::UpdatePc => ("Update", Cmd::UpdatePc),
+        Confirm::UpdateSwitch => ("Update", Cmd::UpdateSwitch),
     };
     // The frame fades with what's in it.
     let frame = egui::Frame::new().fill(theme::paper().gamma_multiply(open)).stroke(Stroke::new(1.5, ink().gamma_multiply(open))).inner_margin(Margin::same(28));

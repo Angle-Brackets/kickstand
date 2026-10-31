@@ -17,10 +17,12 @@ use tokio::sync::mpsc;
 use crate::client::{Client, DaemonInfo};
 use crate::link::{self, App};
 use crate::pairing::{self, Found};
-use crate::{config, tools};
+use crate::{config, tools, update};
 
 /// How often the paired console is asked what's going on.
 const POLL: Duration = Duration::from_secs(2);
+/// How often to look for a newer release.
+const UPDATE_CHECK: Duration = Duration::from_secs(6 * 3600);
 /// How long a discovery round listens.
 const DISCOVER_WAIT: Duration = Duration::from_millis(1200);
 
@@ -37,6 +39,10 @@ pub enum Cmd {
     Reboot,
     /// Make the console in use forget this PC, and stop using it.
     Unpair,
+    /// Replace this program with the newer release found, then start it again.
+    UpdatePc,
+    /// Put this PC's version of Kickstand on the console in use.
+    UpdateSwitch,
 }
 
 #[derive(Default)]
@@ -61,6 +67,10 @@ pub struct Model {
     pub labels: Labels,
     /// The console in use has just been unpaired: the UI goes back to finding one.
     pub unpaired: bool,
+    /// A release newer than this program, once one is found.
+    pub update: Option<update::Release>,
+    /// This program was just updated: the UI starts the new copy here and closes.
+    pub restart: Option<std::path::PathBuf>,
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
@@ -170,6 +180,7 @@ impl Worker {
             tokio::spawn(self.clone().nickname(host));
         }
         let discovery = tokio::spawn(self.clone().discover_loop());
+        let updates = tokio::spawn(self.clone().update_loop());
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -182,6 +193,17 @@ impl Worker {
             }
         }
         discovery.abort();
+        updates.abort();
+    }
+
+    /// Looks for a newer release now and then (quietly: offline, it just finds nothing).
+    async fn update_loop(self) {
+        loop {
+            if let Ok(Ok(Some(release))) = tokio::task::spawn_blocking(update::newer).await {
+                self.update(|m| m.update = Some(release));
+            }
+            tokio::time::sleep(UPDATE_CHECK).await;
+        }
     }
 
     /// Asks the paired console who's connected and what they're doing, and looks again at which AI apps
@@ -290,6 +312,25 @@ impl Worker {
                 Ok(format!("The Switch stays awake for {} min", left.div_ceil(60)))
             }),
             Cmd::Unpair => self.unpair().await,
+            Cmd::UpdatePc => {
+                let Some(release) = self.model.lock().unwrap().update.clone() else { return };
+                self.update(|m| m.busy = Some("Updating Kickstand"));
+                let worker = self.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || update::update_pc(&release)).await.map_err(anyhow::Error::from).and_then(|r| r);
+                    worker.update(|m| {
+                        m.busy = None;
+                        match result {
+                            Ok(exe) => m.restart = Some(exe),
+                            Err(e) => m.notice = Some((format!("Couldn't update: {e:#}"), true)),
+                        }
+                    });
+                });
+            }
+            Cmd::UpdateSwitch => self.button("Updating the Switch", |client| async move {
+                update::update_switch(&client).await?;
+                Ok(format!("The Switch has Kickstand {}", update::VERSION))
+            }),
             Cmd::Reboot => self.button("Restarting", |client| async move {
                 client.reboot_to_hekate(HekateTarget::Menu).await?;
                 Ok("The Switch is restarting into hekate's menu".into())
