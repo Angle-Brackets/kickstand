@@ -317,7 +317,7 @@ pub enum Closed {
 
 /// Closes `app` and waits for the home menu to take over again. The Album is closed with HOME, which makes
 /// the system ask it to exit: terminating it behind the home menu's back crashes the home menu (2144-0001,
-/// twice; see `context/AGENT_LOG.md`), and hbmenu has no exit button. An application (a game, or hbloader
+/// twice), and hbmenu has no exit button. An application (a game, or hbloader
 /// with full memory) is terminated.
 pub async fn close(client: &Client, mode: Mode, app: &App) -> Result<Closed> {
     if mode == Mode::Applet {

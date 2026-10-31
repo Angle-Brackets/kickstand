@@ -9,3 +9,7 @@ captures/
 logs/
 # Agent worktrees (Claude Code).
 .claude/worktrees/
+
+# Local notes, kept out of the repo
+context/AGENT_LOG.md
+context/LANDSCAPE.md

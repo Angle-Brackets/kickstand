@@ -42,7 +42,7 @@ Kickstand is written 100% in Rust across three workspace components:
 | **`mcp/`** | Runs on the PC (stable Rust). A single binary (`kickstand`) that acts as the **egui desktop application** (when run with no arguments), the **stdio MCP server** (`kickstand serve`, built on `rmcp`), and a **full-featured CLI** (`kickstand <subcommand>`). |
 | **`proto/`** | Shared wire protocol crate (`no_std` + `serde`/`postcard`) used by both the Switch daemon and PC client. |
 
-> **Hardware Status:** In daily production use on hardware (Horizon OS 23.0.1, Atmosphère) for the PaperBoat port. See [`context/DESIGN.md`](context/DESIGN.md) and [`context/AGENT_LOG.md`](context/AGENT_LOG.md) for design notes.
+> **Hardware Status:** In daily production use on hardware (Horizon OS 23.0.1, Atmosphère) for the PaperBoat port. See [`context/DESIGN.md`](context/DESIGN.md) for design notes.
 
 ---
 
