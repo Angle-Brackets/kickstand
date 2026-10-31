@@ -157,6 +157,7 @@ Kickstand provides **36 MCP tools** across 6 categories. For full parameter tabl
 Kickstand is designed so an AI agent can iterate autonomously without risking console state, keys, or personal data:
 
 - **SD Card Folder Permissions:** Agents can freely access Kickstand's own directories, `/atmosphere/crash_reports`, and deployment folders configured in `projects.json`. Accessing any other SD card folder triggers an interactive permission prompt in the AI client (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), regardless of the client's auto-approve mode.
+  - If the AI app can't show that prompt, Kickstand asks in its own desktop window instead (opening it if it's closed) with the same choices; the agent waits up to 5 minutes for your answer.
   - You can pre-authorize folders from a terminal with `kickstand allow FOLDER [--write]` (saved in `~/.config/kickstand/access.json`).
   - Interactive CLI commands run by a human in a terminal work anywhere; scripted or agent-invoked CLI runs enforce the same allowlist.
 - **Hard Console Path Blocks:** The Switch daemon itself refuses to write to Atmosphère, Hekate, or Nintendo system directories (except updating Kickstand's own sysmodule), the SD card root, or key files, and never reads keys, NAND backups, or `/Nintendo`.

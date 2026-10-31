@@ -881,3 +881,47 @@ pub fn confirm(app: &mut Kickstand, ctx: &egui::Context, open: f32, (title, text
         app.confirming = false;
     }
 }
+
+/// An agent's question for the user, from an AI app that can't ask it itself ([`crate::questions`]).
+pub fn question(app: &mut Kickstand, ctx: &egui::Context, question: &crate::questions::Question) {
+    use crate::questions::Answer;
+    let who = match question.app.as_deref() {
+        Some(name) => match App::identify(name, |_| false) {
+            Some(which) => format!("An agent in {}", which.name()),
+            None => format!("An agent in {}", capitalize(name)),
+        },
+        None => "An agent".to_string(),
+    };
+    let frame = egui::Frame::new().fill(theme::paper()).stroke(Stroke::new(1.5, ink())).inner_margin(Margin::same(28));
+    let id = egui::Id::unique(("question", &question.id));
+    let modal = egui::Modal::new(id).frame(frame).backdrop_color(theme::scrim()).show(ctx, |ui| {
+        ui.set_max_width(ui.available_width().min(480.0));
+        ui.spacing_mut().item_spacing.y = 16.0;
+        theme::heading(ui, "Allow this?", 30.0);
+        theme::text(ui, &format!("{who} wants to {} on your Switch's SD card.", question.action), Face::Regular, 16.0, body());
+        theme::text(ui, &format!("Allowing the folder covers {}.", question.covers), Face::Regular, 15.0, muted());
+        ui.add_space(4.0);
+        let mut answer = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
+            if theme::button(ui, "Just this once", Kind::Primary, true, true).clicked() {
+                answer = Some(Answer::Once);
+            }
+            if theme::button(ui, "Folder, until it restarts", Kind::Outline, true, true).clicked() {
+                answer = Some(Answer::Session);
+            }
+            if theme::button(ui, "Folder, from now on", Kind::Outline, true, true).clicked() {
+                answer = Some(Answer::Always);
+            }
+        });
+        if theme::link(ui, "Don't allow", 16.0, Face::Semi).clicked() {
+            answer = Some(Answer::No);
+        }
+        answer
+    });
+    // Closing it without choosing (Escape, or a click outside) counts as no.
+    let answer = modal.inner.or_else(|| modal.should_close().then_some(Answer::No));
+    if let Some(answer) = answer {
+        app.send(Cmd::Answer { id: question.id.clone(), answer });
+    }
+}

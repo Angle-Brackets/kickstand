@@ -16,6 +16,7 @@ mod mock;
 mod nxlink;
 mod pairing;
 mod project;
+mod questions;
 mod symbolize;
 mod tail;
 mod tools;

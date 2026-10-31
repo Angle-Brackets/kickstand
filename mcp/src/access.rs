@@ -8,7 +8,8 @@
 //!   access.json`, which `kickstand allow` edits).
 //!
 //! For anything else the MCP server asks the user through the AI app (an MCP elicitation: a question
-//! in the app, whatever its permission mode), and the CLI goes ahead only when a person typed the
+//! in the app, whatever its permission mode), or in Kickstand's own window when the app can't
+//! ([`crate::questions`]), and the CLI goes ahead only when a person typed the
 //! command (stdin is a terminal). This keeps an agent from wandering the card by mistake; it isn't a
 //! wall against one set on getting around it, which could edit access.json like any file of the user's.
 

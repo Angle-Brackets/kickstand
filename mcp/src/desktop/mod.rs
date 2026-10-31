@@ -86,6 +86,8 @@ pub struct Kickstand {
     /// A confirmation is open, and which (kept while it fades out).
     confirming: bool,
     confirm: Confirm,
+    /// The agent question last brought to the front, so the window is raised once per question.
+    raised: Option<String>,
     /// The Link screen's tab.
     tab: crate::link::Maker,
     /// Which makers' groups are folded in the home screen's linked apps (by [`crate::link::Maker::index`]).
@@ -136,6 +138,7 @@ impl Kickstand {
             address: None,
             confirming: false,
             confirm: Confirm::Reboot,
+            raised: None,
             tab,
             folded: [false; 4],
             dark: crate::config::dark_theme(),
@@ -433,6 +436,7 @@ impl eframe::App for Kickstand {
             });
         });
         let words = screens::confirm_words(self.confirm, &model);
+        let question = model.questions.first().cloned();
         if let Some(exe) = model.restart.take() {
             // The new copy opens its own window as this one closes.
             match std::process::Command::new(&exe).arg("desktop").stdin(std::process::Stdio::null()).spawn() {
@@ -445,6 +449,16 @@ impl eframe::App for Kickstand {
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-open"), self.confirming, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {
             screens::confirm(self, ui.ctx(), open, words);
+        }
+        if let Some(question) = &question {
+            // A new question: bring the window to the user.
+            if self.raised.as_ref() != Some(&question.id) {
+                self.raised = Some(question.id.clone());
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+            }
+            screens::question(self, ui.ctx(), question);
         }
         let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("overview-open"), self.overview, OPEN_S, egui::emath::easing::cubic_out);
         if open > 0.0 {

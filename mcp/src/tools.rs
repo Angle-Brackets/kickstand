@@ -16,6 +16,7 @@ use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_r
 use serde::Deserialize;
 
 use crate::access::{self, Access, AllowFor, Approval, Need};
+use crate::questions::Answer;
 use crate::client::{Client, check_path};
 
 /// Default and maximum bytes `read_file` returns inline; use `download` for more.
@@ -552,12 +553,36 @@ impl Tools {
             Ok(None) | Err(ElicitationError::UserDeclined | ElicitationError::UserCancelled) => {
                 anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
             }
-            Err(ElicitationError::CapabilityNotSupported) => anyhow::bail!(
-                "{path} is outside the folders Kickstand may {} without asking the user, and this AI app can't show \
-                 Kickstand's question. Ask the user whether you may; they can allow it by running `kickstand allow \
-                 {folder}{flag}` in their own terminal (it refuses to run from an agent)",
-                need.verb()
-            ),
+            // This AI app can't show the question: Kickstand asks in its own window.
+            Err(ElicitationError::CapabilityNotSupported) => {
+                let covers = format!(
+                    "everything in {}{}",
+                    access::describe(&folder),
+                    if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
+                );
+                let app = self.client.app().or_else(|| peer.peer_info().map(|info| info.client_info.name.clone()));
+                let ask_in_chat = format!(
+                    "Ask the user, as a question, whether you may {action}; they can allow it in Kickstand's window, or by running \
+                     `kickstand allow {folder}{flag}` in their own terminal (it refuses to run from an agent)"
+                );
+                match crate::questions::ask(app, action, &covers, std::time::Duration::from_secs(300)).await {
+                    Ok(Some(Answer::Once)) => Ok(()),
+                    Ok(Some(Answer::Session)) => {
+                        self.access.allow_for_session(&folder, need);
+                        Ok(())
+                    }
+                    Ok(Some(Answer::Always)) => access::save(&folder, need),
+                    Ok(Some(Answer::No)) => {
+                        anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
+                    }
+                    Ok(None) => anyhow::bail!("Kickstand asked the user in its window, with no answer in 5 minutes. {ask_in_chat}"),
+                    Err(e) => anyhow::bail!(
+                        "{path} is outside the folders Kickstand may {} without asking the user, this AI app can't show Kickstand's \
+                         question, and {e:#}. {ask_in_chat}",
+                        need.verb()
+                    ),
+                }
+            }
             Err(e) => anyhow::bail!("couldn't ask the user about {path}: {e}"),
         }
     }

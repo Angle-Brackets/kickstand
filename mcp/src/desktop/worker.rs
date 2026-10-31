@@ -43,6 +43,8 @@ pub enum Cmd {
     UpdatePc,
     /// Put this PC's version of Kickstand on the console in use.
     UpdateSwitch,
+    /// The user's answer to an agent's question ([`crate::questions`]).
+    Answer { id: String, answer: crate::questions::Answer },
 }
 
 #[derive(Default)]
@@ -71,6 +73,8 @@ pub struct Model {
     pub update: Option<update::Release>,
     /// This program was just updated: the UI starts the new copy here and closes.
     pub restart: Option<std::path::PathBuf>,
+    /// Agents' questions for the user, oldest first, from AI apps that can't ask themselves.
+    pub questions: Vec<crate::questions::Question>,
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
@@ -191,6 +195,7 @@ impl Worker {
         }
         let discovery = tokio::spawn(self.clone().discover_loop());
         let updates = tokio::spawn(self.clone().update_loop());
+        let questions = tokio::spawn(self.clone().question_loop());
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -204,6 +209,23 @@ impl Worker {
         }
         discovery.abort();
         updates.abort();
+        questions.abort();
+    }
+
+    /// Says the window is open, and picks up agents' questions for the user, every second.
+    async fn question_loop(self) {
+        loop {
+            let found = tokio::task::spawn_blocking(|| {
+                crate::questions::heartbeat();
+                crate::questions::pending()
+            })
+            .await
+            .unwrap_or_default();
+            if self.model.lock().unwrap().questions != found {
+                self.update(|m| m.questions = found);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// Looks for a newer release now and then (quietly: offline, it just finds nothing).
@@ -335,6 +357,15 @@ impl Worker {
                             Err(e) => m.notice = Some((format!("Couldn't update: {e:#}"), true)),
                         }
                     });
+                });
+            }
+            Cmd::Answer { id, answer } => {
+                let result = crate::questions::answer(&id, answer);
+                self.update(|m| {
+                    m.questions.retain(|q| q.id != id);
+                    if let Err(e) = result {
+                        m.notice = Some((format!("Couldn't pass on your answer: {e:#}"), true));
+                    }
                 });
             }
             Cmd::UpdateSwitch => self.button("Updating the Switch", |client| async move {
