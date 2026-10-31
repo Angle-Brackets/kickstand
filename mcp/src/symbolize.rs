@@ -16,7 +16,7 @@ pub struct Symbolizer {
 }
 
 impl Symbolizer {
-    /// `module` defaults to the ELF's file name without its extension (`Paperboat.elf` → `Paperboat`).
+    /// `module` defaults to the ELF's file name without its extension (`MyGame.elf` → `MyGame`).
     pub fn new(elf: &Path, module: Option<&str>) -> Result<Self> {
         let loader = addr2line::Loader::new(elf).map_err(|e| anyhow::anyhow!("{e}")).with_context(|| format!("loading {}", elf.display()))?;
         let module = match module {

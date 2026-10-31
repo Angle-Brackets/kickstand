@@ -10,9 +10,11 @@ use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::service::{ElicitationError, RequestContext};
+use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
+use crate::access::{self, Access, AllowFor, Approval, Need};
 use crate::client::{Client, check_path};
 
 /// Default and maximum bytes `read_file` returns inline; use `download` for more.
@@ -29,6 +31,8 @@ pub struct Tools {
     elf: Arc<std::sync::Mutex<Option<ElfChoice>>>,
     /// The last screenshots handed out, by number, for input_until to cut patches from.
     shots: Arc<std::sync::Mutex<Shots>>,
+    /// The folders the user allowed during this session (see access.rs).
+    access: Arc<Access>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -47,8 +51,22 @@ type ElfChoice = (String, Option<String>);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct PathArg {
-    /// Absolute path from the SD card root, e.g. /switch/paperboat or /atmosphere/crash_reports.
+    /// Absolute path from the SD card root, e.g. /switch or /atmosphere/crash_reports.
     pub path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TailArgs {
+    /// A log file on the SD card, absolute from its root.
+    pub path: String,
+    /// Without from: how many of its last lines to return first (default 40).
+    pub lines: Option<u32>,
+    /// Continue from this byte offset (the "next" a previous call returned) instead of the last lines.
+    pub from: Option<u64>,
+    /// Then keep collecting what's added for this long (default 0, max 60).
+    pub follow_seconds: Option<f64>,
+    /// Stop following as soon as a new line contains this text.
+    pub until: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -73,13 +91,13 @@ pub struct DownloadArgs {
 pub struct UploadArgs {
     /// File on this PC to send.
     pub local_path: String,
-    /// Destination on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ or the sysmodule's /atmosphere/contents/42000000004D4350/.
+    /// Destination on the SD card, absolute from its root, e.g. /switch/mygame/mygame.nro.
     pub remote_path: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct DeleteArgs {
-    /// File or directory on the SD card. Must be under /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ or the sysmodule's /atmosphere/contents/42000000004D4350/.
+    /// File or directory on the SD card, absolute from its root.
     pub path: String,
     /// Delete a directory and everything in it (default false: only files and empty directories).
     pub recursive: Option<bool>,
@@ -199,9 +217,9 @@ pub struct RunNroArgs {
     /// An NRO on this PC to send and run (e.g. a fresh build).
     pub local_path: Option<String>,
     /// Where to put local_path on the SD card (default /switch/kickstand/<file name>). Must be under
-    /// /switch/ inside the write roots, in a directory that exists.
+    /// /switch/, in a directory that exists.
     pub dest: Option<String>,
-    /// Instead of local_path: an NRO already on the SD card, e.g. /switch/paperboat/paperboat.nro.
+    /// Instead of local_path: an NRO already on the SD card, e.g. /switch/mygame/mygame.nro.
     pub sd_path: Option<String>,
     /// Arguments for the NRO (argv[1..]).
     pub args: Option<Vec<String>>,
@@ -214,13 +232,13 @@ pub struct RunNroArgs {
     /// The module name its backtraces use (default: the ELF's file name without .elf).
     pub module: Option<String>,
     /// "full" (default: in a game's place with the console's full memory; games need it) or "applet" (hbmenu
-    /// in the Album, a few hundred MB: small tools only, refused for games).
+    /// in the Album, a few hundred MB: small tools only, refused for the projects in projects.json).
     pub mode: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TestBuildArgs {
-    /// A project from ~/.config/kickstand/projects.json (e.g. "paperboat").
+    /// A project from ~/.config/kickstand/projects.json, by name.
     pub project: String,
     /// Run the files as they are, without building (default false).
     pub skip_build: Option<bool>,
@@ -371,7 +389,7 @@ pub struct MemoryMapArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReadMemoryArgs {
     /// An address expression: 0x… (absolute), nro+0x… (in the homebrew's NRO; also its module name, e.g.
-    /// Paperboat+0x…), heap+0x…, a symbol from the ELF (e.g. gPlayerStatus), any of those plus or minus
+    /// MyGame+0x…), heap+0x…, a symbol from the ELF (e.g. gPlayerStatus), any of those plus or minus
     /// offsets, and [expr] for the 64-bit pointer stored at expr (e.g. [gCurrentEncounter]+0x10).
     pub address: String,
     /// Bytes to read (default: one value of the format, 64 for hex, 256 for str; at most 1048576).
@@ -458,6 +476,7 @@ impl Tools {
             collector: Default::default(),
             elf: Default::default(),
             shots: Default::default(),
+            access: Default::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -485,6 +504,41 @@ impl Tools {
             (Some((n, jpeg)), _) => Ok((*n, jpeg.clone())),
             (None, Some(id)) => anyhow::bail!("shot {id} is gone (the last {SHOTS_KEPT} are kept): take a screenshot and use its number"),
             (None, None) => anyhow::bail!("no screenshot yet: take one and pick the region from it"),
+        }
+    }
+
+    /// Lets the agent `action` (e.g. "read /config/x.ini") on `path` (normalized) only inside the folders
+    /// it may use freely or the user allows now: the AI app shows the user the question.
+    async fn permit(&self, peer: &Peer<RoleServer>, path: &str, need: Need, is_dir: bool, action: &str) -> anyhow::Result<()> {
+        if self.access.allowed(path, need) {
+            return Ok(());
+        }
+        let folder = access::folder_of(path, is_dir);
+        let message = format!(
+            "Kickstand: the agent wants to {action} on your Switch's SD card. Allowing the folder covers everything in {}{}.",
+            access::describe(&folder),
+            if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
+        );
+        let flag = if need == Need::Write { " --write" } else { "" };
+        match peer.elicit_with_timeout::<Approval>(message, Some(std::time::Duration::from_secs(300))).await {
+            Ok(Some(answer)) => match answer.allow {
+                AllowFor::Once => Ok(()),
+                AllowFor::Session => {
+                    self.access.allow_for_session(&folder, need);
+                    Ok(())
+                }
+                AllowFor::Always => access::save(&folder, need),
+            },
+            Ok(None) | Err(ElicitationError::UserDeclined | ElicitationError::UserCancelled) => {
+                anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
+            }
+            Err(ElicitationError::CapabilityNotSupported) => anyhow::bail!(
+                "{path} is outside the folders Kickstand may {} without asking the user, and this AI app can't show \
+                 Kickstand's question. Ask the user whether you may; they can allow it by running `kickstand allow \
+                 {folder}{flag}` in their own terminal (it refuses to run from an agent)",
+                need.verb()
+            ),
+            Err(e) => anyhow::bail!("couldn't ask the user about {path}: {e}"),
         }
     }
 
@@ -676,17 +730,22 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"full\" (default) runs it with the console's full memory in a game's place (see open_hbmenu), closing whatever application runs (ask before closing a game the user is playing); games like PaperBoat and TTYDRecomp always need this. mode \"applet\" runs small tools quickly from the Album, and is refused for games. An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
-    async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>) -> CallToolResult {
+    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"full\" (default) runs it with the console's full memory in a game's place (see open_hbmenu), closing whatever application runs (ask before closing a game the user is playing); games always need this. mode \"applet\" runs small tools quickly from the Album, and is refused for the projects in projects.json (the user's games). An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
+    async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let program = match (args.local_path, args.sd_path) {
                 (Some(local), None) => {
                     let nro = tokio::fs::read(&local).await.with_context(|| format!("reading {local}"))?;
                     let name = std::path::Path::new(&local).file_name().context("local_path has no file name")?.to_string_lossy().into_owned();
-                    let dest = args.dest.unwrap_or_else(|| format!("/switch/kickstand/{name}"));
+                    let dest = check_path(&args.dest.unwrap_or_else(|| format!("/switch/kickstand/{name}")), true)?;
+                    self.permit(&context.peer, &dest, Need::Write, false, &format!("put {name} at {dest} and run it")).await?;
                     crate::launch::Program::Local { nro, dest }
                 }
-                (None, Some(sd)) => crate::launch::Program::Sd(sd),
+                (None, Some(sd)) => {
+                    let sd = check_path(&sd, false)?;
+                    self.permit(&context.peer, &sd, Need::Read, false, &format!("run {sd}")).await?;
+                    crate::launch::Program::Sd(sd)
+                }
                 _ => anyhow::bail!("give exactly one of local_path and sd_path"),
             };
             let symbols = match &args.elf {
@@ -945,10 +1004,11 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "List a directory on the Switch's SD card. Keys, NAND backups and /Nintendo are not readable.")]
-    async fn list_dir(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
+    #[tool(description = "List a directory on the Switch's SD card. Keys, NAND backups and /Nintendo are not readable. Outside Kickstand's folders, crash reports and the projects' folders, the user is asked first (a question in this app) before list_dir, stat, read_file, tail_file or download can look; if they say no, don't look for another way.")]
+    async fn list_dir(&self, Parameters(args): Parameters<PathArg>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
+            self.permit(&context.peer, &path, Need::Read, true, &format!("see what's in {path}")).await?;
             let (mut entries, truncated) = self.client.list_dir(&path).await?;
             entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
             let mut out = format!("{path} ({} entries)\n", entries.len());
@@ -968,19 +1028,60 @@ impl Tools {
     }
 
     #[tool(description = "Size and type of a file or directory on the Switch's SD card.")]
-    async fn stat(&self, Parameters(args): Parameters<PathArg>) -> CallToolResult {
+    async fn stat(&self, Parameters(args): Parameters<PathArg>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
+            self.permit(&context.peer, &path, Need::Read, false, &format!("look at {path}")).await?;
             let e = self.client.stat(&path).await?;
             anyhow::Ok(if e.is_dir { format!("{path}: directory") } else { format!("{path}: file, {} bytes", e.size) })
         };
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Read part of a file on the Switch's SD card, such as a log or a crash report in /atmosphere/crash_reports. Text comes back as text; binary data as base64.")]
-    async fn read_file(&self, Parameters(args): Parameters<ReadArgs>) -> CallToolResult {
+    #[tool(description = "A log file on the Switch's SD card as it grows: its last lines, then (with follow_seconds) what's added, checked every half second; until stops at the first new line containing some text. Returns next, the offset to pass as from to carry on where this left off. For homebrew that logs to a file, or that wasn't started by run_nro (whose stdout nro_output has).")]
+    async fn tail_file(&self, Parameters(args): Parameters<TailArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
+            self.permit(&context.peer, &path, Need::Read, false, &format!("read {path}")).await?;
+            let (mut text, mut next) = match args.from {
+                Some(from) => (String::new(), from),
+                None => crate::tail::last_lines(&self.client, &path, args.lines.unwrap_or(40) as usize).await?,
+            };
+            let follow = args.follow_seconds.unwrap_or(0.0).clamp(0.0, 60.0);
+            let mut notes = Vec::new();
+            if follow > 0.0 || (args.until.is_some() && args.from.is_some()) {
+                let length = std::time::Duration::from_secs_f64(if follow > 0.0 { follow } else { 15.0 });
+                let found = crate::tail::follow(&self.client, &path, next, length, args.until.as_deref(), READ_DEFAULT as usize).await?;
+                if found.restarted {
+                    notes.push("the file got shorter (truncated or replaced), so this reads it again from the start".to_string());
+                }
+                if found.dropped {
+                    notes.push(format!("only the last {} KiB of what was added", READ_DEFAULT / 1024));
+                }
+                match &args.until {
+                    Some(until) if found.seen => notes.push(format!("stopped at a line containing {until:?}")),
+                    Some(until) => notes.push(format!("no new line contained {until:?} within {:.0} s", length.as_secs_f64())),
+                    None => {}
+                }
+                text.push_str(&found.text);
+                next = found.next;
+            }
+            let mut out = format!("{path}: next {next}");
+            for note in notes {
+                write!(out, "; {note}")?;
+            }
+            out.push('\n');
+            out.push_str(if text.is_empty() { "(nothing new)" } else { &text });
+            anyhow::Ok(out)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Read part of a file on the Switch's SD card, such as a log or a crash report in /atmosphere/crash_reports. Text comes back as text; binary data as base64.")]
+    async fn read_file(&self, Parameters(args): Parameters<ReadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let path = check_path(&args.path, false)?;
+            self.permit(&context.peer, &path, Need::Read, false, &format!("read {path}")).await?;
             let offset = args.offset.unwrap_or(0);
             let len = args.length.unwrap_or(READ_DEFAULT).min(READ_MAX);
             let (data, size) = self.client.read(&path, offset, len).await?;
@@ -998,9 +1099,10 @@ impl Tools {
     }
 
     #[tool(description = "Copy a whole file from the Switch's SD card to this PC.")]
-    async fn download(&self, Parameters(args): Parameters<DownloadArgs>) -> CallToolResult {
+    async fn download(&self, Parameters(args): Parameters<DownloadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, false)?;
+            self.permit(&context.peer, &path, Need::Read, false, &format!("copy {path} to this PC")).await?;
             let size = self.client.stat(&path).await?.size;
             let (data, _) = self.client.read(&path, 0, size).await?;
             tokio::fs::write(&args.local_path, &data).await?;
@@ -1009,10 +1111,11 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Only /switch/paperboat/, /switch/ttydrecomp/, /switch/kickstand/, /kickstand/ and the sysmodule's /atmosphere/contents/42000000004D4350/ are writable.")]
-    async fn upload(&self, Parameters(args): Parameters<UploadArgs>) -> CallToolResult {
+    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
+    async fn upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
+            self.permit(&context.peer, &remote, Need::Write, false, &format!("write {remote}")).await?;
             let data = tokio::fs::read(&args.local_path).await?;
             let stats = self.client.upload(&remote, &data).await?;
             let secs = stats.elapsed.as_secs_f64();
@@ -1085,9 +1188,11 @@ impl Tools {
     }
 
     #[tool(description = "Delete a file or directory on the Switch's SD card, e.g. old builds or test output. Only inside the writable folders (see upload); directories must be empty unless recursive is true.")]
-    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> CallToolResult {
+    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let path = check_path(&args.path, true)?;
+            let is_dir = self.client.stat(&path).await.is_ok_and(|e| e.is_dir);
+            self.permit(&context.peer, &path, Need::Write, is_dir, &format!("delete {path}{}", if is_dir { " and everything in it" } else { "" })).await?;
             let was_dir = self.client.delete(&path, args.recursive.unwrap_or(false)).await?;
             anyhow::Ok(format!("deleted {path}{}", if was_dir { " (directory)" } else { "" }))
         };

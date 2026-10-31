@@ -1,33 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! SD card path rules, shared so the MCP server can reject a bad path before it reaches the console.
 //!
-//! Paths are absolute from the SD root (`/switch/paperboat/paperboat.nro`); the daemon adds `sdmc:`.
+//! Paths are absolute from the SD root (`/switch/mygame/mygame.nro`); the daemon adds `sdmc:`.
 //! The SD card is FAT/exFAT, so every comparison here ignores ASCII case.
 
 use alloc::string::String;
 
-/// The directories uploads may write into. Everything else on the card is read-only to the daemon.
-/// `/switch/ttydrecomp/` is reserved for TTYDRecomp; that port has no SD layout yet. The last two are
-/// the daemon's own NRO folder (listed in hbmenu) and its sysmodule, so both can be updated over the
-/// network.
-pub const WRITE_ROOTS: &[&str] = &[
-    "/switch/paperboat/",
-    "/switch/ttydrecomp/",
-    "/kickstand/",
-    "/switch/kickstand/",
-    "/atmosphere/contents/42000000004D4350/",
-];
+/// Kickstand's own folders: its data, its NRO (listed in hbmenu) and its sysmodule, so all three can be
+/// updated over the network. The PC uses these without asking the user; anywhere else it asks first
+/// (`mcp/src/access.rs`). The daemon itself only enforces the hard rules below.
+pub const OWN_DIRS: &[&str] = &["/kickstand/", "/switch/kickstand/", "/atmosphere/contents/42000000004D4350/"];
+
+/// Top-level folders never written or deleted in (except Kickstand's sysmodule folder): Atmosphère and
+/// hekate (a bad file there can stop the console booting) and everything [`DENIED_ROOTS`] keeps from
+/// being read.
+const PROTECTED_ROOTS: &[&str] = &["/atmosphere", "/bootloader", "/exosphere"];
 
 /// The payload Atmosphère reboots into; on this setup, hekate.
 pub const REBOOT_PAYLOAD: &str = "/atmosphere/reboot_payload.bin";
 /// hekate's boot entries, read to turn an entry name into the index hekate wants.
 pub const HEKATE_INI: &str = "/bootloader/hekate_ipl.ini";
 
-/// Single files outside the write roots that are also ours: where hbmenu's NetLoader saved our NROs
-/// before `/switch/kickstand/` existed. Writable so they can be cleaned up.
-const OWN_FILES: &[&str] = &["/switch/kickstand.nro", "/switch/kickstand-hello.nro"];
-
-/// Atmosphère's override config. Not under a write root: only [`crate::Request::HblOverride`] changes it,
+/// Atmosphère's override config. Protected: only [`crate::Request::HblOverride`] changes it,
 /// and only Kickstand's own entry ([`crate::hbl`]).
 pub const OVERRIDE_CONFIG: &str = "/atmosphere/config/override_config.ini";
 
@@ -65,7 +59,7 @@ pub enum PathError {
     BadComponent,
     /// Reading this path could expose keys, NAND backups or console-unique data.
     ReadDenied,
-    /// Writes are limited to [`WRITE_ROOTS`].
+    /// Atmosphère's, hekate's and Nintendo's folders, the top of the card, and key files are never written.
     WriteDenied,
 }
 
@@ -77,8 +71,8 @@ impl PathError {
             PathError::BadComponent => "path contains '..', ':', '\\' or a control character",
             PathError::ReadDenied => "reading keys, NAND backups or /Nintendo is not allowed",
             PathError::WriteDenied => {
-                "writes and deletes are limited to /switch/paperboat/, /switch/ttydrecomp/, and the daemon's \
-                 own /kickstand/, /switch/kickstand/ and /atmosphere/contents/42000000004D4350/"
+                "never written or deleted: Atmosphère's, hekate's and Nintendo's folders (except Kickstand's own \
+                 sysmodule), NAND backups, files or folders at the top of the card, and key files"
             }
         }
     }
@@ -120,15 +114,14 @@ pub fn check_read(path: &str) -> Result<String, PathError> {
     Ok(path)
 }
 
-/// Normalizes `path` and checks that it may be written or deleted. The path must be inside a write
-/// root, not the root itself.
+/// Normalizes `path` and checks that it may be written or deleted: inside a top-level folder, not
+/// protected (unless it's in Kickstand's own sysmodule folder), and not a key file.
 pub fn check_write(path: &str) -> Result<String, PathError> {
-    let path = normalize(path)?;
-    let inside_root = WRITE_ROOTS
-        .iter()
-        .any(|root| path.len() > root.len() && starts_with_ignore_case(&path, root))
-        || OWN_FILES.iter().any(|f| path.eq_ignore_ascii_case(f));
-    if !inside_root || is_key_file(&path) {
+    let path = check_read(path).map_err(|e| if e == PathError::ReadDenied { PathError::WriteDenied } else { e })?;
+    let top_level = parent(&path) == "/";
+    let own = OWN_DIRS.iter().any(|dir| path.len() > dir.len() && starts_with_ignore_case(&path, dir));
+    let protected = PROTECTED_ROOTS.iter().any(|root| under(&path, root));
+    if top_level || (protected && !own) || is_key_file(&path) {
         return Err(PathError::WriteDenied);
     }
     Ok(path)
@@ -142,8 +135,8 @@ pub fn parent(path: &str) -> &str {
     }
 }
 
-/// Whether normalized `path` is `root` or inside it.
-fn under(path: &str, root: &str) -> bool {
+/// Whether normalized `path` is `root` or inside it (`root` without a trailing slash).
+pub fn under(path: &str, root: &str) -> bool {
     starts_with_ignore_case(path, root)
         && (path.len() == root.len() || path.as_bytes()[root.len()] == b'/')
 }
@@ -165,7 +158,7 @@ mod tests {
     #[test]
     fn normalizes() {
         assert_eq!(normalize("/").unwrap(), "/");
-        assert_eq!(normalize("//switch/./paperboat//").unwrap(), "/switch/paperboat");
+        assert_eq!(normalize("//switch/./mygame//").unwrap(), "/switch/mygame");
         assert_eq!(normalize("switch"), Err(PathError::NotAbsolute));
         assert_eq!(normalize("/switch/../atmosphere"), Err(PathError::BadComponent));
         assert_eq!(normalize("/sdmc:/x"), Err(PathError::BadComponent));
@@ -186,18 +179,24 @@ mod tests {
 
     #[test]
     fn write_rules() {
-        assert!(check_write("/switch/paperboat/paperboat.nro").is_ok());
-        assert!(check_write("/Switch/PaperBoat/x.nro").is_ok());
-        assert!(check_write("/kickstand/staging/1").is_ok());
-        assert_eq!(check_write("/switch/paperboat"), Err(PathError::WriteDenied));
-        assert_eq!(check_write("/switch/paperboat2/x"), Err(PathError::WriteDenied));
-        assert_eq!(check_write("/atmosphere/contents/x"), Err(PathError::WriteDenied));
-        assert!(check_write(SYSMODULE_NSP).is_ok());
+        assert!(check_write("/switch/mygame/mygame.nro").is_ok());
+        assert!(check_write("/Switch/MyGame/x.nro").is_ok());
         assert!(check_write("/switch/kickstand.nro").is_ok());
-        assert_eq!(check_write("/switch/kickstand.nro2"), Err(PathError::WriteDenied));
-        assert_eq!(check_write("/switch/hbmenu.nro"), Err(PathError::WriteDenied));
+        assert!(check_write("/config/sys-patch/config.ini").is_ok());
+        assert!(check_write("/kickstand/staging/1").is_ok());
+        assert!(check_write(SYSMODULE_NSP).is_ok());
+        assert_eq!(check_write("/switch"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/hbmenu.nro"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/payload.bin"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/atmosphere/contents/x"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/Atmosphere/config/system_settings.ini"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/atmosphere/contents/0100000000000000/exefs.nsp"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/atmosphere/contents/42000000004D4350"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/bootloader/hekate_ipl.ini"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/emummc/RAW1"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/Nintendo/Contents/x"), Err(PathError::WriteDenied));
         assert_eq!(check_write("/kickstand/prod.keys"), Err(PathError::WriteDenied));
+        assert_eq!(check_write("/switch/../atmosphere/x"), Err(PathError::BadComponent));
     }
 
     #[test]

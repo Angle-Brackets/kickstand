@@ -3,16 +3,17 @@
 //! projects.json` maps a name to where the project is and how to build it, e.g.
 //!
 //! ```json
-//! { "paperboat": {
-//!     "dir": "/home/me/PM64NX/pm64-switch",
-//!     "build": "cmake --build build-switch --target Paperboat_nro",
-//!     "nro": "build-switch/paperboat.nro",
-//!     "elf": "build-switch/Paperboat.elf",
-//!     "dest": "/switch/paperboat/paperboat.nro" } }
+//! { "mygame": {
+//!     "dir": "/home/me/mygame",
+//!     "build": "cmake --build build-switch --target mygame_nro",
+//!     "nro": "build-switch/mygame.nro",
+//!     "elf": "build-switch/mygame.elf",
+//!     "dest": "/switch/mygame/mygame.nro" } }
 //! ```
 //!
 //! `nro` and `elf` are relative to `dir`; `build` runs there with `sh -c` (none: use the files as they are);
-//! `dest` is where NetLoader saves the NRO, which is where the homebrew finds its data; `args` and `module`
+//! `dest` is where NetLoader saves the NRO, which is where the homebrew finds its data (agents may use its
+//! folder without asking, and the NRO never runs in applet mode); `args` and `module`
 //! (the name its backtraces use, default the ELF's file name) are optional.
 
 use std::collections::BTreeMap;

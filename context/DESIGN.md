@@ -48,8 +48,11 @@ Only the power button should ever need the user.
 - **Idle while games run:** no busy loops, so benchmarks aren't skewed.
 - **Boot loops:** a sysmodule that crashes at boot can stop the console booting. Keep the boot2 flag off while
   developing and start it by hand. Recovery: take out the SD card, delete `atmosphere/contents/<id>/`.
-- **Safety:** file writes and launches limited to an allowlist (`switch/paperboat/`, the TTYD folders, a
-  staging dir, logs). Never system files, never NAND. Memory writes only to the process being developed.
+- **Safety:** the console refuses what's never safe (writes in Atmosphère's, hekate's and Nintendo's
+  folders except Kickstand's sysmodule, the top of the card, keys; reads of keys, NAND backups, `/Nintendo`).
+  The PC asks the user (an MCP elicitation) before an agent uses any folder outside Kickstand's own, crash
+  reports and the projects' folders (`mcp/src/access.rs`). No project names in the code: games are whatever
+  `projects.json` lists. Memory writes only to the process being developed.
 - **No auth on a LAN socket:** at least a shared token, and bind only while a dev session is enabled.
 
 ## Build order

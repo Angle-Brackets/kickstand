@@ -45,10 +45,10 @@ async fn upload_round_trip_multi_chunk() {
     let (client, root) = start("tok").await;
     // Not a multiple of the chunk size, so the last chunk is partial.
     let data: Vec<u8> = (0..proto::MAX_CHUNK * 3 + 123).map(|i| (i * 7 % 251) as u8).collect();
-    let stats = client.upload("/switch/paperboat/paperboat.nro", &data).await.unwrap();
+    let stats = client.upload("/switch/mygame/mygame.nro", &data).await.unwrap();
     assert_eq!(stats.size, data.len() as u64);
-    assert_eq!(std::fs::read(root.join("switch/paperboat/paperboat.nro")).unwrap(), data);
-    let (back, size) = client.read("/switch/paperboat/paperboat.nro", 0, data.len() as u64).await.unwrap();
+    assert_eq!(std::fs::read(root.join("switch/mygame/mygame.nro")).unwrap(), data);
+    let (back, size) = client.read("/switch/mygame/mygame.nro", 0, data.len() as u64).await.unwrap();
     assert_eq!(size, data.len() as u64);
     assert_eq!(back, data);
 }
@@ -80,8 +80,8 @@ async fn delete_files_and_dirs() {
     assert!(client.delete("/kickstand/test", false).await.is_err());
     assert!(client.delete("/kickstand/test", true).await.unwrap());
     assert!(!root.join("kickstand/test").exists());
-    // Only inside the write roots, and never a root itself.
-    for path in ["/kickstand", "/switch/paperboat", "/atmosphere/crash_reports/01.log", "/prod.keys"] {
+    // Never at the top of the card, in Atmosphère's folders, or a key file.
+    for path in ["/kickstand", "/switch", "/atmosphere/crash_reports/01.log", "/prod.keys"] {
         let err = client.delete(path, true).await.unwrap_err().to_string();
         assert!(err.contains("Forbidden"), "{path}: {err}");
     }
@@ -164,12 +164,12 @@ fn input_steps_parse() {
 fn symbolizer_finds_module_offsets() {
     // Any ELF loads; this test binary will do. Only the address matching is checked here.
     let exe = std::env::current_exe().unwrap();
-    let symbols = crate::symbolize::Symbolizer::new(&exe, Some("Paperboat")).unwrap();
-    assert_eq!(symbols.offsets_in("#3 Paperboat+0x1a2b (x) paperboat + 0x10"), vec![0x1a2b, 0x10]);
-    assert!(symbols.offsets_in("NotPaperboat+0x10 Paperboat+zz Paperboat").is_empty());
-    let text = "plain\nframe Paperboat+0x40\n";
+    let symbols = crate::symbolize::Symbolizer::new(&exe, Some("MyGame")).unwrap();
+    assert_eq!(symbols.offsets_in("#3 MyGame+0x1a2b (x) mygame + 0x10"), vec![0x1a2b, 0x10]);
+    assert!(symbols.offsets_in("NotMyGame+0x10 MyGame+zz MyGame").is_empty());
+    let text = "plain\nframe MyGame+0x40\n";
     let annotated = symbols.annotate(text);
-    assert!(annotated.starts_with("plain\nframe Paperboat+0x40\n        -> "), "{annotated}");
+    assert!(annotated.starts_with("plain\nframe MyGame+0x40\n        -> "), "{annotated}");
 }
 
 #[test]
@@ -339,21 +339,22 @@ async fn newer_requests_are_refused_politely() {
     }
 }
 
-/// Games never run in applet mode (the user's rule): refused before anything touches the console.
-#[tokio::test]
-async fn games_refuse_applet_mode() {
-    use crate::launch::{Mode, Program, is_game, run_nro};
-    for game in ["/switch/paperboat/paperboat.nro", "/switch/kickstand/PaperBoat-debug.nro", "/switch/ttydrecomp/x.nro", "/switch/TTYDRecomp.nro"] {
-        assert!(is_game(game), "{game}");
+/// Games never run in applet mode (the user's rule): the projects in projects.json, by where they deploy
+/// to or by file name.
+#[test]
+fn games_refuse_applet_mode() {
+    use crate::launch::is_game;
+    let projects: std::collections::BTreeMap<String, crate::project::Project> = serde_json::from_str(
+        r#"{"mygame": {"dir": "/src/mygame", "nro": "build/MyGame-debug.nro", "elf": "build/MyGame.elf", "dest": "/switch/mygame/mygame.nro"}}"#,
+    )
+    .unwrap();
+    for game in ["/switch/mygame/mygame.nro", "/Switch/MyGame/MyGame.nro", "/switch/kickstand/mygame.nro", "/switch/kickstand/MyGame-debug.nro"] {
+        assert!(is_game(game, &projects), "{game}");
     }
-    for tool in ["/switch/kickstand/kickstand.nro", "/switch/kickstand/hello.nro", "/switch/NX-Shell/NX-Shell.nro"] {
-        assert!(!is_game(tool), "{tool}");
+    for tool in ["/switch/kickstand/kickstand.nro", "/switch/mygame/tool.nro", "/switch/NX-Shell/NX-Shell.nro"] {
+        assert!(!is_game(tool, &projects), "{tool}");
     }
-    let (client, _root) = start("tok").await;
-    let err = run_nro(&client, Program::Sd("/switch/paperboat/paperboat.nro".into()), Vec::new(), Mode::Applet).await.err().expect("refused");
-    assert!(err.to_string().contains("full memory only"), "{err}");
-    let local = Program::Local { nro: vec![0; 16], dest: "/switch/kickstand/paperboat.nro".into() };
-    assert!(run_nro(&client, local, Vec::new(), Mode::Applet).await.is_err());
+    assert!(!is_game("/switch/mygame/mygame.nro", &Default::default()));
 }
 
 /// A mock console showing pairing code 123456 and answering probes; returns its daemon and probe addresses.

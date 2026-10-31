@@ -2,6 +2,7 @@
 //! kickstand: an MCP server (stdio) for the daemon on the Switch, a desktop app for setting it up and
 //! following along, and a few CLI commands for using the daemon by hand.
 
+mod access;
 mod capture;
 mod client;
 mod config;
@@ -15,6 +16,7 @@ mod nxlink;
 mod pairing;
 mod project;
 mod symbolize;
+mod tail;
 mod tools;
 mod until;
 mod watch;
@@ -78,7 +80,27 @@ enum Command {
     Get { path: String, local: PathBuf },
     /// Upload a file to the SD card.
     Put { local: PathBuf, path: String },
-    /// Delete a file or directory on the SD card (inside the writable folders only).
+    /// Print the last lines of a file on the SD card, such as a log; with -f, keep printing what's added.
+    Tail {
+        path: String,
+        /// How many lines.
+        #[arg(short = 'n', long, default_value_t = 40)]
+        lines: usize,
+        /// Keep printing what's added until Ctrl-C.
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Let agents use FOLDER on the SD card from now on without asking (reading; --write for writing and
+    /// deleting too). Only works typed in a terminal. Without FOLDER, list what's allowed.
+    Allow {
+        folder: Option<String>,
+        #[arg(long)]
+        write: bool,
+        /// Stop allowing FOLDER instead.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Delete a file or directory on the SD card (never in Atmosphère's or hekate's folders).
     Rm {
         path: String,
         /// Delete a directory and everything in it.
@@ -206,10 +228,10 @@ enum Command {
         #[arg(long)]
         module: Option<String>,
     },
-    /// Build, deploy, run and watch a project from ~/.config/kickstand/projects.json, e.g. `{"paperboat":
-    /// {"dir": "...", "build": "cmake --build build-switch --target Paperboat_nro", "nro":
-    /// "build-switch/paperboat.nro", "elf": "build-switch/Paperboat.elf", "dest":
-    /// "/switch/paperboat/paperboat.nro"}}` (nro and elf relative to dir; optional "args", "module").
+    /// Build, deploy, run and watch a project from ~/.config/kickstand/projects.json, e.g. `{"mygame":
+    /// {"dir": "...", "build": "cmake --build build-switch --target mygame_nro", "nro":
+    /// "build-switch/mygame.nro", "elf": "build-switch/mygame.elf", "dest":
+    /// "/switch/mygame/mygame.nro"}}` (nro and elf relative to dir; optional "args", "module").
     Test {
         project: String,
         #[arg(long)]
@@ -422,6 +444,31 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             println!("{}", if remove { link::unlink(app)? } else { link::link(app)? });
             return Ok(());
         }
+        Command::Allow { folder, write, remove } => {
+            let Some(folder) = folder else {
+                let saved = access::saved();
+                println!("always: Kickstand's own folders ({}), reading crash reports, and the folders projects.json deploys to", proto::path::OWN_DIRS.join(", "));
+                for f in &saved.write {
+                    println!("{f}: read and write");
+                }
+                for f in saved.read.iter().filter(|f| !saved.write.contains(f)) {
+                    println!("{f}: read");
+                }
+                return Ok(());
+            };
+            use std::io::IsTerminal;
+            anyhow::ensure!(std::io::stdin().is_terminal(), "type `kickstand allow` in a terminal yourself: it doesn't run from an agent or a script");
+            let folder = if write { check_path(&folder, true)? } else { check_path(&folder, false)? };
+            if remove {
+                let was = access::forget(&folder)?;
+                println!("{}", if was { format!("{folder} is no longer allowed") } else { format!("{folder} wasn't allowed") });
+            } else {
+                let need = if write { access::Need::Write } else { access::Need::Read };
+                access::save(&folder, need)?;
+                println!("agents may {} {} from now on without asking", if write { "read, write and delete in" } else { "read" }, access::describe(&folder));
+            }
+            return Ok(());
+        }
         Command::Discover { to } => {
             let to = match to {
                 Some(host) => Some(format!("{host}:{}", proto::discovery::PORT).parse().context("--to takes an IPv4 address")?),
@@ -456,6 +503,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
 
     match command {
         Command::Desktop => unreachable!("opened before the runtime starts"),
+        Command::Allow { .. } => unreachable!("handled before connecting"),
         Command::Serve => {
             let service = tools::Tools::new(client).serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
@@ -466,7 +514,9 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             println!("daemon {} ({:?}, protocol {}): rtt {:.1} ms, uptime {}s", info.version, info.kind, info.protocol, rtt.as_secs_f64() * 1e3, uptime.as_secs());
         }
         Command::Ls { path } => {
-            let (entries, truncated) = client.list_dir(&check_path(&path, false)?).await?;
+            let path = check_path(&path, false)?;
+            typed_or_allowed(&path, access::Need::Read, true)?;
+            let (entries, truncated) = client.list_dir(&path).await?;
             for e in entries {
                 if e.is_dir { println!("{}/", e.name) } else { println!("{}\t{}", e.name, e.size) }
             }
@@ -476,6 +526,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Cat { path } => {
             let path = check_path(&path, false)?;
+            typed_or_allowed(&path, access::Need::Read, false)?;
             let size = client.stat(&path).await?.size;
             let (data, _) = client.read(&path, 0, size).await?;
             use std::io::Write;
@@ -483,6 +534,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Get { path, local } => {
             let path = check_path(&path, false)?;
+            typed_or_allowed(&path, access::Need::Read, false)?;
             let size = client.stat(&path).await?.size;
             let start = std::time::Instant::now();
             let (data, _) = client.read(&path, 0, size).await?;
@@ -492,13 +544,35 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Put { local, path } => {
             let path = check_path(&path, true)?;
+            typed_or_allowed(&path, access::Need::Write, false)?;
             let data = std::fs::read(&local).with_context(|| format!("reading {}", local.display()))?;
             let stats = client.upload(&path, &data).await?;
             let secs = stats.elapsed.as_secs_f64();
             println!("{} bytes in {secs:.1}s ({:.2} MB/s)", stats.size, stats.size as f64 / 1e6 / secs.max(1e-6));
         }
+        Command::Tail { path, lines, follow } => {
+            use std::io::Write;
+            let path = check_path(&path, false)?;
+            typed_or_allowed(&path, access::Need::Read, false)?;
+            let (text, mut next) = tail::last_lines(&client, &path, lines).await?;
+            print!("{text}");
+            if !follow {
+                return Ok(());
+            }
+            loop {
+                tokio::time::sleep(tail::POLL).await;
+                let (data, after, restarted) = tail::since(&client, &path, next).await?;
+                if restarted {
+                    eprintln!("({path} got shorter: reading it again from the start)");
+                }
+                std::io::stdout().write_all(&data)?;
+                std::io::stdout().flush()?;
+                next = after;
+            }
+        }
         Command::Rm { path, recursive } => {
             let path = check_path(&path, true)?;
+            typed_or_allowed(&path, access::Need::Write, client.stat(&path).await.is_ok_and(|e| e.is_dir))?;
             let was_dir = client.delete(&path, recursive).await?;
             println!("deleted {path}{}", if was_dir { "/" } else { "" });
         }
@@ -694,10 +768,15 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Run { nro, applet, dest, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
-                Some(path) => launch::Program::Sd(path.to_string()),
+                Some(path) => {
+                    let path = check_path(path, false)?;
+                    typed_or_allowed(&path, access::Need::Read, false)?;
+                    launch::Program::Sd(path)
+                }
                 None => {
                     let name = std::path::Path::new(&nro).file_name().context("NRO has no file name")?.to_string_lossy();
-                    let dest = dest.unwrap_or_else(|| format!("/switch/kickstand/{name}"));
+                    let dest = check_path(&dest.unwrap_or_else(|| format!("/switch/kickstand/{name}")), true)?;
+                    typed_or_allowed(&dest, access::Need::Write, false)?;
                     launch::Program::Local { nro: std::fs::read(&nro).with_context(|| format!("reading {nro}"))?, dest }
                 }
             };
@@ -741,6 +820,22 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The CLI uses `path` outside the folders agents may use freely (access.rs) only when a person typed
+/// the command: an agent's shell has no terminal on stdin.
+fn typed_or_allowed(path: &str, need: access::Need, is_dir: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() || access::Access::default().allowed(path, need) {
+        return Ok(());
+    }
+    let folder = access::folder_of(path, is_dir);
+    let flag = if need == access::Need::Write { " --write" } else { "" };
+    anyhow::bail!(
+        "{path} is outside the folders agents may {} without asking. Ask the user; they can allow it by typing \
+         `kickstand allow {folder}{flag}` in a terminal",
+        need.verb()
+    )
 }
 
 #[cfg(test)]

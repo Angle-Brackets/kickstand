@@ -184,7 +184,7 @@ impl Symbols {
 }
 
 /// Evaluates an address expression: a number (`0x…` or decimal), `nro`, the module name (e.g. the ELF's
-/// `Paperboat`, as backtraces write it), `heap`, or a symbol, then any `+`/`-` offsets. `[expr]` reads the
+/// `MyGame`, as backtraces write it), `heap`, or a symbol, then any `+`/`-` offsets. `[expr]` reads the
 /// 64-bit pointer at `expr`.
 pub async fn resolve(client: &Client, layout: &Layout, symbols: Option<&Symbols>, module: Option<&str>, expr: &str) -> Result<u64> {
     let expr = expr.trim();

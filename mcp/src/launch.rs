@@ -2,7 +2,7 @@
 //! Opening hbmenu with nobody at the console, in one of two places ([`Mode`]):
 //! - **Applet mode**: the home menu's Album button, which Atmosphère runs hbloader in place of. Quick and
 //!   consistent (no game involved; a running game stays suspended), but homebrew gets a few hundred MB of
-//!   memory. For starting the Kickstand NRO and small tools only: games (PaperBoat, TTYDRecomp) never run
+//!   memory. For starting the Kickstand NRO and small tools only: games (the projects in projects.json) never run
 //!   here (the user's rule), and [`run_nro`] refuses them.
 //! - **Full memory** (what [`run_nro`] uses by default): Atmosphère starts hbloader, with the title's
 //!   memory, in place of a title launched from the home menu. A person holds R for that; the virtual
@@ -397,7 +397,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         Program::Local { dest, .. } => dest,
         Program::Sd(path) => path,
     };
-    if mode == Mode::Applet && is_game(target) {
+    if mode == Mode::Applet && is_game(target, &crate::project::load_all().unwrap_or_default()) {
         bail!("{target} is a game: it runs with full memory only (mode \"full\"), never in applet mode");
     }
     let (nro, dest, args) = match program {
@@ -506,11 +506,14 @@ pub async fn restart_sysmodule(client: &Client, nro: Option<Vec<u8>>) -> Result<
     Ok(notes)
 }
 
-/// The user's games, which need full memory: anything in their folders, or named after them.
-pub(crate) fn is_game(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    ["/switch/paperboat/", "/switch/ttydrecomp/"].iter().any(|dir| path.starts_with(dir))
-        || ["paperboat", "ttyd"].iter().any(|name| path.rsplit('/').next().is_some_and(|file| file.contains(name)))
+/// The user's games, which need full memory: the projects in projects.json, recognised by where they
+/// deploy to or by the NRO's file name (a build sent somewhere else).
+pub(crate) fn is_game(path: &str, projects: &std::collections::BTreeMap<String, crate::project::Project>) -> bool {
+    let file = |p: &str| p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
+    projects.values().any(|project| {
+        let built = project.nro.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase());
+        path.eq_ignore_ascii_case(&project.dest) || file(path) == file(&project.dest) || built.is_some_and(|b| b == file(path))
+    })
 }
 
 /// Notes that the NRO in process `pid` exited (its stdout closed), so that process shows hbmenu again.

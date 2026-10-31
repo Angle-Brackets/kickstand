@@ -62,14 +62,21 @@ tools never set it.
 | See | `screenshot` (scaled or cropped to save tokens; `grid` labels coordinates every 100 px; each gets a shot number), `wait_screen`, `record_gif` (returns a contact sheet) |
 | Play | `press`, `input` (timed steps: buttons held across steps, analog sticks, touch), `input_until` (hold, mash or replay input while this PC watches the screen, stopping when a region changes, goes still, or a piece of an earlier shot appears or is gone: a menu walk or "hold right until the door" in one call) |
 | Debug | `crash_reports`, `crash_report` (Atmosphère reports summarized, fatal records decoded, the crash screenshot), `symbolize` (addr2line on the PC; `run_nro` output is symbolized live with `elf`), `threads` (every thread's backtrace, symbolized with source lines), `memory_map`, `read_memory`, `write_memory` (address expressions with ELF symbols and pointer chains; writes to homebrew only; warns when the ELF isn't the running build) |
-| Files | `list_dir`, `stat`, `read_file`, `download`, `upload`, `delete` |
+| Files | `list_dir`, `stat`, `read_file`, `tail_file` (a log's last lines, then what's added, optionally until a line contains some text), `download`, `upload`, `delete` |
 | Console | `status` (what runs, a fatal error screen, lock screen after a reboot, keep-awake, a small screenshot), `ping`, `resources`, `keep_awake`, `sysmodule` (install restarts onto the new build in about 11 s, no reboot), `hekate_entries`, `reboot` (warm reboot into hekate: an entry, UMS or the menu; needs `confirm`) |
 
 The CLI has the same features (`kickstand --help`), plus `kickstand watch`: a page showing the screen
 live and what's running, so a person can follow the agent (`--bind 0.0.0.0` for a phone on the network).
 
-Safety: writes and deletes only in `/switch/paperboat/`, `/switch/ttydrecomp/`, `/switch/kickstand/`,
-`/kickstand/` and the sysmodule's own folder; keys, NAND backups and `/Nintendo` are never read; memory
+Safety: agents use Kickstand's own folders, crash reports and the folders `projects.json` deploys to
+freely; anywhere else on the SD card, the AI app asks you first ("Just this once", "This folder, until the
+app restarts", "This folder, from now on"), whatever its permission mode. `kickstand allow FOLDER
+[--write]`, typed in a terminal, allows a folder ahead of time (`~/.config/kickstand/access.json`); the CLI's
+file commands work anywhere when you type them, and only in allowed folders from a script or an agent.
+This keeps an agent from wandering the card; it isn't proof against one deliberately getting around it. The
+console itself never writes Atmosphère's, hekate's or Nintendo's folders (except Kickstand's sysmodule),
+the top of the card or key files, and never reads keys, NAND backups or `/Nintendo`. Projects never run in
+applet mode (games need full memory); memory
 writes only to homebrew (hbloader), never a game; reboots are warm reboots to hekate only (RCM-injected
 consoles lose hekate on a cold boot). Every request keeps the console awake for 30 minutes (a Kickstand
 icon by the clock shows it), then its own sleep timers apply again.
