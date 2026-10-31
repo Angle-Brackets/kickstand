@@ -4,7 +4,7 @@ This document details all **36 MCP tools** exposed by `kickstand serve` and the 
 
 ## At a Glance
 
-Open a section to see its tools. The names are the same in every AI app.
+The tool names are the same in every AI app.
 
 | Area | Tools |
 | :--- | :--- |
@@ -16,9 +16,9 @@ Open a section to see its tools. The names are the same in every AI app.
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
 | [CLI Command Reference](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
-<a id="1-develop--run-homebrew"></a>
-<details>
-<summary><h2>1. Develop &amp; Run Homebrew</h2></summary>
+---
+
+## 1. Develop & Run Homebrew
 
 Tools for building, deploying, launching, and supervising homebrew NROs and installed titles on the console.
 
@@ -131,11 +131,9 @@ Launch an installed game or application from the home menu row as a player would
 | `title` | `string` *(required)* | — | 16-digit hex Title ID or substring of the title's name (from [`list_apps`](#list_apps)). |
 | `user` | `integer` | `0` | 0-based index of the user profile to select on the user picker screen. |
 
-</details>
+---
 
-<a id="2-screen-vision--capture"></a>
-<details>
-<summary><h2>2. Screen Vision &amp; Capture</h2></summary>
+## 2. Screen Vision & Capture
 
 Tools for inspecting the console's screen, waiting on visual transitions, and recording motion.
 
@@ -173,11 +171,9 @@ Record the Switch's screen as a looping GIF from repeated captures and save it o
 | `fps` | `integer` | `5` *(max 10)* | Target frames per second. |
 | `width` | `integer` | `640` | Width of the GIF in pixels (`64`–`1280`). |
 
-</details>
+---
 
-<a id="3-controller--touch-input"></a>
-<details>
-<summary><h2>3. Controller &amp; Touch Input</h2></summary>
+## 3. Controller & Touch Input
 
 Tools for driving menus and gameplay via a virtual Pro Controller and touch screen.
 
@@ -233,11 +229,9 @@ Closed-loop input that holds a direction/button, mashes a button repeatedly, or 
 | `timeout_seconds` | `number` | `15.0` *(max 60)* | Give up after this many seconds. |
 | `width` | `integer` | `640` | Width in pixels of the returned screenshot. |
 
-</details>
+---
 
-<a id="4-debugging-crash-analysis--memory"></a>
-<details>
-<summary><h2>4. Debugging, Crash Analysis &amp; Memory</h2></summary>
+## 4. Debugging, Crash Analysis & Memory
 
 Tools for diagnosing crashes, inspecting hung threads, symbolizing addresses, and reading or modifying live memory.
 
@@ -320,11 +314,9 @@ Write a value to the running **homebrew's** memory (strictly refused for retail 
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC. |
 | `module` | `string` | ELF filename stem | Module name for `<module>+0x…` expressions. |
 
-</details>
+---
 
-<a id="5-sd-card-files--logs"></a>
-<details>
-<summary><h2>5. SD Card Files &amp; Logs</h2></summary>
+## 5. SD Card Files & Logs
 
 Tools for inspecting and transferring files on the Switch's SD card.
 
@@ -400,11 +392,9 @@ Delete a file or directory on the Switch's SD card (within permitted writable fo
 | `path` | `string` *(required)* | — | Absolute path on the SD card to delete. |
 | `recursive` | `boolean` | `false` | Delete a non-empty directory and all of its contents. |
 
-</details>
+---
 
-<a id="6-console--daemon-management"></a>
-<details>
-<summary><h2>6. Console &amp; Daemon Management</h2></summary>
+## 6. Console & Daemon Management
 
 Tools for checking console state, managing the background sysmodule, keeping the console awake, and warm-rebooting into Hekate.
 
@@ -476,11 +466,9 @@ Warm-reboot the Switch into Hekate via Atmosphère's `reboot-to-payload` (never 
 | `target` | `string` *(required)* | — | `"menu"` (Hekate main menu), `"ums"` (SD card USB Mass Storage), or a boot entry name/1-based number from [`hekate_entries`](#hekate_entries). |
 | `confirm` | `boolean` *(required)* | — | Must be `true`, and only set after the user has agreed to reboot. |
 
-</details>
+---
 
-<a id="7-cli-command-reference"></a>
-<details>
-<summary><h2>7. CLI Command Reference</h2></summary>
+## 7. CLI Command Reference
 
 Every capability above is also available directly from your terminal via `kickstand <command>` (run `kickstand <command> --help` for full flag details):
 
@@ -531,5 +519,3 @@ Every capability above is also available directly from your terminal via `kickst
 | | `kickstand sysmodule <subcommand>` | `status`, `install <nsp>`, `start`, `stop`, `handover`, `enable`, or `disable`. |
 | | `kickstand reboot [target] [--yes]` | Warm-reboot into Hekate (`menu`, `ums`, or an entry name/number). |
 | | `kickstand exit` | Stop the NRO daemon and return to `hbmenu`. |
-
-</details>
