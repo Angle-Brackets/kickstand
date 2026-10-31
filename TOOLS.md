@@ -2,23 +2,19 @@
 
 This document details all **36 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
----
+## At a Glance
 
-## Table of Contents
+Click a tool to expand it. The names are the same in every AI app.
 
-1. [Develop & Run Homebrew](#1-develop--run-homebrew)
-   - [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`close_app`](#close_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title)
-2. [Screen Vision & Capture](#2-screen-vision--capture)
-   - [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif)
-3. [Controller & Touch Input](#3-controller--touch-input)
-   - [`press`](#press) · [`input`](#input) · [`input_until`](#input_until)
-4. [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory)
-   - [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory)
-5. [SD Card Files & Logs](#5-sd-card-files--logs)
-   - [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete)
-6. [Console & Daemon Management](#6-console--daemon-management)
-   - [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot)
-7. [CLI Command Reference](#7-cli-command-reference)
+| Area | Tools |
+| :--- | :--- |
+| [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`close_app`](#close_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
+| [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
+| [Controller & Touch Input](#3-controller--touch-input) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) |
+| [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
+| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) |
+| [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
+| [Command line](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
 ---
 
@@ -26,7 +22,10 @@ This document details all **36 MCP tools** exposed by `kickstand serve` and the 
 
 Tools for building, deploying, launching, and supervising homebrew NROs and installed titles on the console.
 
-### `test_build`
+<a id="test_build"></a>
+<details>
+<summary><b><code>test_build</code></b> — Build, deploy, run and watch a project in one call</summary>
+
 Build, deploy, run, and watch a project in one call (configured in `~/.config/kickstand/projects.json`; list them with [`projects`](#projects)).
 - Runs the project's build command on the PC (returning the tail of the build log on failure).
 - Verifies that the `.nro` was produced from the `.elf`.
@@ -42,16 +41,22 @@ Build, deploy, run, and watch a project in one call (configured in `~/.config/ki
 | `seconds` | `integer` | `60` *(max 300)* | How many seconds to watch the running NRO before returning `STILL RUNNING`. |
 | `quiet_seconds` | `integer` | `20` | Seconds without stdout before checking whether the screen is frozen for a hang. |
 
----
+</details>
 
-### `projects`
+<a id="projects"></a>
+<details>
+<summary><b><code>projects</code></b> — List the projects test_build knows</summary>
+
 List the projects known to [`test_build`](#test_build) from `~/.config/kickstand/projects.json`, showing each project's name, directory, build command, local NRO path, and SD card destination.
 
 *Parameters: none.*
 
----
+</details>
 
-### `run_nro`
+<a id="run_nro"></a>
+<details>
+<summary><b><code>run_nro</code></b> — Start an NRO with arguments and stream its stdout</summary>
+
 Start a homebrew NRO (either uploaded from `local_path` on the PC or already on the SD card at `sd_path`) with arguments via `hbmenu`'s NetLoader, and stream its initial stdout.
 - **`mode: "full"` (default):** Runs the NRO with the console's full memory in place of a host title (see [`open_hbmenu`](#open_hbmenu)), closing any currently running application first. Required for games.
 - **`mode: "applet"`:** Runs small tools quickly from the Album applet (a few hundred MB of RAM). Refused for projects listed in `projects.json`.
@@ -68,18 +73,24 @@ Start a homebrew NRO (either uploaded from `local_path` on the PC or already on 
 | `module` | `string` | ELF filename stem | Module name used in backtraces. |
 | `mode` | `string` | `"full"` | `"full"` (title takeover with full RAM) or `"applet"` (Album applet mode for small tools). |
 
----
+</details>
 
-### `nro_output`
+<a id="nro_output"></a>
+<details>
+<summary><b><code>nro_output</code></b> — Read more stdout from the NRO started last</summary>
+
 Read additional stdout emitted by the NRO that [`run_nro`](#run_nro) or [`test_build`](#test_build) last started, and check whether its stdout stream is still open (running) or closed (exited).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `wait_seconds` | `integer` | `0` *(max 60)* | Let the NRO run for up to this many seconds before reading new output (returns early on exit). |
 
----
+</details>
 
-### `supervise`
+<a id="supervise"></a>
+<details>
+<summary><b><code>supervise</code></b> — Watch the running homebrew until it exits, crashes or hangs</summary>
+
 Watch the currently running homebrew (started by [`run_nro`](#run_nro)) until an event occurs, and report the outcome:
 - **`EXITED`:** The NRO exited cleanly; returns its final stdout.
 - **`CRASHED`:** Atmosphère recorded a new crash report for the process; returns the symbolized report and Atmosphère's crash screenshot.
@@ -94,9 +105,12 @@ Watch the currently running homebrew (started by [`run_nro`](#run_nro)) until an
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC for symbolizing crash reports and thread stacks. |
 | `reboot_on_fatal` | `boolean` | `true` | Automatically warm-reboot into Hekate entry 1 if the console hits a fatal screen. |
 
----
+</details>
 
-### `open_hbmenu`
+<a id="open_hbmenu"></a>
+<details>
+<summary><b><code>open_hbmenu</code></b> — Open the Homebrew Menu</summary>
+
 Open the Homebrew Menu (`hbmenu`).
 - **`mode: "applet"` (default):** Opens `hbmenu` via the home menu's Album button. Fast and leaves any running game suspended, but only has a few hundred MB of RAM.
 - **`mode: "full"`:** Launches `hbloader` in place of a game title with full console memory. The daemon arms Atmosphère's HBL override config for that single launch so no controller button needs to be held. Tries the previously remembered host title (`~/.config/kickstand/host-title`) or walks the home menu row until a title succeeds.
@@ -105,9 +119,12 @@ Open the Homebrew Menu (`hbmenu`).
 | :--- | :--- | :--- | :--- |
 | `mode` | `string` | `"applet"` | `"applet"` or `"full"`. |
 
----
+</details>
 
-### `close_app`
+<a id="close_app"></a>
+<details>
+<summary><b><code>close_app</code></b> — Close the running homebrew or game</summary>
+
 Close the running homebrew or game.
 - **`"applet"`:** Closes the Album applet cleanly by pressing `HOME` (never terminates the applet process, which would crash `qlaunch`).
 - **`"application"`:** Terminates the running full-memory homebrew or game immediately (without saving).
@@ -116,18 +133,24 @@ Close the running homebrew or game.
 | :--- | :--- | :--- | :--- |
 | `target` | `string` | `"applet"` if open, else `"application"` | `"applet"` or `"application"`. |
 
----
+</details>
 
-### `list_apps`
+<a id="list_apps"></a>
+<details>
+<summary><b><code>list_apps</code></b> — List installed titles in home-menu order</summary>
+
 List installed titles on the console with their 16-digit hex Title IDs and names, ordered most-recently-played first (matching the Switch home menu row).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `max` | `integer` | `12` *(max 64)* | Maximum number of titles to list (`12` is the main home menu row before *All Software*). |
 
----
+</details>
 
-### `launch_title`
+<a id="launch_title"></a>
+<details>
+<summary><b><code>launch_title</code></b> — Launch an installed title as a player would</summary>
+
 Launch an installed game or application from the home menu row as a player would: locates its tile among the 12 most recent titles, presses `A`, and selects a user profile if prompted. Closes any currently running application first.
 
 | Parameter | Type | Default | Description |
@@ -135,13 +158,18 @@ Launch an installed game or application from the home menu row as a player would
 | `title` | `string` *(required)* | — | 16-digit hex Title ID or substring of the title's name (from [`list_apps`](#list_apps)). |
 | `user` | `integer` | `0` | 0-based index of the user profile to select on the user picker screen. |
 
+</details>
+
 ---
 
 ## 2. Screen Vision & Capture
 
 Tools for inspecting the console's screen, waiting on visual transitions, and recording motion.
 
-### `screenshot`
+<a id="screenshot"></a>
+<details>
+<summary><b><code>screenshot</code></b> — Capture the screen as a 1280×720 JPEG</summary>
+
 Capture the Switch's screen (`1280x720` JPEG). Each screenshot is assigned a sequential **shot number** (the last 12 full-resolution shots are cached in memory for [`input_until`](#input_until)). The on-screen Kickstand keep-awake indicator is automatically hidden from captures.
 
 | Parameter | Type | Default | Description |
@@ -151,9 +179,12 @@ Capture the Switch's screen (`1280x720` JPEG). Each screenshot is assigned a seq
 | `grid` | `boolean` | `false` | Overlay a labelled coordinate grid every 100 pixels for picking `region` or touch coordinates. |
 | `local_path` | `string` | — | Also save the full-resolution `1280x720` JPEG to this path on the PC. |
 
----
+</details>
 
-### `wait_screen`
+<a id="wait_screen"></a>
+<details>
+<summary><b><code>wait_screen</code></b> — Wait for the screen to change or settle</summary>
+
 Wait for the Switch's screen (or a specific `region`) to either **change** (e.g. a loading screen finishes or a dialog appears) or become **still** (e.g. a fade or scrolling animation settles), then return the resulting screenshot in one call instead of polling.
 
 | Parameter | Type | Default | Description |
@@ -163,9 +194,12 @@ Wait for the Switch's screen (or a specific `region`) to either **change** (e.g.
 | `region` | `string` | Full screen | Only watch `"x,y,w,h"` in `1280x720` coordinates, ignoring animation outside it. |
 | `width` | `integer` | `640` | Width in pixels of the returned screenshot (`1280` for full resolution). |
 
----
+</details>
 
-### `record_gif`
+<a id="record_gif"></a>
+<details>
+<summary><b><code>record_gif</code></b> — Record the screen as a looping GIF</summary>
+
 Record the Switch's screen as a looping GIF from repeated captures and save it on the PC (defaulting to `~/Pictures/kickstand/gif-<timestamp>.gif`). Also returns a JPEG contact sheet of up to 6 evenly spaced frames so the agent can inspect the motion directly.
 
 | Parameter | Type | Default | Description |
@@ -175,13 +209,18 @@ Record the Switch's screen as a looping GIF from repeated captures and save it o
 | `fps` | `integer` | `5` *(max 10)* | Target frames per second. |
 | `width` | `integer` | `640` | Width of the GIF in pixels (`64`–`1280`). |
 
+</details>
+
 ---
 
 ## 3. Controller & Touch Input
 
 Tools for driving menus and gameplay via a virtual Pro Controller and touch screen.
 
-### `press`
+<a id="press"></a>
+<details>
+<summary><b><code>press</code></b> — Press buttons on a virtual controller</summary>
+
 Press one or more buttons simultaneously on a virtual Pro Controller (attaches the controller, waits ~1s to settle, performs the presses, and detaches).
 - **Button names:** `a`, `b`, `x`, `y`, `l`, `r`, `zl`, `zr`, `plus`, `minus`, `up`, `down`, `left`, `right`, `lstick`, `rstick`, `home`, `capture` (join chords with `+`, e.g. `"zl+zr"`).
 
@@ -191,9 +230,12 @@ Press one or more buttons simultaneously on a virtual Pro Controller (attaches t
 | `times` | `integer` | `1` *(1–10)* | Number of times to press the button(s). |
 | `hold_ms` | `integer` | `100` *(1–2000)* | Milliseconds to hold each press. |
 
----
+</details>
 
-### `input`
+<a id="input"></a>
+<details>
+<summary><b><code>input</code></b> — Play timed sticks, touch and button steps</summary>
+
 Play a timed sequence of inputs on a single virtual controller for analog sticks, touch screen taps/drags, button holds across steps, and quick combos. Everything is released at the end.
 - **Step syntax:** Space-separated `WHAT:MS` tokens (up to 64 steps, 20s total).
   - Buttons: `a`, `b`, `x`, `y`, `l`, `r`, `zl`, `zr`, `plus`, `minus`, `up`, `down`, `left`, `right`, `lstick`, `rstick`, `home`, `capture`
@@ -206,9 +248,12 @@ Play a timed sequence of inputs on a single virtual controller for analog sticks
 | :--- | :--- | :--- | :--- |
 | `steps` | `string` *(required)* | — | Space-separated `WHAT:MS` input steps. |
 
----
+</details>
 
-### `input_until`
+<a id="input_until"></a>
+<details>
+<summary><b><code>input_until</code></b> — Hold, mash or loop input until the screen shows something</summary>
+
 Closed-loop input that holds a direction/button, mashes a button repeatedly, or loops an input sequence while watching the screen several times a second, stopping the moment a visual condition is met (~250 ms reaction time).
 - **Actions (provide exactly one):**
   - `hold`: Hold buttons/sticks continuously (e.g. `"right"`, `"l=1,0+b"`).
@@ -233,22 +278,30 @@ Closed-loop input that holds a direction/button, mashes a button repeatedly, or 
 | `timeout_seconds` | `number` | `15.0` *(max 60)* | Give up after this many seconds. |
 | `width` | `integer` | `640` | Width in pixels of the returned screenshot. |
 
+</details>
+
 ---
 
 ## 4. Debugging, Crash Analysis & Memory
 
 Tools for diagnosing crashes, inspecting hung threads, symbolizing addresses, and reading or modifying live memory.
 
-### `crash_reports`
+<a id="crash_reports"></a>
+<details>
+<summary><b><code>crash_reports</code></b> — List the newest crash reports and fatal records</summary>
+
 List the newest Atmosphère process crash reports and fatal error records on the SD card, newest first, with a one-line summary for each.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `limit` | `integer` | `5` | Maximum number of crash reports/fatal records to list. |
 
----
+</details>
 
-### `crash_report`
+<a id="crash_report"></a>
+<details>
+<summary><b><code>crash_report</code></b> — Summarize one crash report or fatal record</summary>
+
 Fetch and summarize a specific crash report (process, exception type, fault result, crashed thread registers, stack backtrace, and loaded modules) or decode a fatal record, including Atmosphère's crash screenshot if one was saved. When `elf` is provided, `<module> + 0x...` offsets are resolved to function names and DWARF source lines.
 
 | Parameter | Type | Default | Description |
@@ -257,9 +310,12 @@ Fetch and summarize a specific crash report (process, exception type, fault resu
 | `elf` | `string` | — | Path to the crashed module's `.elf` on the PC for symbolization. |
 | `module` | `string` | ELF filename stem | Module name used in the report. |
 
----
+</details>
 
-### `symbolize`
+<a id="symbolize"></a>
+<details>
+<summary><b><code>symbolize</code></b> — Turn module+offset addresses into functions and source lines</summary>
+
 Resolve `<module>+0x<offset>` addresses (or bare hex offsets, one per line) in arbitrary text or log output into function names and source lines (`file:line`) using `addr2line` against an ELF binary on the PC.
 
 | Parameter | Type | Default | Description |
@@ -268,27 +324,36 @@ Resolve `<module>+0x<offset>` addresses (or bare hex offsets, one per line) in a
 | `text` | `string` *(required)* | — | Text containing `<module>+0x<offset>` addresses or bare hex offsets. |
 | `module` | `string` | ELF filename stem | Module name matched in `text`. |
 
----
+</details>
 
-### `threads`
+<a id="threads"></a>
+<details>
+<summary><b><code>threads</code></b> — Symbolized backtraces of every thread</summary>
+
 Pause the running homebrew briefly, read every thread's registers, walk each thread's frame pointers, and symbolize the backtraces (with function names and DWARF source lines) using the NRO's ELF. Ideal for diagnosing deadlocks, GPU fence waits, or infinite loops when a build hangs. Warns if the ELF's build ID/layout doesn't match the running NRO.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC. |
 
----
+</details>
 
-### `memory_map`
+<a id="memory_map"></a>
+<details>
+<summary><b><code>memory_map</code></b> — The running app's memory map and NRO load address</summary>
+
 Return the running application's virtual memory map (each region's start/end address, size, permissions, and type) and locate where the homebrew NRO is loaded in memory.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC, used to label which symbol each NRO region starts at. |
 
----
+</details>
 
-### `read_memory`
+<a id="read_memory"></a>
+<details>
+<summary><b><code>read_memory</code></b> — Read memory from the running app</summary>
+
 Read memory from the running application (homebrew or game) while it runs. Briefly attaches as a debugger so each read is a consistent snapshot.
 - **Address expression syntax (`address`):**
   - Absolute address: `0x7100001000`
@@ -305,9 +370,12 @@ Read memory from the running application (homebrew or game) while it runs. Brief
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC for symbol lookup. |
 | `module` | `string` | ELF filename stem | Module name for `<module>+0x…` expressions. |
 
----
+</details>
 
-### `write_memory`
+<a id="write_memory"></a>
+<details>
+<summary><b><code>write_memory</code></b> — Write to the running homebrew's memory</summary>
+
 Write a value to the running **homebrew's** memory (strictly refused for retail games) and return the value before and after the write. Uses the same address expression syntax as [`read_memory`](#read_memory).
 
 | Parameter | Type | Default | Description |
@@ -318,6 +386,8 @@ Write a value to the running **homebrew's** memory (strictly refused for retail 
 | `elf` | `string` | Last ELF given | Path to the NRO's `.elf` on the PC. |
 | `module` | `string` | ELF filename stem | Module name for `<module>+0x…` expressions. |
 
+</details>
+
 ---
 
 ## 5. SD Card Files & Logs
@@ -326,25 +396,34 @@ Tools for inspecting and transferring files on the Switch's SD card.
 
 > **Access control:** Kickstand's own folders, `/atmosphere/crash_reports`, `/atmosphere/fatal_reports`, and project destination folders from `projects.json` are accessible automatically. For any other SD card folder, Kickstand prompts the user in the AI app (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), or the user can pre-authorize folders in a terminal with `kickstand allow <folder> [--write]`. System folders (`/atmosphere` outside crash reports, `/bootloader`, `/Nintendo`, keys, and NAND backups) are hardware-blocked by the daemon.
 
-### `list_dir`
+<a id="list_dir"></a>
+<details>
+<summary><b><code>list_dir</code></b> — List a directory on the SD card</summary>
+
 List entries in a directory on the SD card (sorted directories-first, with file sizes).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `path` | `string` *(required)* | — | Absolute path from the SD card root (e.g. `/switch` or `/atmosphere/crash_reports`). |
 
----
+</details>
 
-### `stat`
+<a id="stat"></a>
+<details>
+<summary><b><code>stat</code></b> — File or directory, and its size</summary>
+
 Return whether an SD card path is a file or directory and its size in bytes.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `path` | `string` *(required)* | — | Absolute path from the SD card root. |
 
----
+</details>
 
-### `read_file`
+<a id="read_file"></a>
+<details>
+<summary><b><code>read_file</code></b> — Read part of a file on the SD card</summary>
+
 Read a slice of a file on the SD card. Returns UTF-8 text directly or base64-encoded data for binary files.
 
 | Parameter | Type | Default | Description |
@@ -353,9 +432,12 @@ Read a slice of a file on the SD card. Returns UTF-8 text directly or base64-enc
 | `offset` | `integer` | `0` | Byte offset to start reading from. |
 | `length` | `integer` | `65536` *(max 1048576)* | Maximum number of bytes to read. |
 
----
+</details>
 
-### `tail_file`
+<a id="tail_file"></a>
+<details>
+<summary><b><code>tail_file</code></b> — Read and follow the end of a log file</summary>
+
 Read the last lines of a log file on the SD card and optionally follow new lines as the file grows. Returns a `next` byte offset that can be passed as `from` on a subsequent call to resume without gaps.
 
 | Parameter | Type | Default | Description |
@@ -366,9 +448,12 @@ Read the last lines of a log file on the SD card and optionally follow new lines
 | `follow_seconds` | `number` | `0` *(max 60)* | Poll every 0.5s for up to this many seconds to collect newly appended output. |
 | `until` | `string` | — | Stop following early as soon as a newly added line contains this substring. |
 
----
+</details>
 
-### `upload`
+<a id="upload"></a>
+<details>
+<summary><b><code>upload</code></b> — Copy a file from the PC to the SD card</summary>
+
 Upload a file from the PC to the Switch's SD card. Verified with CRC-32 on the console before replacing the target file.
 
 | Parameter | Type | Default | Description |
@@ -376,9 +461,12 @@ Upload a file from the PC to the Switch's SD card. Verified with CRC-32 on the c
 | `local_path` | `string` *(required)* | — | Path to the source file on the PC. |
 | `remote_path` | `string` *(required)* | — | Destination path on the SD card (e.g. `/switch/mygame/mygame.nro`). |
 
----
+</details>
 
-### `download`
+<a id="download"></a>
+<details>
+<summary><b><code>download</code></b> — Copy a file from the SD card to the PC</summary>
+
 Copy a complete file from the Switch's SD card to the PC.
 
 | Parameter | Type | Default | Description |
@@ -386,9 +474,12 @@ Copy a complete file from the Switch's SD card to the PC.
 | `path` | `string` *(required)* | — | Source file path on the SD card. |
 | `local_path` | `string` *(required)* | — | Destination path on the PC. |
 
----
+</details>
 
-### `delete`
+<a id="delete"></a>
+<details>
+<summary><b><code>delete</code></b> — Delete a file or directory on the SD card</summary>
+
 Delete a file or directory on the Switch's SD card (within permitted writable folders).
 
 | Parameter | Type | Default | Description |
@@ -396,13 +487,18 @@ Delete a file or directory on the Switch's SD card (within permitted writable fo
 | `path` | `string` *(required)* | — | Absolute path on the SD card to delete. |
 | `recursive` | `boolean` | `false` | Delete a non-empty directory and all of its contents. |
 
+</details>
+
 ---
 
 ## 6. Console & Daemon Management
 
 Tools for checking console state, managing the background sysmodule, keeping the console awake, and warm-rebooting into Hekate.
 
-### `status`
+<a id="status"></a>
+<details>
+<summary><b><code>status</code></b> — The console's state in one call, with a small screenshot</summary>
+
 One-call snapshot of the console's state:
 - Running application (game, or `hbloader` with `hbmenu`/NRO in full-memory mode) and running applet (`hbloader` in the Album).
 - Whether the console is stuck on an Atmosphère fatal error screen.
@@ -414,32 +510,44 @@ One-call snapshot of the console's state:
 | `screenshot` | `boolean` | `true` | Include a downscaled screenshot of the current screen. |
 | `width` | `integer` | `480` | Width of the status screenshot in pixels. |
 
----
+</details>
 
-### `ping`
+<a id="ping"></a>
+<details>
+<summary><b><code>ping</code></b> — Check the daemon answers</summary>
+
 Verify that the Kickstand daemon on the Switch is reachable, reporting round-trip latency, console uptime, daemon version, protocol version, and whether it is running as the background `Sysmodule` or the `Nro`.
 
 *Parameters: none.*
 
----
+</details>
 
-### `resources`
+<a id="resources"></a>
+<details>
+<summary><b><code>resources</code></b> — The daemon's memory and kernel resource use</summary>
+
 Report kernel resource-limit usage of the daemon's process group (memory, threads, events, transfer memories, and IPC sessions: current, peak, and limit) plus the daemon's own heap usage. When running as the sysmodule, this reflects the system-wide resource pool shared by all background sysmodules.
 
 *Parameters: none.*
 
----
+</details>
 
-### `keep_awake`
+<a id="keep_awake"></a>
+<details>
+<summary><b><code>keep_awake</code></b> — Keep the console awake, or let it sleep</summary>
+
 Manage the console's keep-awake lease (indicated by a small Kickstand icon next to the Switch's clock). Every tool call automatically renews a 30-minute lease; after it expires, the console's normal auto-sleep settings resume.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `minutes` | `integer` | `30` *(max 480)* | Minutes from now to keep the console awake (`0` ends the lease immediately so it can sleep). |
 
----
+</details>
 
-### `sysmodule`
+<a id="sysmodule"></a>
+<details>
+<summary><b><code>sysmodule</code></b> — Manage the background sysmodule</summary>
+
 Manage the `sys-kickstand` background sysmodule on the Switch.
 - **`"status"`:** Check whether the sysmodule is installed, whether `boot2.flag` is set, and its running PID.
 - **`"install"`:** Upload a built `sys-kickstand.nsp` and live-restart onto the new build in ~11–20s without rebooting the console (by briefly launching the Kickstand NRO in applet mode to hand over).
@@ -453,16 +561,22 @@ Manage the `sys-kickstand` background sysmodule on the Switch.
 | `nro_path` | `string` | — | For `"install"`: optional newer `kickstand.nro` to upload before restarting. |
 | `restart` | `boolean` | `true` | For `"install"`: immediately restart onto the new sysmodule build (`false` only uploads it). |
 
----
+</details>
 
-### `hekate_entries`
+<a id="hekate_entries"></a>
+<details>
+<summary><b><code>hekate_entries</code></b> — List hekate's boot entries</summary>
+
 List the boot entries configured in `/bootloader/hekate_ipl.ini`, numbered `1..N` as expected by [`reboot`](#reboot).
 
 *Parameters: none.*
 
----
+</details>
 
-### `reboot`
+<a id="reboot"></a>
+<details>
+<summary><b><code>reboot</code></b> — Warm-reboot into hekate (asks the user first)</summary>
+
 Warm-reboot the Switch into Hekate via Atmosphère's `reboot-to-payload` (never performs a cold boot, preserving RCM-injected setups). Requires explicit user confirmation (`confirm: true`).
 
 | Parameter | Type | Default | Description |
@@ -470,56 +584,103 @@ Warm-reboot the Switch into Hekate via Atmosphère's `reboot-to-payload` (never 
 | `target` | `string` *(required)* | — | `"menu"` (Hekate main menu), `"ums"` (SD card USB Mass Storage), or a boot entry name/1-based number from [`hekate_entries`](#hekate_entries). |
 | `confirm` | `boolean` *(required)* | — | Must be `true`, and only set after the user has agreed to reboot. |
 
+</details>
+
 ---
 
 ## 7. CLI Command Reference
 
 Every capability above is also available directly from your terminal via `kickstand <command>` (run `kickstand <command> --help` for full flag details):
 
-| Category | Command | Description |
-| :--- | :--- | :--- |
-| **App & Setup** | `kickstand` / `kickstand desktop` | Open the desktop GUI to find the Switch, pair, link AI apps, and watch live agent activity. |
-| | `kickstand serve [--app <name>]` | Run the MCP server over `stdio` (invoked automatically by linked AI apps). |
-| | `kickstand install [--remove]` | Add (or remove) Kickstand in your OS application menu with its icon. |
-| | `kickstand discover [--to <ip>]` | Find Switches running Kickstand on the local network. |
-| | `kickstand pair <code>` | Pair with the Switch displaying `CODE` and save its address and shared token. |
-| | `kickstand update [--check] [--switch]` | Update this PC's copy to the latest signed release, then the Switch to the PC's version (only while it's idle). |
-| | `kickstand unpair` | Make the Switch forget this PC's token and stop using it; pair again with the code to come back. |
-| | `kickstand link [app] [--remove]` | Link Kickstand to `code`, `desktop`, `gemini`, `agy`, `antigravity`, `codex`, or `lmstudio`. |
-| | `kickstand token` | Print (or generate) the shared authentication token and its SD card location. |
-| | `kickstand allow [folder] [--write] [--remove]` | Pre-authorize an SD card folder for agent access (must be run interactively in a terminal). |
-| **Develop & Run** | `kickstand test <project>` | Build, deploy, run, and supervise a project from `~/.config/kickstand/projects.json`. |
-| | `kickstand projects` | List projects configured in `~/.config/kickstand/projects.json`. |
-| | `kickstand run <nro> [-- <args>...]` | Run a local `.nro` or `sdmc:/path.nro` with full memory (or `--applet`) and stream stdout. |
-| | `kickstand supervise` | Watch the running homebrew until it exits, crashes, fatals, or hangs. |
-| | `kickstand hbmenu [--full]` | Open `hbmenu` in applet mode or `--full` title-takeover mode. |
-| | `kickstand apps [--max <n>]` | List installed titles in home-menu order. |
-| | `kickstand launch <title> [--user <n>]` | Launch an installed title by ID or name substring. |
-| | `kickstand close-app [--applet]` | Close the running application or (`--applet`) the Album applet. |
-| | `kickstand app` | Show the currently running application and whether it is `hbloader`. |
-| **See & Play** | `kickstand watch [--bind 0.0.0.0]` | Serve a live web page (`http://127.0.0.1:8790`) streaming the console's screen and status. |
-| | `kickstand screenshot <file.jpg>` | Save a `1280x720` JPEG screenshot of the console. |
-| | `kickstand wait [change\|still]` | Wait until the screen (or `--region`) changes or stops changing. |
-| | `kickstand gif <file.gif>` | Record the screen as a looping GIF. |
-| | `kickstand press <buttons>` | Press buttons on a virtual controller (or `unlock` to press `B` three times). |
-| | `kickstand input <steps>` | Play timed `WHAT:MS` steps (buttons, sticks, touch). |
-| **Debug & Memory** | `kickstand crashes [--limit <n>]` | List the newest Atmosphère crash reports and fatal records. |
-| | `kickstand crash <name> [--elf <elf>]` | Summarize a crash report or fatal record (with optional symbolization and `--screenshot`). |
-| | `kickstand symbolize <elf> [text]` | Symbolize `<module>+0x<offset>` addresses in text or `stdin`. |
-| | `kickstand threads [--elf <elf>]` | Pause the running homebrew and print symbolized backtraces for all threads. |
-| | `kickstand memory [--elf <elf>]` | Print the running application's memory map and NRO load address. |
-| | `kickstand peek <addr> [--as <fmt>]` | Read memory from the running application by address, symbol, or pointer chain. |
-| | `kickstand poke <addr> <val> --as <fmt>` | Write to the running homebrew's memory. |
-| **SD Card Files** | `kickstand ls <path>` | List a directory on the SD card. |
-| | `kickstand cat <path>` | Print a file from the SD card. |
-| | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
-| | `kickstand put <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified). |
-| | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
-| | `kickstand rm [-r] <path>` | Delete a file or directory on the SD card. |
-| **Console** | `kickstand status` | Show uptime, unlock state, keep-awake timer, running app, and applet status. |
-| | `kickstand ping` | Ping the daemon and report round-trip time and version. |
-| | `kickstand resources` | Show kernel resource limit usage of the daemon's group. |
-| | `kickstand keep-awake [minutes]` | Set or check the keep-awake timer (`0` to end immediately). |
-| | `kickstand sysmodule <subcommand>` | `status`, `install <nsp>`, `start`, `stop`, `handover`, `enable`, or `disable`. |
-| | `kickstand reboot [target] [--yes]` | Warm-reboot into Hekate (`menu`, `ums`, or an entry name/number). |
-| | `kickstand exit` | Stop the NRO daemon and return to `hbmenu`. |
+<details open>
+<summary><b>App & Setup</b> · 10 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand` / `kickstand desktop` | Open the desktop GUI to find the Switch, pair, link AI apps, and watch live agent activity. |
+| `kickstand serve [--app <name>]` | Run the MCP server over `stdio` (invoked automatically by linked AI apps). |
+| `kickstand install [--remove]` | Add (or remove) Kickstand in your OS application menu with its icon. |
+| `kickstand discover [--to <ip>]` | Find Switches running Kickstand on the local network. |
+| `kickstand pair <code>` | Pair with the Switch displaying `CODE` and save its address and shared token. |
+| `kickstand update [--check] [--switch]` | Update this PC's copy to the latest signed release, then the Switch to the PC's version (only while it's idle). |
+| `kickstand unpair` | Make the Switch forget this PC's token and stop using it; pair again with the code to come back. |
+| `kickstand link [app] [--remove]` | Link Kickstand to `code`, `desktop`, `gemini`, `agy`, `antigravity`, `codex`, or `lmstudio`. |
+| `kickstand token` | Print (or generate) the shared authentication token and its SD card location. |
+| `kickstand allow [folder] [--write] [--remove]` | Pre-authorize an SD card folder for agent access (must be run interactively in a terminal). |
+
+</details>
+
+<details>
+<summary><b>Develop & Run</b> · 9 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand test <project>` | Build, deploy, run, and supervise a project from `~/.config/kickstand/projects.json`. |
+| `kickstand projects` | List projects configured in `~/.config/kickstand/projects.json`. |
+| `kickstand run <nro> [-- <args>...]` | Run a local `.nro` or `sdmc:/path.nro` with full memory (or `--applet`) and stream stdout. |
+| `kickstand supervise` | Watch the running homebrew until it exits, crashes, fatals, or hangs. |
+| `kickstand hbmenu [--full]` | Open `hbmenu` in applet mode or `--full` title-takeover mode. |
+| `kickstand apps [--max <n>]` | List installed titles in home-menu order. |
+| `kickstand launch <title> [--user <n>]` | Launch an installed title by ID or name substring. |
+| `kickstand close-app [--applet]` | Close the running application or (`--applet`) the Album applet. |
+| `kickstand app` | Show the currently running application and whether it is `hbloader`. |
+
+</details>
+
+<details>
+<summary><b>See & Play</b> · 6 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand watch [--bind 0.0.0.0]` | Serve a live web page (`http://127.0.0.1:8790`) streaming the console's screen and status. |
+| `kickstand screenshot <file.jpg>` | Save a `1280x720` JPEG screenshot of the console. |
+| `kickstand wait [change\|still]` | Wait until the screen (or `--region`) changes or stops changing. |
+| `kickstand gif <file.gif>` | Record the screen as a looping GIF. |
+| `kickstand press <buttons>` | Press buttons on a virtual controller (or `unlock` to press `B` three times). |
+| `kickstand input <steps>` | Play timed `WHAT:MS` steps (buttons, sticks, touch). |
+
+</details>
+
+<details>
+<summary><b>Debug & Memory</b> · 7 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand crashes [--limit <n>]` | List the newest Atmosphère crash reports and fatal records. |
+| `kickstand crash <name> [--elf <elf>]` | Summarize a crash report or fatal record (with optional symbolization and `--screenshot`). |
+| `kickstand symbolize <elf> [text]` | Symbolize `<module>+0x<offset>` addresses in text or `stdin`. |
+| `kickstand threads [--elf <elf>]` | Pause the running homebrew and print symbolized backtraces for all threads. |
+| `kickstand memory [--elf <elf>]` | Print the running application's memory map and NRO load address. |
+| `kickstand peek <addr> [--as <fmt>]` | Read memory from the running application by address, symbol, or pointer chain. |
+| `kickstand poke <addr> <val> --as <fmt>` | Write to the running homebrew's memory. |
+
+</details>
+
+<details>
+<summary><b>SD Card Files</b> · 6 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand ls <path>` | List a directory on the SD card. |
+| `kickstand cat <path>` | Print a file from the SD card. |
+| `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
+| `kickstand put <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified). |
+| `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
+| `kickstand rm [-r] <path>` | Delete a file or directory on the SD card. |
+
+</details>
+
+<details>
+<summary><b>Console</b> · 7 commands</summary>
+
+| Command | What it does |
+| :--- | :--- |
+| `kickstand status` | Show uptime, unlock state, keep-awake timer, running app, and applet status. |
+| `kickstand ping` | Ping the daemon and report round-trip time and version. |
+| `kickstand resources` | Show kernel resource limit usage of the daemon's group. |
+| `kickstand keep-awake [minutes]` | Set or check the keep-awake timer (`0` to end immediately). |
+| `kickstand sysmodule <subcommand>` | `status`, `install <nsp>`, `start`, `stop`, `handover`, `enable`, or `disable`. |
+| `kickstand reboot [target] [--yes]` | Warm-reboot into Hekate (`menu`, `ums`, or an entry name/number). |
+| `kickstand exit` | Stop the NRO daemon and return to `hbmenu`. |
+
+</details>
