@@ -84,45 +84,58 @@ pub fn answer(id: &str, answer: Answer) -> Result<()> {
     std::fs::write(&path, serde_json::to_string(&answer)?).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Asks the user in the desktop app, opening it if needed, and waits up to `timeout` for the answer.
-/// `Ok(None)`: no answer in time. `Err`: the question couldn't be shown (no desktop app here).
-pub async fn ask(app: Option<String>, action: &str, covers: &str, timeout: Duration) -> Result<Option<Answer>> {
+/// Puts a question to the user in the desktop app, opening it if it isn't running. Returns its id, for
+/// [`answered`], [`wait`] and [`withdraw`]. `Err`: the window couldn't be opened (the question isn't left
+/// behind).
+pub fn post(app: Option<String>, action: &str, covers: &str) -> Result<String> {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let id = format!("{}-{}-{}", now(), std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let dir = dir()?;
     std::fs::create_dir_all(&dir)?;
     let question = Question { id: id.clone(), app, action: action.into(), covers: covers.into(), asked: now() };
-    let asked = dir.join(format!("{id}.json"));
-    let answered = dir.join(format!("{id}.answer"));
-    std::fs::write(&asked, serde_json::to_string_pretty(&question)?)?;
-    let result = wait(&answered, timeout).await;
-    let _ = std::fs::remove_file(&asked);
-    let _ = std::fs::remove_file(&answered);
-    result
+    std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string_pretty(&question)?)?;
+    if !desktop_open() {
+        let opened = std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .arg("desktop")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        });
+        if let Err(e) = opened {
+            withdraw(&id);
+            return Err(anyhow!("couldn't open Kickstand's window to ask: {e}"));
+        }
+    }
+    Ok(id)
 }
 
-async fn wait(answered: &std::path::Path, timeout: Duration) -> Result<Option<Answer>> {
-    let start = tokio::time::Instant::now();
-    if !desktop_open() {
-        let exe = std::env::current_exe()?;
-        std::process::Command::new(exe)
-            .arg("desktop")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow!("couldn't open Kickstand's window to ask: {e}"))?;
+/// The answer to question `id`, if the user gave one in the window.
+pub fn answered(id: &str) -> Option<Answer> {
+    let text = std::fs::read_to_string(dir().ok()?.join(format!("{id}.answer"))).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Takes question `id` away (answered, or answered somewhere else): it leaves the window within a second.
+pub fn withdraw(id: &str) {
+    if let Ok(dir) = dir() {
+        let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+        let _ = std::fs::remove_file(dir.join(format!("{id}.answer")));
     }
+}
+
+/// Waits up to `timeout` for an answer to question `id`; `None` without one (or if the window never
+/// opened).
+pub async fn wait(id: &str, timeout: Duration) -> Option<Answer> {
+    let start = tokio::time::Instant::now();
     loop {
-        if let Ok(text) = std::fs::read_to_string(answered) {
-            return Ok(Some(serde_json::from_str(&text).context("reading the answer")?));
+        if let Some(answer) = answered(id) {
+            return Some(answer);
         }
         let waited = start.elapsed();
-        if waited >= OPENING && !desktop_open() {
-            return Err(anyhow!("Kickstand's window didn't open to ask (no display here?)"));
-        }
-        if waited >= timeout {
-            return Ok(None);
+        if waited >= timeout || (waited >= OPENING && !desktop_open()) {
+            return None;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

@@ -35,8 +35,25 @@ pub struct Tools {
     shots: Arc<std::sync::Mutex<Shots>>,
     /// The folders the user allowed during this session (see access.rs).
     access: Arc<Access>,
+    /// Access questions put to the user outside the AI app (its window, and the chat), not answered yet.
+    asking: Arc<std::sync::Mutex<Vec<Asking>>>,
+    /// Paths the user allowed just once from the chat ([`Tools::answer_access`]), until they're used.
+    once: Arc<std::sync::Mutex<Vec<(String, Need)>>>,
     tool_router: ToolRouter<Self>,
 }
+
+/// An access question the AI app couldn't show, so Kickstand asked in its window (`id`, if that opened)
+/// and the agent is to ask in the chat.
+struct Asking {
+    id: Option<String>,
+    path: String,
+    folder: String,
+    need: Need,
+    action: String,
+}
+
+/// How long Kickstand's window gets to answer before the agent is told to ask in the chat too.
+const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Screenshots kept for [`Tools::input_until`], newest last.
 #[derive(Default)]
@@ -335,6 +352,15 @@ pub struct ListAppsArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct AnswerAccessArgs {
+    /// The path the request was about, as the tool said.
+    pub path: String,
+    /// What the user chose: "once" (just this once), "session" (this folder until Kickstand restarts),
+    /// "always" (this folder from now on) or "no".
+    pub answer: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct KeepAwakeArgs {
     /// Keep the console awake for this many minutes from now (max 480; default 30, the same as any tool
     /// call); 0 lets it sleep now.
@@ -498,6 +524,8 @@ impl Tools {
             elf: Default::default(),
             shots: Default::default(),
             access: Default::default(),
+            asking: Default::default(),
+            once: Default::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -534,13 +562,19 @@ impl Tools {
         if self.access.allowed(path, need) {
             return Ok(());
         }
+        {
+            let mut once = self.once.lock().unwrap();
+            if let Some(i) = once.iter().position(|(p, n)| p == path && (*n == need || *n == Need::Write)) {
+                once.remove(i);
+                return Ok(());
+            }
+        }
         let folder = access::folder_of(path, is_dir);
         let message = format!(
             "Kickstand: the agent wants to {action} on your Switch's SD card. Allowing the folder covers everything in {}{}.",
             access::describe(&folder),
             if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
         );
-        let flag = if need == Need::Write { " --write" } else { "" };
         match peer.elicit_with_timeout::<Approval>(message, Some(std::time::Duration::from_secs(300))).await {
             Ok(Some(answer)) => match answer.allow {
                 AllowFor::Once => Ok(()),
@@ -553,38 +587,103 @@ impl Tools {
             Ok(None) | Err(ElicitationError::UserDeclined | ElicitationError::UserCancelled) => {
                 anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
             }
-            // This AI app can't show the question: Kickstand asks in its own window.
-            Err(ElicitationError::CapabilityNotSupported) => {
-                let covers = format!(
-                    "everything in {}{}",
-                    access::describe(&folder),
-                    if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
-                );
-                let app = self.client.app().or_else(|| peer.peer_info().map(|info| info.client_info.name.clone()));
-                let ask_in_chat = format!(
-                    "Ask the user, as a question, whether you may {action}; they can allow it in Kickstand's window, or by running \
-                     `kickstand allow {folder}{flag}` in their own terminal (it refuses to run from an agent)"
-                );
-                match crate::questions::ask(app, action, &covers, std::time::Duration::from_secs(300)).await {
-                    Ok(Some(Answer::Once)) => Ok(()),
-                    Ok(Some(Answer::Session)) => {
-                        self.access.allow_for_session(&folder, need);
-                        Ok(())
-                    }
-                    Ok(Some(Answer::Always)) => access::save(&folder, need),
-                    Ok(Some(Answer::No)) => {
-                        anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
-                    }
-                    Ok(None) => anyhow::bail!("Kickstand asked the user in its window, with no answer in 5 minutes. {ask_in_chat}"),
-                    Err(e) => anyhow::bail!(
-                        "{path} is outside the folders Kickstand may {} without asking the user, this AI app can't show Kickstand's \
-                         question, and {e:#}. {ask_in_chat}",
-                        need.verb()
-                    ),
-                }
-            }
+            // This AI app can't show the question: Kickstand asks in its own window, and the agent in the chat.
+            Err(ElicitationError::CapabilityNotSupported) => self.ask_elsewhere(peer, path, &folder, need, action).await,
             Err(e) => anyhow::bail!("couldn't ask the user about {path}: {e}"),
         }
+    }
+
+    /// Asks about `path` in Kickstand's window and has the agent ask in the chat; whichever answer comes
+    /// first counts ([`Tools::answer_access`] records a chat answer and takes the window's question away).
+    async fn ask_elsewhere(&self, peer: &Peer<RoleServer>, path: &str, folder: &str, need: Need, action: &str) -> anyhow::Result<()> {
+        let covers = format!(
+            "everything in {}{}",
+            access::describe(folder),
+            if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
+        );
+        let flag = if need == Need::Write { " --write" } else { "" };
+        let in_chat = format!(
+            "Ask the user here, as a question (with your app's question tool if it has one), whether you may {action}; \
+             allowing the folder would cover {covers}. Offer: just this once, this folder until Kickstand restarts, this \
+             folder from now on, or no. Then pass their answer to answer_access with path {path:?} and try again. If they \
+             answer in Kickstand's window instead, just try again. (They can also run `kickstand allow {folder}{flag}` in \
+             their own terminal.)"
+        );
+        let pending = self.asking.lock().unwrap().iter().find(|a| a.path == path && a.need == need).map(|a| a.id.clone());
+        let (answer, window_open) = match pending {
+            // Asked before: the window may have been answered since.
+            Some(id) => (id.as_deref().and_then(crate::questions::answered), id.is_some()),
+            None => {
+                let app = self.client.app().or_else(|| peer.peer_info().map(|info| info.client_info.name.clone()));
+                let id = crate::questions::post(app, action, &covers).ok();
+                let asking = Asking { id: id.clone(), path: path.into(), folder: folder.into(), need, action: action.into() };
+                self.asking.lock().unwrap().push(asking);
+                match &id {
+                    Some(id) => (crate::questions::wait(id, WINDOW_WAIT).await, true),
+                    None => (None, false),
+                }
+            }
+        };
+        let Some(answer) = answer else {
+            let window = if window_open {
+                "Kickstand is asking the user in its window (no answer yet)."
+            } else {
+                "This AI app can't show Kickstand's question and Kickstand's window couldn't open."
+            };
+            anyhow::bail!("{path} is outside the folders Kickstand may {} without asking. {window} {in_chat}", need.verb());
+        };
+        self.take_asking(path);
+        self.apply(answer, folder, need, action)
+    }
+
+    /// Drops the question about `path`, taking it out of Kickstand's window.
+    fn take_asking(&self, path: &str) -> Option<Asking> {
+        let mut asking = self.asking.lock().unwrap();
+        let taken = asking.iter().position(|a| a.path == path).map(|i| asking.remove(i));
+        if let Some(id) = taken.as_ref().and_then(|a| a.id.as_deref()) {
+            crate::questions::withdraw(id);
+        }
+        taken
+    }
+
+    /// Acts on the user's answer about `folder`; `Ok` lets the request go ahead.
+    fn apply(&self, answer: Answer, folder: &str, need: Need, action: &str) -> anyhow::Result<()> {
+        match answer {
+            Answer::Once => Ok(()),
+            Answer::Session => {
+                self.access.allow_for_session(folder, need);
+                Ok(())
+            }
+            Answer::Always => access::save(folder, need),
+            Answer::No => anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed"),
+        }
+    }
+
+    #[tool(description = "Pass on the user's answer to Kickstand's access question when they gave it in this chat: only after a tool said Kickstand is asking (its window shows the same question, which this takes away), and only what the user actually chose; never answer for them. Then try the request again.")]
+    async fn answer_access(&self, Parameters(args): Parameters<AnswerAccessArgs>) -> CallToolResult {
+        let result = async {
+            let answer = match args.answer.as_str() {
+                "once" => Answer::Once,
+                "session" => Answer::Session,
+                "always" => Answer::Always,
+                "no" => Answer::No,
+                other => anyhow::bail!("answer is once, session, always or no, not {other:?}"),
+            };
+            let path = proto::path::normalize(&args.path).map_err(|e| anyhow::anyhow!("{}", e.describe()))?;
+            let Some(asked) = self.take_asking(&path) else {
+                anyhow::bail!("Kickstand hasn't asked the user about {path}: make the request first, and pass on an answer only after Kickstand asks")
+            };
+            if answer == Answer::Once {
+                self.once.lock().unwrap().push((path.clone(), asked.need));
+                return Ok(format!("allowed once: try the request on {path} again"));
+            }
+            self.apply(answer, &asked.folder, asked.need, &asked.action)?;
+            Ok(match answer {
+                Answer::Session => format!("{} allowed until Kickstand restarts: try again", access::describe(&asked.folder)),
+                _ => format!("{} allowed from now on: try again", access::describe(&asked.folder)),
+            })
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]

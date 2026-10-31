@@ -12,7 +12,7 @@ The tool names are the same in every AI app.
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
 | [Controller & Touch Input](#3-controller--touch-input) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
-| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) |
+| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
 | [CLI Command Reference](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
@@ -320,7 +320,7 @@ Write a value to the running **homebrew's** memory (strictly refused for retail 
 
 Tools for inspecting and transferring files on the Switch's SD card.
 
-> **Access control:** Kickstand's own folders, `/atmosphere/crash_reports`, `/atmosphere/fatal_reports`, and project destination folders from `projects.json` are accessible automatically. For any other SD card folder, Kickstand prompts the user in the AI app (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), or in its own desktop window when the AI app can't show the prompt, or the user can pre-authorize folders in a terminal with `kickstand allow <folder> [--write]`. System folders (`/atmosphere` outside crash reports, `/bootloader`, `/Nintendo`, keys, and NAND backups) are hardware-blocked by the daemon.
+> **Access control:** Kickstand's own folders, `/atmosphere/crash_reports`, `/atmosphere/fatal_reports`, and project destination folders from `projects.json` are accessible automatically. For any other SD card folder, Kickstand prompts the user in the AI app (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), or in its own desktop window when the AI app can't show the prompt (after 30 seconds the agent asks in the chat too, and passes the answer on with [`answer_access`](#answer_access), which takes the question out of the window), or the user can pre-authorize folders in a terminal with `kickstand allow <folder> [--write]`. System folders (`/atmosphere` outside crash reports, `/bootloader`, `/Nintendo`, keys, and NAND backups) are hardware-blocked by the daemon.
 
 ### `list_dir`
 List entries in a directory on the SD card (sorted directories-first, with file sizes).
@@ -391,6 +391,16 @@ Delete a file or directory on the Switch's SD card (within permitted writable fo
 | :--- | :--- | :--- | :--- |
 | `path` | `string` *(required)* | — | Absolute path on the SD card to delete. |
 | `recursive` | `boolean` | `false` | Delete a non-empty directory and all of its contents. |
+
+---
+
+### `answer_access`
+Pass on the user's answer to an access question they answered in the chat, for AI apps that can't show Kickstand's own prompt. Only works for a question Kickstand actually asked (a tool said so); it counts the same as answering in Kickstand's window, and takes the question out of that window. Then retry the request.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `path` | `string` *(required)* | — | The path the request was about, as the tool said. |
+| `answer` | `string` *(required)* | — | `once` (just this once), `session` (this folder until Kickstand restarts), `always` (this folder from now on) or `no`. |
 
 ---
 

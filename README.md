@@ -147,7 +147,7 @@ Kickstand provides **36 MCP tools** across 6 categories. For full parameter tabl
 | **[See (Screen Vision)](TOOLS.md#2-screen-vision--capture)** | `screenshot`, `wait_screen`, `record_gif` | Downscaled/cropped screenshots to save tokens, 100px coordinate overlays (`grid`), shot numbering, GIF contact sheets, and visual condition waiting. |
 | **[Play (Input)](TOOLS.md#3-controller--touch-input)** | `press`, `input`, `input_until` | Single presses, multi-step button/stick/touch sequences, and closed-loop input (`input_until`) that holds, mashes, or replays actions until a screen region changes, settles, or matches an earlier shot. |
 | **[Debug & Memory](TOOLS.md#4-debugging-crash-analysis--memory)** | `crash_reports`, `crash_report`, `symbolize`, `threads`, `memory_map`, `read_memory`, `write_memory` | Decoded Atmosphère crash reports, live `addr2line` symbolization, all-thread stack traces with source lines, and symbolic memory reads/writes (`main+0x1234`, `[sym+0x10]+0x8`). |
-| **[SD Card Files](TOOLS.md#5-sd-card-files--logs)** | `list_dir`, `stat`, `read_file`, `tail_file`, `upload`, `download`, `delete` | Browse, inspect, upload, download, delete, and live-tail SD card logs (`tail_file` can block until a target string appears). |
+| **[SD Card Files](TOOLS.md#5-sd-card-files--logs)** | `list_dir`, `stat`, `read_file`, `tail_file`, `upload`, `download`, `delete`, `answer_access` | Browse, inspect, upload, download, delete, and live-tail SD card logs (`tail_file` can block until a target string appears). |
 | **[Console & Daemon](TOOLS.md#6-console--daemon-management)** | `status`, `ping`, `resources`, `keep_awake`, `sysmodule`, `hekate_entries`, `reboot` | Check running app/fatal/lock-screen state, monitor RAM/SoC temp/battery, hot-swap the sysmodule in ~11s, and warm-reboot into Hekate entries or UMS. |
 
 ---
@@ -157,7 +157,7 @@ Kickstand provides **36 MCP tools** across 6 categories. For full parameter tabl
 Kickstand is designed so an AI agent can iterate autonomously without risking console state, keys, or personal data:
 
 - **SD Card Folder Permissions:** Agents can freely access Kickstand's own directories, `/atmosphere/crash_reports`, and deployment folders configured in `projects.json`. Accessing any other SD card folder triggers an interactive permission prompt in the AI client (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), regardless of the client's auto-approve mode.
-  - If the AI app can't show that prompt, Kickstand asks in its own desktop window instead (opening it if it's closed) with the same choices; the agent waits up to 5 minutes for your answer.
+  - If the AI app can't show that prompt, Kickstand asks in its own desktop window instead (opening it if it's closed) with the same choices. After 30 seconds without an answer, the agent asks you in the chat too, so you can answer from wherever you are (say, Claude on your phone): whichever you answer counts, and an answer in the chat takes the question out of the window.
   - You can pre-authorize folders from a terminal with `kickstand allow FOLDER [--write]` (saved in `~/.config/kickstand/access.json`).
   - Interactive CLI commands run by a human in a terminal work anywhere; scripted or agent-invoked CLI runs enforce the same allowlist.
 - **Hard Console Path Blocks:** The Switch daemon itself refuses to write to Atmosphère, Hekate, or Nintendo system directories (except updating Kickstand's own sysmodule), the SD card root, or key files, and never reads keys, NAND backups, or `/Nintendo`.
