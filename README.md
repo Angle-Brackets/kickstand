@@ -16,7 +16,7 @@
 
 **Kickstand** lets AI agents and developers autonomously build, deploy, run, play, and debug homebrew on a real Nintendo Switch running Atmosphère — with nobody holding the console.
 
-> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 36 MCP tools, their parameters, and matching CLI commands.
+> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 37 MCP tools, their parameters, and matching CLI commands.
 
 ---
 
@@ -127,11 +127,15 @@ To let an agent build, deploy, and test a project in a single `test_build` call,
     "build": "cargo nx build --release",
     "nro": "target/aarch64-nintendo-switch-freestanding/release/paperboat.nro",
     "elf": "target/aarch64-nintendo-switch-freestanding/release/paperboat.elf",
-    "sd_path": "/switch/paperboat/paperboat.nro",
-    "args": ""
+    "dest": "/switch/paperboat/paperboat.nro",
+    "args": ["--skip-intro", "--log=sdmc:/paperboat.log"]
   }
 }
 ```
+
+- `build` (optional) runs in `dir`; `nro` and `elf` are relative to it. `module` (optional) names the module in its backtraces (default: the ELF's file name).
+- `dest` is where the NRO goes on the SD card (its folder must exist); that folder is open to the agent without asking.
+- `args` (optional) is the command line the NRO runs with, so an agent doesn't retype (or drift from) a long one; `test_build`'s own `args` replace it for one run.
 
 Use the `projects` MCP tool (or `kickstand projects`) to inspect configured projects and verify their paths.
 
@@ -139,7 +143,7 @@ Use the `projects` MCP tool (or `kickstand projects`) to inspect configured proj
 
 ## MCP Tools Overview
 
-Kickstand provides **36 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
+Kickstand provides **37 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
 
 | Category | Tools | Highlights |
 | :--- | :--- | :--- |

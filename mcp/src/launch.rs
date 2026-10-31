@@ -400,6 +400,8 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     if mode == Mode::Applet && is_game(target, &crate::project::load_all().unwrap_or_default()) {
         bail!("{target} is a game: it runs with full memory only (mode \"full\"), never in applet mode");
     }
+    // For an NRO on the SD card: its path (the Kickstand NRO is what's sent, and it opens that).
+    let mut opens = None;
     let (nro, dest, args) = match program {
         Program::Local { nro, dest } => {
             let dest = check_path(&dest, true)?;
@@ -422,6 +424,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
             }
             let (launcher, _) = client.read(LAUNCHER, 0, u64::MAX).await.context("reading the Kickstand NRO to launch it")?;
             let dest = LAUNCHER.trim_start_matches("/switch/").to_string();
+            opens = Some(path.clone());
             (launcher, dest, ["--open".to_string(), path].into_iter().chain(args).collect())
         }
     };
@@ -465,7 +468,11 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     };
     HBMENU_PID.store(0, Ordering::Relaxed);
     nxlink::send(sock, &nro, &dest, &args).await?;
-    notes.push(format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()));
+    notes.push(match &opens {
+        // NetLoader only runs what it's sent; the Kickstand NRO then hands over to the one on the card.
+        Some(path) => format!("launching {path} (already on the SD card) through the Kickstand NRO, which hbmenu was sent as a launcher"),
+        None => format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()),
+    });
     let pid = status(client, mode).await?.map_or(0, |a| a.pid);
     let output = output.accept(OUTPUT_WAIT).await?;
     if output.is_none() {
@@ -561,6 +568,21 @@ pub struct OutputLog {
     open: bool,
     /// When the NRO last wrote anything.
     last_output: Option<std::time::Instant>,
+    /// When collecting began (about when the NRO started).
+    started: Option<std::time::Instant>,
+    /// Where each piece of output starts (counting dropped bytes) and when it arrived, in seconds since
+    /// `started`, oldest first.
+    times: std::collections::VecDeque<(usize, f64)>,
+}
+
+/// Output not read before ([`OutputLog::take_new`]).
+pub struct NewOutput {
+    /// Whole lines without their newline, each with when it arrived (seconds since the NRO started).
+    pub lines: Vec<(f64, String)>,
+    /// Bytes dropped before any of it could be read (the log keeps the newest [`OUTPUT_KEEP`]).
+    pub dropped: usize,
+    /// Whether the NRO still has its stdout open.
+    pub open: bool,
 }
 
 impl OutputLog {
@@ -572,7 +594,7 @@ impl OutputLog {
         symbols: Option<crate::symbolize::Shared>,
         pid: u64,
     ) -> tokio::task::JoinHandle<()> {
-        *log.lock().unwrap() = OutputLog { open: true, ..Default::default() };
+        *log.lock().unwrap() = OutputLog { open: true, started: Some(std::time::Instant::now()), ..Default::default() };
         let log = log.clone();
         tokio::spawn(async move {
             let mut lines = Lines::new(stream, symbols);
@@ -585,7 +607,10 @@ impl OutputLog {
     }
 
     fn push(&mut self, s: &str) {
-        self.last_output = Some(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.last_output = Some(now);
+        let at = self.started.map_or(0.0, |started| now.duration_since(started).as_secs_f64());
+        self.times.push_back((self.dropped + self.text.len(), at));
         self.text.push_str(s);
         if self.text.len() > OUTPUT_KEEP {
             let mut cut = self.text.len() - OUTPUT_KEEP;
@@ -595,18 +620,26 @@ impl OutputLog {
             self.text.drain(..cut);
             self.read = self.read.saturating_sub(cut);
             self.dropped += cut;
+            // Keep the time of the piece the text now starts in.
+            while self.times.get(1).is_some_and(|&(start, _)| start <= self.dropped) {
+                self.times.pop_front();
+            }
         }
     }
 
-    /// Output not returned before, and whether the NRO still has its stdout open.
-    pub fn take_new(&mut self) -> (String, bool) {
-        let mut new = String::new();
-        if self.dropped > 0 && self.read == 0 {
-            new.push_str(&format!("[{} earlier bytes dropped]\n", self.dropped));
+    /// Output not returned before.
+    pub fn take_new(&mut self) -> NewOutput {
+        let dropped = if self.read == 0 { self.dropped } else { 0 };
+        let mut lines = Vec::new();
+        let mut offset = self.dropped + self.read;
+        for line in self.text[self.read..].split_inclusive('\n') {
+            let i = self.times.partition_point(|&(start, _)| start <= offset);
+            let at = if i == 0 { 0.0 } else { self.times[i - 1].1 };
+            lines.push((at, line.trim_end_matches(['\n', '\r']).to_string()));
+            offset += line.len();
         }
-        new.push_str(&self.text[self.read..]);
         self.read = self.text.len();
-        (new, self.open)
+        NewOutput { lines, dropped, open: self.open }
     }
 
     pub fn is_open(&self) -> bool {
@@ -663,5 +696,31 @@ impl Lines {
                 None => line,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OUTPUT_KEEP, OutputLog};
+
+    #[test]
+    fn output_lines_keep_their_times_across_reads_and_drops() {
+        let mut log = OutputLog { open: true, started: Some(std::time::Instant::now()), ..Default::default() };
+        log.push("one\n");
+        log.push("two\nthree\n");
+        let new = log.take_new();
+        assert_eq!(new.lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), ["one", "two", "three"]);
+        assert_eq!(new.lines[1].0, new.lines[2].0, "lines from one piece share its time");
+        assert!(new.lines[0].0 <= new.lines[1].0);
+        // Overflow: older text is dropped, and what's left still finds its time.
+        let big = "x".repeat(OUTPUT_KEEP / 2) + "\n";
+        for _ in 0..3 {
+            log.push(&big);
+        }
+        log.push("last\n");
+        let new = log.take_new();
+        assert_eq!(new.lines.last().unwrap().1, "last");
+        assert!(new.lines.iter().all(|(t, _)| *t >= 0.0));
+        assert!(log.times.len() <= 3, "old times are let go: {}", log.times.len());
     }
 }

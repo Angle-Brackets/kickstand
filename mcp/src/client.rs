@@ -45,6 +45,10 @@ pub struct UploadStats {
     pub elapsed: Duration,
 }
 
+/// What an unreachable console most likely means.
+const ASLEEP: &str = "the console doesn't answer on the network: it's most likely asleep (it can't be woken remotely), \
+    turned off, or off Wi-Fi. Ask the user to wake and unlock it rather than retrying in a loop";
+
 impl Client {
     pub fn new(addr: String, token: String) -> Self {
         Client { addr, token, app: std::sync::Mutex::new(None), conn: Mutex::new(None) }
@@ -140,7 +144,13 @@ impl Client {
             // One connection for the capture and its reads: the daemon keeps the JPEG per connection.
             match self.read_chunks(Request::Screenshot, read_at, 0, u64::MAX, "the screenshot").await {
                 Ok((jpeg, _)) => return Ok(jpeg),
-                Err(e) if tries < 4 && format!("{e:#}").contains("caps:sc") => {
+                Err(e) if format!("{e:#}").contains("caps:sc") => {
+                    if tries == 4 {
+                        return Err(e.context(
+                            "the console kept refusing screenshots for 3 s (it does while the foreground changes, and it \
+                             can stay that way while some applets are in front, like the Album running hbmenu)",
+                        ));
+                    }
                     tries += 1;
                     tokio::time::sleep(Duration::from_millis(700)).await;
                 }
@@ -641,8 +651,18 @@ impl Client {
     async fn connect_with(&self, first: Request) -> Result<Conn> {
         let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&self.addr))
             .await
-            .map_err(|_| anyhow!("timed out connecting to the daemon at {}", self.addr))?
-            .with_context(|| format!("connecting to the daemon at {}", self.addr))?;
+            .map_err(|_| anyhow!("timed out connecting to the daemon at {}: {ASLEEP}", self.addr))?
+            .map_err(|e| {
+                let hint = match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused => {
+                        "something is at that address but Kickstand isn't listening: the sysmodule isn't running (the user can start it by opening Kickstand in hbmenu), or the address is another device's"
+                    }
+                    std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::TimedOut => ASLEEP,
+                    _ => "",
+                };
+                let e = anyhow::Error::new(e).context(format!("connecting to the daemon at {}", self.addr));
+                if hint.is_empty() { e } else { e.context(hint) }
+            })?;
         stream.set_nodelay(true)?;
         let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro } };
         match round_trip(&mut conn, &first).await? {

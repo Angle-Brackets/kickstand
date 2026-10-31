@@ -1,6 +1,6 @@
 # Kickstand Capabilities & MCP Tools Reference
 
-This document details all **36 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
+This document details all **37 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
 ## At a Glance
 
@@ -41,7 +41,7 @@ Build, deploy, run, and watch a project in one call (configured in `~/.config/ki
 ---
 
 ### `projects`
-List the projects known to [`test_build`](#test_build) from `~/.config/kickstand/projects.json`, showing each project's name, directory, build command, local NRO path, and SD card destination.
+List the projects known to [`test_build`](#test_build) from `~/.config/kickstand/projects.json`, showing each project's name, directory, build command, local NRO path, SD card destination, and launch arguments (`args`, which `test_build`'s own `args` replace for one run).
 
 *Parameters: none.*
 
@@ -51,6 +51,7 @@ List the projects known to [`test_build`](#test_build) from `~/.config/kickstand
 Start a homebrew NRO (either uploaded from `local_path` on the PC or already on the SD card at `sd_path`) with arguments via `hbmenu`'s NetLoader, and stream its initial stdout.
 - **`mode: "full"` (default):** Runs the NRO with the console's full memory in place of a host title (see [`open_hbmenu`](#open_hbmenu)), closing any currently running application first. Required for games.
 - **`mode: "applet"`:** Runs small tools quickly from the Album applet (a few hundred MB of RAM). Refused for projects listed in `projects.json`.
+- With `sd_path`, hbmenu is sent the Kickstand NRO as a launcher, which then opens the NRO on the card (NetLoader can only run what it's sent); the result says so.
 - If an `elf` is provided, `<module>+0x<offset>` addresses printed to stdout are symbolized live with function names and source lines, and the ELF is remembered for [`threads`](#threads), [`memory_map`](#memory_map), [`read_memory`](#read_memory), and [`write_memory`](#write_memory).
 
 | Parameter | Type | Default | Description |
@@ -72,6 +73,10 @@ Read additional stdout emitted by the NRO that [`run_nro`](#run_nro) or [`test_b
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `wait_seconds` | `integer` | `0` *(max 60)* | Let the NRO run for up to this many seconds before reading new output (returns early on exit). |
+| `grep` | `string` | — | Only lines matching this regular expression (e.g. `"report=\|error"`). Lines left out are still marked read. |
+| `after` | `integer` | `0` | With `grep`: also show this many lines after each match (e.g. a report's top entries). |
+| `max_lines` | `integer` | — | Show at most this many lines, the newest (after `grep`). |
+| `timestamps` | `boolean` | `false` | Start each line with when it arrived, in seconds since the NRO started (`[12.345s] `), to time phases like boot or a state load. |
 
 ---
 
@@ -186,6 +191,8 @@ Press one or more buttons simultaneously on a virtual Pro Controller (attaches t
 | `buttons` | `string` *(required)* | — | Button or `+`-joined button combo to press (e.g. `"a"`, `"home"`, `"zl+zr"`). |
 | `times` | `integer` | `1` *(1–10)* | Number of times to press the button(s). |
 | `hold_ms` | `integer` | `100` *(1–2000)* | Milliseconds to hold each press. |
+| `then` | `string` | — | Then look, in the same call: `"still"` waits for the screen to settle (menus, fades) and returns it; `"change"` waits for it to change. Up to 10 s, like [`wait_screen`](#wait_screen). |
+| `width` | `integer` | `640` | Width of that screenshot. |
 
 ---
 
@@ -201,6 +208,8 @@ Play a timed sequence of inputs on a single virtual controller for analog sticks
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `steps` | `string` *(required)* | — | Space-separated `WHAT:MS` input steps. |
+| `then` | `string` | — | `"still"` or `"change"`: return the screen afterwards, as in [`press`](#press). |
+| `width` | `integer` | `640` | Width of that screenshot. |
 
 ---
 
@@ -413,7 +422,7 @@ One-call snapshot of the console's state:
 - Running application (game, or `hbloader` with `hbmenu`/NRO in full-memory mode) and running applet (`hbloader` in the Album).
 - Whether the console is stuck on an Atmosphère fatal error screen.
 - Whether the sysmodule is still pressing `B` to dismiss the lock screen after a reboot.
-- Remaining keep-awake lease time, console uptime, any other AI agents currently sharing the console, and a small screenshot.
+- Remaining keep-awake lease time, console uptime, any other AI agents currently sharing the console, and a small screenshot (if the console refuses one, the rest is still returned with a note).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

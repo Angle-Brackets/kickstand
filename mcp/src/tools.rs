@@ -185,6 +185,11 @@ pub struct PressArgs {
     pub times: Option<u8>,
     /// How long each press is held, in milliseconds (1-2000, default 100).
     pub hold_ms: Option<u32>,
+    /// Then look, in this call: "still" waits for the screen to settle (a menu moving, a fade) and returns
+    /// it, "change" waits for it to change; as wait_screen, up to 10 s.
+    pub then: Option<String>,
+    /// Width of that screenshot (default 640).
+    pub width: Option<u32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -226,6 +231,10 @@ pub struct InputArgs {
     /// consecutive steps. Examples: "r:300 r+a:150 r:6000" (R through a launch), "l=0,1:1500" (walk up
     /// 1.5 s), "l=1,0+b:800" (run right), "touch=640,360:100" (tap the centre). At most 64 steps, 20 s.
     pub steps: String,
+    /// Then look, in this call: "still" or "change", as press's then.
+    pub then: Option<String>,
+    /// Width of that screenshot (default 640).
+    pub width: Option<u32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -332,6 +341,14 @@ pub struct CrashReportArgs {
 pub struct NroOutputArgs {
     /// First let it run this many seconds (default 0, max 60), less if it exits.
     pub wait_seconds: Option<u32>,
+    /// Only lines matching this regular expression (Rust regex syntax), e.g. "report=|error".
+    pub grep: Option<String>,
+    /// With grep: also this many lines after each match (e.g. a report's first few entries).
+    pub after: Option<usize>,
+    /// At most this many lines, the newest (after grep).
+    pub max_lines: Option<usize>,
+    /// Start each line with when it arrived, in seconds since the NRO started (e.g. "[12.345s] ").
+    pub timestamps: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -466,15 +483,114 @@ impl Tools {
     }
 
     /// Waits up to `wait_s` for the NRO to exit, then returns its new output and status.
-    async fn read_output(&self, wait_s: u32) -> String {
+    /// Waits for the screen as wait_screen does and returns it, after `done` (what the call did first).
+    async fn look(&self, done: &str, until: crate::capture::Until, region: Option<(u32, u32, u32, u32)>, timeout: std::time::Duration, width: u32) -> anyhow::Result<Vec<ContentBlock>> {
+        use crate::capture::Until;
+        let waited = crate::capture::wait(&self.client, until, region, timeout).await?;
+        let what = match (waited.met, until) {
+            (true, Until::Change) => "the screen changed",
+            (true, Until::Still) => "the screen is still",
+            (false, Until::Change) => "timed out: the screen didn't change",
+            (false, Until::Still) => "timed out: the screen kept changing",
+        };
+        let id = self.remember(&waited.jpeg);
+        let text = format!("{done}{}{what} after {:.1} s ({} captures) (shot {id})", if done.is_empty() { "" } else { "; " }, waited.elapsed.as_secs_f64(), waited.captures);
+        let jpeg = scaled(waited.jpeg, width).await?;
+        Ok(vec![ContentBlock::text(text), jpeg_block(&jpeg)])
+    }
+
+    /// press and input's `then`: the input went through either way, so a screen that can't be read is
+    /// reported, not an error.
+    async fn look_after(&self, done: &str, until: crate::capture::Until, width: Option<u32>) -> Vec<ContentBlock> {
+        match self.look(done, until, None, THEN_TIMEOUT, width.unwrap_or(640)).await {
+            Ok(content) => content,
+            Err(e) => vec![ContentBlock::text(format!("{done}; then couldn't look at the screen: {e:#}"))],
+        }
+    }
+
+    async fn read_output(&self, wait_s: u32, view: &OutputView) -> String {
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait_s));
         while self.output.lock().unwrap().is_open() && tokio::time::Instant::now() < until {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        let (new, open) = self.output.lock().unwrap().take_new();
-        let status = if open { "the NRO is running" } else { "the NRO's stdout is closed (it exited)" };
-        if new.is_empty() { format!("\n[no new output; {status}]") } else { format!("\n--- output ---\n{new}\n[{status}]") }
+        let new = self.output.lock().unwrap().take_new();
+        let status = if new.open { "the NRO is running" } else { "the NRO's stdout is closed (it exited)" };
+        if new.lines.is_empty() {
+            return format!("\n[no new output; {status}]");
+        }
+        let (shown, notes) = view.pick(&new.lines);
+        let mut text = String::from("\n--- output ---\n");
+        if new.dropped > 0 {
+            let _ = writeln!(text, "[{} earlier bytes dropped]", new.dropped);
+        }
+        for i in shown {
+            let (at, line) = &new.lines[i];
+            if view.timestamps {
+                let _ = write!(text, "[{at:.3}s] ");
+            }
+            text.push_str(line);
+            text.push('\n');
+        }
+        let notes: Vec<String> = notes.into_iter().chain([status.to_string()]).collect();
+        let _ = write!(text, "[{}]", notes.join("; "));
+        text
     }
+}
+
+/// Which lines of new NRO output [`Tools::nro_output`] shows, and how.
+#[derive(Default)]
+struct OutputView {
+    grep: Option<regex::Regex>,
+    /// Lines shown after each match.
+    after: usize,
+    /// Show at most this many (the newest).
+    max_lines: Option<usize>,
+    /// Start lines with when they arrived.
+    timestamps: bool,
+}
+
+impl OutputView {
+    /// The indices of the lines to show, and notes on what was left out.
+    fn pick(&self, lines: &[(f64, String)]) -> (Vec<usize>, Vec<String>) {
+        let mut notes = Vec::new();
+        let mut shown: Vec<usize> = match &self.grep {
+            None => (0..lines.len()).collect(),
+            Some(re) => {
+                let mut shown = Vec::new();
+                let mut until = 0;
+                for (i, (_, line)) in lines.iter().enumerate() {
+                    if re.is_match(line) {
+                        until = i + 1 + self.after;
+                    }
+                    if i < until {
+                        shown.push(i);
+                    }
+                }
+                notes.push(format!("{} of {} new lines: grep {:?}{}", shown.len(), lines.len(), re.as_str(), if self.after > 0 { format!(" with {} after each", self.after) } else { String::new() }));
+                shown
+            }
+        };
+        if let Some(max) = self.max_lines
+            && shown.len() > max
+        {
+            let cut = shown.len() - max;
+            shown.drain(..cut);
+            notes.push(format!("the {cut} before these left out (max_lines {max})"));
+        }
+        (shown, notes)
+    }
+}
+
+/// How long press and input's `then` waits for the screen.
+const THEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// wait_screen's `until`, and press and input's `then`.
+fn parse_until(until: &str) -> anyhow::Result<crate::capture::Until> {
+    Ok(match until {
+        "change" | "changed" => crate::capture::Until::Change,
+        "still" | "stable" | "settle" => crate::capture::Until::Still,
+        other => anyhow::bail!("expected \"change\" or \"still\", not {other:?}"),
+    })
 }
 
 /// "x,y,w,h".
@@ -704,26 +820,36 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen (b three times; after an agent reboot to an entry the sysmodule does this itself; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. Check the result with screenshot.")]
+    #[tool(description = "Press buttons on the Switch through a virtual Pro Controller that the daemon attaches for the call and detaches after (about a second to settle, then the presses). Use it to get past the lock screen (b three times; after an agent reboot to an entry the sysmodule does this itself; b does nothing on the home menu, unlike a, which would launch the selected title) or to drive menus and games. then: \"still\" returns the settled screen in the same call (menus), or check with screenshot.")]
     async fn press(&self, Parameters(args): Parameters<PressArgs>) -> CallToolResult {
         let result = async {
             let buttons = crate::client::parse_buttons(&args.buttons)?;
             let times = args.times.unwrap_or(1);
+            let then = args.then.as_deref().map(parse_until).transpose()?;
             self.client.press(buttons, times, args.hold_ms.unwrap_or(100)).await?;
-            anyhow::Ok(format!("pressed {} x{times}", args.buttons))
+            let done = format!("pressed {} x{times}", args.buttons);
+            match then {
+                Some(until) => Ok(self.look_after(&done, until, args.width).await),
+                None => Ok(vec![ContentBlock::text(done)]),
+            }
         };
-        result.await.map_or_else(fail, ok)
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Play timed input on one virtual controller, for what press can't do: analog sticks (moving in games), touch screen taps and drags, holding a button through other presses or a load, long holds, quick combos. Each step holds exactly what it lists for its time; everything is released at the end. Look with screenshot afterwards.")]
+    #[tool(description = "Play timed input on one virtual controller, for what press can't do: analog sticks (moving in games), touch screen taps and drags, holding a button through other presses or a load, long holds, quick combos. Each step holds exactly what it lists for its time; everything is released at the end. then: \"still\" or \"change\" returns the screen in the same call; otherwise look with screenshot.")]
     async fn input(&self, Parameters(args): Parameters<InputArgs>) -> CallToolResult {
         let result = async {
             let steps = crate::client::parse_steps(&args.steps)?;
             let n = steps.len();
+            let then = args.then.as_deref().map(parse_until).transpose()?;
             self.client.input(steps).await?;
-            anyhow::Ok(format!("played {n} steps"))
+            let done = format!("played {n} steps");
+            match then {
+                Some(until) => Ok(self.look_after(&done, until, args.width).await),
+                None => Ok(vec![ContentBlock::text(done)]),
+            }
         };
-        result.await.map_or_else(fail, ok)
+        result.await.map_or_else(fail, CallToolResult::success)
     }
 
     #[tool(description = "Input that runs until something happens on screen, in one call instead of a press-and-look loop: hold buttons or a stick, press a button repeatedly, or replay steps, while this PC watches the screen a few times a second and stops it the moment the condition holds. Conditions: the screen (or a region) changes, stops changing, or a piece of an earlier screenshot appears or disappears (e.g. mash A until the 'Continue' prompt appears; hold right until the door is gone; press down until the cursor reaches an item). You choose the region from a screenshot (grid: true labels coordinates); this only compares pixels, so pick something that looks the same each time it shows. Everything is released at the end. Returns what stopped it, how long it took, and the screen then (as a new shot). Reacts within about a quarter second: fine for menus, dialogue and walking, not for frame-precise play.")]
@@ -804,13 +930,16 @@ impl Tools {
             if !others.is_empty() {
                 write!(text, "\nother agents: {} (launching, closing, input and restarts aren't coordinated between agents)", others.join("; "))?;
             }
-            let mut content = vec![ContentBlock::text(text)];
+            let mut shot = None;
             if args.screenshot.unwrap_or(true) && fatal.is_none() {
-                let jpeg = self.client.screenshot().await?;
-                let width = args.width.unwrap_or(480);
-                let jpeg = scaled(jpeg, width).await?;
-                content.push(jpeg_block(&jpeg));
+                // The rest of the status is worth having without it.
+                match self.client.screenshot().await {
+                    Ok(jpeg) => shot = Some(scaled(jpeg, args.width.unwrap_or(480)).await?),
+                    Err(e) => write!(text, "\nscreenshot unavailable here: {e:#}")?,
+                }
             }
+            let mut content = vec![ContentBlock::text(text)];
+            content.extend(shot.as_deref().map(jpeg_block));
             anyhow::Ok(content)
         };
         result.await.map_or_else(fail, CallToolResult::success)
@@ -906,7 +1035,7 @@ impl Tools {
                     old.abort();
                 }
                 let wait = args.wait_seconds.unwrap_or(5).min(60);
-                text.push_str(&self.read_output(wait).await);
+                text.push_str(&self.read_output(wait, &OutputView::default()).await);
             }
             anyhow::Ok(text)
         };
@@ -982,12 +1111,15 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "The projects test_build knows (from ~/.config/kickstand/projects.json): name, folder, build command, NRO and where it goes on the SD card.")]
+    #[tool(description = "The projects test_build knows (from ~/.config/kickstand/projects.json): name, folder, build command, NRO, where it goes on the SD card, and the arguments it runs with (test_build's args replace them for one run). A project's args field holds a launch command line you'd otherwise retype; ask the user to add a project rather than editing the file yourself.")]
     async fn projects(&self) -> CallToolResult {
         let result = async {
             let mut out = String::new();
             for (name, p) in crate::project::load_all()? {
                 writeln!(out, "{name}: {} (build: {}; {} -> {})", p.dir.display(), p.build.as_deref().unwrap_or("none"), p.nro.display(), p.dest)?;
+                if !p.args.is_empty() {
+                    writeln!(out, "    args: {}", p.args.join(" "))?;
+                }
             }
             anyhow::Ok(if out.is_empty() { "no projects".to_string() } else { out })
         };
@@ -1048,10 +1180,15 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "More stdout from the NRO run_nro last started: what arrived since the last read, and whether it's still running (its stdout open).")]
+    #[tool(description = "More stdout from the NRO run_nro last started: what arrived since the last read, and whether it's still running (its stdout open). On long or chatty runs, save tokens with grep (only matching lines, plus after lines after each), max_lines (only the newest) and timestamps (when each line arrived, to time phases). Lines left out are still marked read.")]
     async fn nro_output(&self, Parameters(args): Parameters<NroOutputArgs>) -> CallToolResult {
-        let wait = args.wait_seconds.unwrap_or(0).min(60);
-        ok(self.read_output(wait).await.trim_start().to_string())
+        let result = async {
+            let grep = args.grep.as_deref().map(regex::Regex::new).transpose().context("grep isn't a valid regular expression")?;
+            let view = OutputView { grep, after: args.after.unwrap_or(0).min(100), max_lines: args.max_lines, timestamps: args.timestamps.unwrap_or(false) };
+            let wait = args.wait_seconds.unwrap_or(0).min(60);
+            anyhow::Ok(self.read_output(wait, &view).await.trim_start().to_string())
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Keep the Switch awake (no dimming or auto-sleep), shown by a Kickstand icon next to its clock. Every tool call keeps it awake for 30 minutes, after which the console's own timers apply again to save battery. Call this with no arguments to renew those 30 minutes before a long stretch without tool calls (a big build, a long think), or with more minutes (up to 480) to watch a game run; minutes: 0 lets it sleep when you're done. A console that falls asleep can't be woken remotely, so renew rather than risk it. Not kept across reboots; after a reboot to an entry, the sysmodule gets past the lock screen itself. Changes no system settings.")]
@@ -1084,29 +1221,10 @@ impl Tools {
     #[tool(description = "Wait for the Switch's screen to change (a load to finish, a menu or dialog to appear, the game to react to input) or to stop changing (a transition, fade or scrolling text to end), then look at it: one call instead of polling with screenshots. Returns the screen when that happens, or when the timeout passes (and says which).")]
     async fn wait_screen(&self, Parameters(args): Parameters<WaitScreenArgs>) -> CallToolResult {
         let result = async {
-            let until = match args.until.as_deref().unwrap_or("change") {
-                "change" | "changed" => crate::capture::Until::Change,
-                "still" | "stable" | "settle" => crate::capture::Until::Still,
-                other => anyhow::bail!("until is \"change\" or \"still\", not {other:?}"),
-            };
+            let until = parse_until(args.until.as_deref().unwrap_or("change"))?;
             let region = args.region.as_deref().map(parse_region).transpose()?;
             let timeout = args.timeout_seconds.unwrap_or(10.0).clamp(0.0, crate::capture::MAX_WAIT_SECONDS);
-            let waited = crate::capture::wait(&self.client, until, region, std::time::Duration::from_secs_f64(timeout)).await?;
-            let text = format!(
-                "{} after {:.1} s ({} captures)",
-                match (waited.met, until) {
-                    (true, crate::capture::Until::Change) => "the screen changed",
-                    (true, crate::capture::Until::Still) => "the screen is still",
-                    (false, crate::capture::Until::Change) => "timed out: the screen didn't change",
-                    (false, crate::capture::Until::Still) => "timed out: the screen kept changing",
-                },
-                waited.elapsed.as_secs_f64(),
-                waited.captures
-            );
-            let text = format!("{text} (shot {})", self.remember(&waited.jpeg));
-            let width = args.width.unwrap_or(640);
-            let jpeg = scaled(waited.jpeg, width).await?;
-            anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&jpeg)])
+            self.look("", until, region, std::time::Duration::from_secs_f64(timeout), args.width.unwrap_or(640)).await
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
@@ -1400,5 +1518,31 @@ mod tests {
         for name in super::CONTENTIOUS {
             assert!(names.iter().any(|n| n == name), "no tool named {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::OutputView;
+
+    fn lines(text: &[&str]) -> Vec<(f64, String)> {
+        text.iter().enumerate().map(|(i, l)| (i as f64, l.to_string())).collect()
+    }
+
+    #[test]
+    fn grep_keeps_matches_and_the_lines_after() {
+        let view = OutputView { grep: Some(regex::Regex::new("^report=").unwrap()), after: 2, ..Default::default() };
+        let all = lines(&["boot", "report=1", "a", "b", "c", "report=2", "d"]);
+        let (shown, notes) = view.pick(&all);
+        assert_eq!(shown, [1, 2, 3, 5, 6]);
+        assert!(notes[0].starts_with("5 of 7 new lines"), "{notes:?}");
+    }
+
+    #[test]
+    fn max_lines_keeps_the_newest() {
+        let view = OutputView { max_lines: Some(2), ..Default::default() };
+        let (shown, notes) = view.pick(&lines(&["a", "b", "c", "d"]));
+        assert_eq!(shown, [2, 3]);
+        assert_eq!(notes, ["the 2 before these left out (max_lines 2)"]);
     }
 }
