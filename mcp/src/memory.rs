@@ -393,6 +393,11 @@ impl Elf {
         let module = module.map(str::to_string).or_else(|| elf.file_stem().map(|s| s.to_string_lossy().into_owned()));
         Ok(Elf { symbols: Some(Symbols::load(elf)?), module, path: Some(elf.to_path_buf()) })
     }
+
+    /// A source-line symbolizer for the ELF, if one was given.
+    pub fn symbolizer(&self) -> Result<Option<crate::symbolize::Symbolizer>> {
+        self.path.as_deref().map(|path| crate::symbolize::Symbolizer::new(path, self.module.as_deref())).transpose()
+    }
 }
 
 /// Points memory requests at the homebrew being worked on: hbloader in the Album (applet mode) if it's
@@ -401,6 +406,25 @@ async fn target(client: &Client) -> Result<&'static str> {
     let applet = client.applet_status().await?.is_some_and(|a| a.hbl == Some(true));
     client.memory_target(applet).await?;
     Ok(if applet { "applet mode (the Album)" } else { "the application" })
+}
+
+/// Points memory requests at the target, then fetches its layout and resolves the address `expr`.
+async fn locate(client: &Client, elf: &Elf, expr: &str) -> Result<(Layout, u64)> {
+    target(client).await?;
+    let layout = Layout::fetch(client).await?;
+    let address = resolve(client, &layout, elf.symbols.as_ref(), elf.module.as_deref(), expr).await?;
+    Ok((layout, address))
+}
+
+/// The first line of a read or write: the build mismatch warning if any, then `what` at `address` and
+/// where in the NRO that is.
+fn heading(layout: &Layout, elf: &Elf, what: &str, address: u64) -> String {
+    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
+    let _ = write!(out, "{what} at {address:#x}");
+    if let Some(at) = layout.describe(address, elf.symbols.as_ref()) {
+        let _ = write!(out, " ({at})");
+    }
+    out
 }
 
 /// The application's memory map, as text.
@@ -414,9 +438,7 @@ pub async fn map(client: &Client, elf: &Elf) -> Result<String> {
 /// Reads `len` bytes at the address `expr` and shows them as `format` (`len` 0: one value, or 256 bytes
 /// for a string).
 pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Format) -> Result<String> {
-    target(client).await?;
-    let layout = Layout::fetch(client).await?;
-    let address = resolve(client, &layout, elf.symbols.as_ref(), elf.module.as_deref(), expr).await?;
+    let (layout, address) = locate(client, elf, expr).await?;
     let len = match len {
         0 if format == Format::Str => 256,
         0 if format == Format::Hex => 64,
@@ -424,11 +446,7 @@ pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Fo
         n => n.min(MAX_READ),
     };
     let data = client.read_memory(address, len).await?;
-    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
-    let _ = write!(out, "{len} bytes at {address:#x}");
-    if let Some(at) = layout.describe(address, elf.symbols.as_ref()) {
-        let _ = write!(out, " ({at})");
-    }
+    let mut out = heading(&layout, elf, &format!("{len} bytes"), address);
     out.push('\n');
     out.push_str(&render(&data, address, format, &layout, elf.symbols.as_ref()));
     Ok(out)
@@ -436,19 +454,13 @@ pub async fn peek(client: &Client, elf: &Elf, expr: &str, len: usize, format: Fo
 
 /// Writes `value` encoded as `format` at the address `expr`; returns what was there before and after.
 pub async fn poke(client: &Client, elf: &Elf, expr: &str, value: &str, format: Format) -> Result<String> {
-    target(client).await?;
-    let layout = Layout::fetch(client).await?;
-    let address = resolve(client, &layout, elf.symbols.as_ref(), elf.module.as_deref(), expr).await?;
+    let (layout, address) = locate(client, elf, expr).await?;
     let data = format.encode(value)?;
     let before = client.read_memory(address, data.len()).await?;
     client.write_memory(address, &data).await?;
     let after = client.read_memory(address, data.len()).await?;
     let shown = if format == Format::Str { Format::Hex } else { format };
-    let mut out = layout.mismatch(elf.symbols.as_ref()).unwrap_or_default();
-    let _ = write!(out, "wrote {} bytes at {address:#x}", data.len());
-    if let Some(at) = layout.describe(address, elf.symbols.as_ref()) {
-        let _ = write!(out, " ({at})");
-    }
+    let mut out = heading(&layout, elf, &format!("wrote {} bytes", data.len()), address);
     let _ = write!(
         out,
         "\nbefore: {}after:  {}",
@@ -465,10 +477,7 @@ pub async fn threads(client: &Client, elf: &Elf) -> Result<String> {
     let which = target(client).await?;
     let layout = Layout::fetch(client).await?;
     let (app, threads) = client.threads().await?;
-    let symbolizer = match &elf.path {
-        Some(path) => Some(crate::symbolize::Symbolizer::new(path, elf.module.as_deref())?),
-        None => None,
-    };
+    let symbolizer = elf.symbolizer()?;
     let name = |address: u64, back: u64| -> String {
         let Some(at) = layout.describe(address, elf.symbols.as_ref()) else { return format!("{address:#x}") };
         let Some((base, _)) = layout.nro else { return at };

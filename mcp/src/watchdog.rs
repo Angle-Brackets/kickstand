@@ -71,10 +71,7 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
             let new_crash = crate::crash::report_paths(client, app.program_id).await?.into_iter().find(|p| !known.contains(p));
             if let Some(path) = new_crash {
                 let fetched = crate::crash::fetch(client, &path).await?;
-                let symbols = match &elf.path {
-                    Some(path) => Some(crate::symbolize::Symbolizer::new(path, elf.module.as_deref())?),
-                    None => None,
-                };
+                let symbols = elf.symbolizer()?;
                 let text = format!("CRASHED after {:.0} s ({path}):\n\n{}", start.elapsed().as_secs_f64(), crate::crash::describe(&fetched, symbols.as_ref())?);
                 return Ok(Report { text: with_tail(text), screenshot: fetched.jpg });
             }
