@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod crash;
 mod desktop;
+mod install;
 mod launch;
 mod link;
 mod memory;
@@ -56,6 +57,13 @@ enum Command {
     /// Open the desktop app (the default otherwise): find the Switch, pair, link an AI app, and see what
     /// the agent is doing.
     Desktop,
+    /// Add the desktop app to this computer's app menu, with its icon (Linux: ~/.local/share/applications;
+    /// macOS: ~/Applications). It runs this copy of Kickstand.
+    Install {
+        /// Take it out instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
     /// Add Kickstand to an AI app: code (Claude Code), desktop (Claude Desktop), gemini (Gemini CLI), agy
@@ -448,6 +456,10 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             println!("{}", if remove { link::unlink(app)? } else { link::link(app)? });
             return Ok(());
         }
+        Command::Install { remove } => {
+            println!("{}", install::run(remove)?);
+            return Ok(());
+        }
         Command::Allow { folder, write, remove } => {
             let Some(folder) = folder else {
                 let saved = access::saved();
@@ -822,7 +834,13 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             client.exit().await?;
             println!("the NRO daemon is exiting");
         }
-        Command::Token | Command::Mock { .. } | Command::Symbolize { .. } | Command::Discover { .. } | Command::Pair { .. } | Command::Link { .. } => {
+        Command::Token
+        | Command::Mock { .. }
+        | Command::Symbolize { .. }
+        | Command::Discover { .. }
+        | Command::Pair { .. }
+        | Command::Link { .. }
+        | Command::Install { .. } => {
             unreachable!()
         }
     }

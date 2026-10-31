@@ -52,6 +52,8 @@ target/release/kickstand sysmodule handover      # start the sysmodule; the NRO 
 target/release/kickstand put daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro /switch/kickstand/kickstand.nro
 target/release/kickstand link code                # adds it to Claude Code (or desktop, gemini, agy, antigravity, codex, lmstudio)
 ```
+`kickstand install` adds the desktop app to this computer's app menu with its icon (Linux and macOS;
+`--remove` takes it out).
 Starting the sysmodule at boot (`boot2.flag`) is left to the user (`kickstand sysmodule enable`); the MCP
 tools never set it.
 
