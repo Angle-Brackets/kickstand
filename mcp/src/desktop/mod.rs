@@ -30,7 +30,8 @@ pub fn run() -> Result<()> {
         .with_title("Kickstand")
         .with_app_id("kickstand")
         .with_inner_size([1200.0, 760.0])
-        .with_min_inner_size([720.0, 560.0]);
+        // The smallest size every screen fits in side by side; the window itself doesn't scroll.
+        .with_min_inner_size([920.0, 740.0]);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
@@ -180,12 +181,13 @@ impl eframe::App for Kickstand {
         self.footer(ui, &model);
         let frame = Frame::new().fill(PAPER);
         egui::CentralPanel::no_frame().frame(frame).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.screen.clone() {
+            // The window doesn't scroll; lists that can grow (the activity) scroll on their own.
+            match self.screen.clone() {
                 Screen::Find => screens::find(self, ui, &mut model),
                 Screen::Pair { addr, name } => screens::pair(self, ui, &mut model, addr, &name),
                 Screen::Link => screens::link(self, ui, &mut model),
                 Screen::Home => screens::home(self, ui, &mut model),
-            });
+            }
         });
         drop(model);
         if self.confirm_reboot {
@@ -220,7 +222,8 @@ fn columns(ui: &mut egui::Ui, weights: &[f32], mins: &[f32], gap: f32, mut add: 
             if i > 0 {
                 ui.add_space(gap);
             }
-            ui.allocate_ui_with_layout(Vec2::new(share * w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            // The full height, so a column can fill what's left (the activity list scrolls in it).
+            ui.allocate_ui_with_layout(Vec2::new(share * w, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(share * w);
                 ui.spacing_mut().item_spacing = spacing;
                 add(ui, i);

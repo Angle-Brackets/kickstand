@@ -14,7 +14,7 @@ use crate::link::{App, State};
 /// The page's padding.
 fn page(ui: &mut Ui, top: f32, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().inner_margin(Margin { left: theme::GUTTER as i8, right: theme::GUTTER as i8, top: top as i8, bottom: 40 }).show(ui, |ui| {
-        ui.set_max_width(1120.0);
+        ui.set_max_width(ui.available_width().min(1120.0));
         add(ui);
     });
 }
@@ -25,7 +25,7 @@ pub fn find(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             if column == 0 {
                 ui.spacing_mut().item_spacing.y = 20.0;
                 theme::heading(ui, "Find your Switch", 52.0);
-                ui.set_max_width(420.0);
+                ui.set_max_width(ui.available_width().min(420.0));
                 theme::text(
                     ui,
                     "Open Kickstand from the Homebrew Menu on your Switch. It appears here as soon as it's on the same Wi-Fi as this computer.",
@@ -64,6 +64,8 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         ui.add_space(22.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
+                // Leaves room for the button, so the details wrap instead of running under it.
+                ui.set_max_width(ui.available_width() - 130.0);
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.horizontal(|ui| {
                     ui.label(theme::job(&name, Face::Bold, 22.0, INK, 0.0));
@@ -78,7 +80,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 if found.announce.kind == DaemonKind::Sysmodule {
                     meta.push_str(" · background service");
                 }
-                ui.label(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0));
+                ui.add(egui::Label::new(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0)).wrap());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if is_paired {
@@ -180,7 +182,7 @@ pub fn pair(app: &mut Kickstand, ui: &mut Ui, model: &mut Model, addr: SocketAdd
             ui.add_space(4.0);
             theme::label(ui, "PAIRING CODE", true, 13.0, INK);
             digit_boxes(ui, &app.code, !running);
-            ui.set_max_width(460.0);
+            ui.set_max_width(ui.available_width().min(460.0));
             theme::text(
                 ui,
                 &format!("Six digits, on the Kickstand screen on your Switch. After {} wrong tries it shows a new one.", proto::PAIR_MAX_TRIES),
@@ -284,7 +286,7 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             if column == 0 {
                 ui.spacing_mut().item_spacing.y = 20.0;
                 theme::heading(ui, "Link your AI app", 52.0);
-                ui.set_max_width(440.0);
+                ui.set_max_width(ui.available_width().min(440.0));
                 theme::text(
                     ui,
                     "Kickstand gives the AI app on this computer its tools for the Switch: it can copy homebrew over, run it, see the screen and press buttons. Linking adds Kickstand to the app's settings.",
@@ -412,7 +414,7 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
 
     match (&model.reach, live) {
         (Reach::Unreachable(error), _) => {
-            ui.set_max_width(520.0);
+            ui.set_max_width(ui.available_width().min(520.0));
             theme::text(
                 ui,
                 "Wake it up and check it's on the same Wi-Fi as this computer. Without the background service, Kickstand also has to be open on it (Homebrew Menu, then Kickstand).",
@@ -468,22 +470,25 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Cli
     }
     let now = chrono::Local::now();
     let elapsed = live.at.elapsed().as_millis() as i64;
-    for event in report.recent.iter().take(8) {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            let at = now - chrono::TimeDelta::milliseconds(event.ago_ms as i64 + elapsed);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
-            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
-            let mut what = capitalize(&event.what);
-            if Some(event.ip) != me {
-                what = format!("{what} ({})", who(event.ip));
-            }
-            ui.label(theme::job(&what, Face::Mono, 13.0, INK, 0.0));
-        });
-        ui.add_space(10.0);
-        theme::rule(ui, 1.0, RULE_LIGHT);
-    }
+    // The only part of the window that scrolls: it takes whatever height the column has left.
+    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
+        for event in &report.recent {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                let at = now - chrono::TimeDelta::milliseconds(event.ago_ms as i64 + elapsed);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
+                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
+                let mut what = capitalize(&event.what);
+                if Some(event.ip) != me {
+                    what = format!("{what} ({})", who(event.ip));
+                }
+                ui.label(theme::job(&what, Face::Mono, 13.0, INK, 0.0));
+            });
+            ui.add_space(10.0);
+            theme::rule(ui, 1.0, RULE_LIGHT);
+        }
+    });
 }
 
 /// "3 min", "1 h 5 min", "20 s".
@@ -566,7 +571,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
 pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context) {
     let frame = egui::Frame::new().fill(theme::PAPER).stroke(Stroke::new(1.5, INK)).inner_margin(Margin::same(28));
     let modal = egui::Modal::new(egui::Id::unique("reboot")).frame(frame).backdrop_color(INK.gamma_multiply(0.35)).show(ctx, |ui| {
-        ui.set_max_width(440.0);
+        ui.set_max_width(ui.available_width().min(440.0));
         ui.spacing_mut().item_spacing.y = 16.0;
         theme::heading(ui, "Restart into hekate?", 30.0);
         theme::text(
