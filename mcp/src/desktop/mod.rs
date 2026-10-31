@@ -41,6 +41,10 @@ pub fn run() -> Result<()> {
         .map_err(|e| anyhow!("couldn't open the window ({e}); `kickstand serve` runs the MCP server without one"))
 }
 
+/// How long a screen takes to come in, and dialogs and folding groups to open.
+const ENTER_S: f32 = 0.24;
+const OPEN_S: f32 = 0.18;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum Screen {
     Find,
@@ -48,6 +52,18 @@ pub enum Screen {
     Pair { addr: SocketAddr, name: String },
     Link,
     Home,
+}
+
+impl Screen {
+    /// Its place in the order Find, Pair, Link, Home: a later screen comes in from the right.
+    fn order(&self) -> usize {
+        match self {
+            Screen::Find => 0,
+            Screen::Pair { .. } => 1,
+            Screen::Link => 2,
+            Screen::Home => 3,
+        }
+    }
 }
 
 pub struct Kickstand {
@@ -66,6 +82,16 @@ pub struct Kickstand {
     /// A group just opened there, to scroll into view once its rows are laid out.
     reveal: Option<crate::link::Maker>,
     brands: brands::Brands,
+    /// The screen being shown's [`Screen::order`] (`None` before the first frame), when it came in, and
+    /// from which side (-1 left, 1 right, 0 fading in place).
+    shown: Option<usize>,
+    entered: f64,
+    from: f32,
+    /// When the Link screen's tab last changed.
+    tab_at: f64,
+    /// Activity entries seen so far: when each happened (seconds since 1970) and when it appeared here,
+    /// so new ones fade in.
+    seen: Vec<(f64, f64)>,
 }
 
 impl Kickstand {
@@ -81,7 +107,23 @@ impl Kickstand {
             (screen, linked.or_else(installed).map_or(crate::link::Maker::Claude, |(app, _)| app.maker()))
         };
         let brands = brands::Brands::load(ctx);
-        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, folded: [false; 4], reveal: None, brands }
+        Kickstand {
+            model,
+            tx,
+            screen,
+            code: String::new(),
+            address: None,
+            confirm_reboot: false,
+            tab,
+            folded: [false; 4],
+            reveal: None,
+            brands,
+            shown: None,
+            entered: 0.0,
+            from: 0.0,
+            tab_at: f64::NEG_INFINITY,
+            seen: Vec::new(),
+        }
     }
 
     fn send(&self, cmd: Cmd) {
@@ -133,10 +175,9 @@ impl Kickstand {
         let width = 14.0 + name_galley.size().x + 10.0 + host_galley.size().x + 10.0 + 12.0 + 14.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 44.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Use a different Switch");
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
         let painter = ui.painter();
-        if response.hovered() {
-            painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER);
-        }
+        painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
         painter.rect_stroke(rect, 0.0, Stroke::new(1.5, INK), egui::StrokeKind::Inside);
         let mut x = rect.left() + 14.0;
         let cy = rect.center().y;
@@ -180,6 +221,7 @@ fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> 
     });
     let targets = [Some(Screen::Find), showing_code, Some(Screen::Link)];
     let mut clicked = None;
+    let mut underline = None;
     ui.spacing_mut().item_spacing.x = 28.0;
     // Right to left.
     for (i, step) in ["01 FIND", "02 PAIR", "03 LINK"].iter().enumerate().rev() {
@@ -192,7 +234,7 @@ fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> 
         ui.painter().galley(rect.min, galley, color);
         let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.max);
         if i == current {
-            ui.painter().rect_filled(bar, 0.0, RED);
+            underline = Some(bar);
         } else if response.hovered() && target.is_some() {
             ui.painter().rect_filled(bar.with_min_y(bar.max.y - 1.5), 0.0, INK);
         }
@@ -203,6 +245,13 @@ fn stepper(ui: &mut egui::Ui, screen: &Screen, model: &Model) -> Option<Screen> 
         } else if i == 1 && i != current {
             response.on_hover_text("Open Kickstand from the Homebrew Menu on your Switch: its screen shows a code to pair with");
         }
+    }
+    // Slides to the step shown.
+    if let Some(bar) = underline {
+        let ctx = ui.ctx();
+        let left = ctx.animate_value_with_time(egui::Id::unique("step-left"), bar.left(), 0.2);
+        let right = ctx.animate_value_with_time(egui::Id::unique("step-right"), bar.right(), 0.2);
+        ui.painter().rect_filled(egui::Rect::from_x_y_ranges(left..=right, bar.y_range()), 0.0, RED);
     }
     clicked
 }
@@ -219,23 +268,46 @@ impl eframe::App for Kickstand {
         }
         self.header(ui, &mut model);
         self.footer(ui, &model);
+        // A new screen fades in, sliding from the side it's on in Find, Pair, Link, Home.
+        let now = ui.input(|i| i.time);
+        let order = self.screen.order();
+        if self.shown != Some(order) {
+            self.from = self.shown.map_or(0.0, |shown| if order > shown { 1.0 } else { -1.0 });
+            self.shown = Some(order);
+            self.entered = now;
+        }
+        let t = eased(now - self.entered, ENTER_S);
+        if t < 1.0 {
+            ui.ctx().request_repaint();
+        }
         let frame = Frame::new().fill(PAPER);
         egui::CentralPanel::no_frame().frame(frame).show(ui, |ui| {
-            // The window doesn't scroll; lists that can grow (the activity) scroll on their own.
-            match self.screen.clone() {
-                Screen::Find => screens::find(self, ui, &mut model),
-                Screen::Pair { addr, name } => screens::pair(self, ui, &mut model, addr, &name),
-                Screen::Link => screens::link(self, ui, &mut model),
-                Screen::Home => screens::home(self, ui, &mut model),
-            }
+            let rect = ui.max_rect().translate(Vec2::new((1.0 - t) * 36.0 * self.from, 0.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.multiply_opacity(t);
+                // The window doesn't scroll; lists that can grow (the activity) scroll on their own.
+                match self.screen.clone() {
+                    Screen::Find => screens::find(self, ui, &mut model),
+                    Screen::Pair { addr, name } => screens::pair(self, ui, &mut model, addr, &name),
+                    Screen::Link => screens::link(self, ui, &mut model),
+                    Screen::Home => screens::home(self, ui, &mut model),
+                }
+            });
         });
         drop(model);
-        if self.confirm_reboot {
-            screens::confirm_reboot(self, ui.ctx());
+        // Shown while it fades out too.
+        let open = ui.ctx().animate_bool_with_time_and_easing(egui::Id::unique("confirm-reboot"), self.confirm_reboot, OPEN_S, egui::emath::easing::cubic_out);
+        if open > 0.0 {
+            screens::confirm_reboot(self, ui.ctx(), open);
         }
         // Times and the "looking" bars move on their own.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
     }
+}
+
+/// How far along an animation `elapsed` seconds into `length` is, eased out (fast, then settling).
+fn eased(elapsed: f64, length: f32) -> f32 {
+    egui::emath::easing::cubic_out((elapsed as f32 / length).clamp(0.0, 1.0))
 }
 
 /// Lays out columns side by side when they fit at their minimum widths, else one above the other.

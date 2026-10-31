@@ -79,6 +79,8 @@ pub fn install(ctx: &egui::Context) {
 
     ctx.set_theme(egui::Theme::Light);
     ctx.all_styles_mut(|style| {
+        // Folding groups and egui's own animations at the pace of the rest.
+        style.animation_time = super::OPEN_S;
         let v = &mut style.visuals;
         *v = egui::Visuals::light();
         v.panel_fill = PAPER;
@@ -162,6 +164,8 @@ pub fn button(ui: &mut Ui, label: &str, kind: Kind, tall: bool, enabled: bool) -
     let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x + 2.0 * pad, height + edge), sense);
     let response = if enabled { response.on_hover_cursor(CursorIcon::PointingHand) } else { response };
     let pressed = response.is_pointer_button_down_on();
+    // Hover colours ease in and out.
+    let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered() && !pressed, 0.12);
     let alpha = if enabled { 1.0 } else { 0.45 };
     let painter = ui.painter();
     // Pressing a primary button pushes it down onto its red edge.
@@ -170,14 +174,12 @@ pub fn button(ui: &mut Ui, label: &str, kind: Kind, tall: bool, enabled: bool) -
     let fg = match kind {
         Kind::Primary => {
             painter.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - edge), rect.max), 0.0, RED.gamma_multiply(alpha));
-            let fill = if response.hovered() && !pressed { Color32::from_rgb(0x2A, 0x2D, 0x35) } else { INK };
+            let fill = INK.lerp_to_gamma(Color32::from_rgb(0x2A, 0x2D, 0x35), hover);
             painter.rect_filled(face_rect, 0.0, fill.gamma_multiply(alpha));
             PAPER
         }
         Kind::Outline | Kind::Dashed => {
-            if response.hovered() {
-                painter.rect_filled(face_rect, 0.0, if pressed { RULE_LIGHT } else { PRESSED_PAPER });
-            }
+            painter.rect_filled(face_rect, 0.0, if pressed { RULE_LIGHT } else { PRESSED_PAPER.gamma_multiply(hover) });
             let stroke = Stroke::new(1.5, INK.gamma_multiply(alpha));
             if kind == Kind::Outline {
                 painter.rect_stroke(face_rect, 0.0, stroke, StrokeKind::Inside);

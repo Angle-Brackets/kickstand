@@ -114,6 +114,8 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 
     ui.add_space(20.0);
+    // Called every frame, so opening it animates.
+    let shown = ui.ctx().animate_bool_with_time(egui::Id::unique("address-open"), app.address.is_some(), super::OPEN_S);
     let Some(mut address) = app.address.take() else {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -125,6 +127,7 @@ fn consoles(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         });
         return;
     };
+    ui.multiply_opacity(shown);
     theme::label(ui, "THE SWITCH'S IP ADDRESS", true, 13.0, INK);
     ui.add_space(10.0);
     let mut go = false;
@@ -299,279 +302,316 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             ui.spacing_mut().item_spacing.y = 0.0;
             tabs(app, ui);
             let tab = app.tab;
-            app_rows(app, ui, model, tab);
-            if tab == Maker::Custom {
-                any_app(ui, model);
+            // A tab's apps fade in.
+            let t = super::eased(ui.input(|i| i.time) - app.tab_at, super::ENTER_S);
+            if t < 1.0 {
+                ui.ctx().request_repaint();
             }
-            notice(ui, model);
-            ui.add_space(28.0);
-            let any = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
-            if any {
-                if theme::button(ui, "Done", Kind::Primary, true, true).clicked() {
+            ui.scope(|ui| {
+                    ui.multiply_opacity(t);
+                    app_rows(app, ui, model, tab);
+                    if tab == Maker::Custom {
+                        any_app(ui, model);
+                    }
+                });
+                notice(ui, model);
+                ui.add_space(28.0);
+                let any = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
+                if any {
+                    if theme::button(ui, "Done", Kind::Primary, true, true).clicked() {
+                        app.go(model, Screen::Home);
+                    }
+                } else if theme::link(ui, "Skip for now", 16.0, Face::Semi).clicked() {
                     app.go(model, Screen::Home);
                 }
-            } else if theme::link(ui, "Skip for now", 16.0, Face::Semi).clicked() {
-                app.go(model, Screen::Home);
-            }
-        });
-    });
-}
-
-/// Claude, Gemini, OpenAI, Custom: each with its mark, the chosen one underlined in red.
-fn tabs(app: &mut Kickstand, ui: &mut Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 22.0;
-        for maker in Maker::ALL {
-            let chosen = app.tab == maker;
-            let color = if chosen { INK } else { MUTED };
-            let galley = ui.painter().layout_job(theme::job(maker.name(), if chosen { Face::Bold } else { Face::Semi }, 16.0, color, 0.0));
-            let icon = super::brands::SIZE;
-            let size = Vec2::new(icon + 8.0 + galley.size().x, 40.0);
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let color = if response.hovered() { INK } else { color };
-            let mid = rect.top() + 14.0;
-            app.brands.paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + icon / 2.0, mid), Vec2::splat(icon)), maker);
-            ui.painter().galley(egui::pos2(rect.left() + icon + 8.0, mid - galley.size().y / 2.0), galley, color);
-            if chosen {
-                ui.painter().rect_filled(Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom()), 0.0, RED);
-            }
-            if response.clicked() {
-                app.tab = maker;
-            }
-        }
-    });
-    theme::rule(ui, 1.5, INK);
-}
-
-/// One row per app of `maker`: linked (with Remove), a Link button, or not installed.
-fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
-    for (which, state) in model.links.iter().filter(|(a, _)| a.maker() == maker) {
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.set_min_height(44.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.label(theme::job(which.name(), Face::Semi, 19.0, INK, 0.0));
-                ui.label(theme::job(which.detail(), Face::Mono, 12.0, MUTED, 0.0));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match state {
-                State::Linked { command } => {
-                    if theme::link(ui, "Remove", 13.0, Face::Mono).clicked() {
-                        app.send(Cmd::Unlink(*which));
-                    }
-                    linked_mark(ui, command);
-                }
-                State::NotLinked => {
-                    if theme::button(ui, "Link", Kind::Primary, false, true).clicked() {
-                        app.send(Cmd::Link(*which));
-                    }
-                }
-                State::Missing => {
-                    theme::label(ui, "NOT INSTALLED", false, 13.0, MUTED).on_hover_text(format!("Install {}, then come back", which.name()));
-                }
             });
         });
-        ui.add_space(14.0);
-        theme::rule(ui, 1.0, RULE);
     }
-}
 
-/// The most height the home screen's linked apps take before they scroll (two groups of two, open), and
-/// the least (one group of two).
-const LINKED_HEIGHT: f32 = 2.0 * 45.0 + 4.0 * 37.0;
-const LINKED_MIN_HEIGHT: f32 = 45.0 + 2.0 * 37.0;
-/// The height of the Switch's section under them, with its buttons on one line or two.
-const SWITCH_HEIGHT: f32 = 330.0;
-const SWITCH_HEIGHT_WRAPPED: f32 = 390.0;
-
-/// "1 AGENT", "3 AGENTS".
-fn agents_count(n: usize) -> String {
-    if n == 1 { "1 AGENT".into() } else { format!("{n} AGENTS") }
-}
-
-/// ✓ LINKED, naming the command it runs on hover. (Right to left.)
-fn linked_mark(ui: &mut Ui, command: &str) {
-    let response = theme::label(ui, "LINKED", false, 13.0, INK);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 11.0), Sense::hover());
-    art::check(ui.painter(), rect.min, INK);
-    response.on_hover_text(format!("Runs {command}"));
-}
-
-/// The Custom tab's part for apps Kickstand doesn't know: the command, and the JSON most of them take.
-fn any_app(ui: &mut Ui, model: &mut Model) {
-    let Ok((command, args)) = crate::link::server_command(None) else { return };
-    let line = std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
-    let config = serde_json::json!({ "mcpServers": { crate::link::NAME: { "command": command, "args": args } } });
-    // Shown on one line to keep the window still; copied laid out.
-    let (shown, json) = (config.to_string(), serde_json::to_string_pretty(&config).unwrap_or_default());
-    ui.add_space(28.0);
-    theme::label(ui, "ANY OTHER MCP APP", true, 13.0, INK);
-    ui.add_space(10.0);
-    theme::text(ui, "Cursor, VS Code, Jan, or a local model's chat app: add a server that runs this command (stdio).", Face::Regular, 15.0, BODY);
-    for (shown, copied, what) in [(line.clone(), line, "the command"), (shown, json, "the JSON")] {
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            if theme::button(ui, "Copy", Kind::Outline, false, true).clicked() {
-                ui.ctx().copy_text(copied);
-                model.notice = Some((format!("Copied {what}"), false));
+    /// Claude, Gemini, OpenAI, Custom: each with its mark, the chosen one underlined in red (the line slides
+    /// over when another is chosen).
+    fn tabs(app: &mut Kickstand, ui: &mut Ui) {
+        let mut underline = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 22.0;
+            for maker in Maker::ALL {
+                let chosen = app.tab == maker;
+                let color = if chosen { INK } else { MUTED };
+                let galley = ui.painter().layout_job(theme::job(maker.name(), if chosen { Face::Bold } else { Face::Semi }, 16.0, color, 0.0));
+                let icon = super::brands::SIZE;
+                let size = Vec2::new(icon + 8.0 + galley.size().x, 40.0);
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                let color = if response.hovered() { INK } else { color };
+                let mid = rect.top() + 14.0;
+                app.brands.paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + icon / 2.0, mid), Vec2::splat(icon)), maker);
+                ui.painter().galley(egui::pos2(rect.left() + icon + 8.0, mid - galley.size().y / 2.0), galley, color);
+                if chosen {
+                    underline = Some(rect);
+                }
+                if response.clicked() && !chosen {
+                    app.tab = maker;
+                    app.tab_at = ui.input(|i| i.time);
+                }
             }
-            let frame = egui::Frame::new().fill(theme::FIELD).stroke(Stroke::new(1.0, RULE)).inner_margin(Margin::symmetric(12, 10));
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                frame.show(ui, |ui| {
-                    ui.set_width(ui.available_width() - 12.0);
-                    ui.add(egui::Label::new(theme::job(&shown, Face::Mono, 12.5, INK, 0.0)).wrap());
+        });
+        if let Some(rect) = underline {
+            let ctx = ui.ctx();
+            let left = ctx.animate_value_with_time(egui::Id::unique("tab-left"), rect.left(), 0.2);
+            let right = ctx.animate_value_with_time(egui::Id::unique("tab-right"), rect.right(), 0.2);
+            ui.painter().rect_filled(Rect::from_x_y_ranges(left..=right, rect.bottom() - 3.0..=rect.bottom()), 0.0, RED);
+        }
+        theme::rule(ui, 1.5, INK);
+    }
+
+    /// One row per app of `maker`: linked (with Remove), a Link button, or not installed.
+    fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
+        for (which, state) in model.links.iter().filter(|(a, _)| a.maker() == maker) {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.set_min_height(44.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.label(theme::job(which.name(), Face::Semi, 19.0, INK, 0.0));
+                    ui.label(theme::job(which.detail(), Face::Mono, 12.0, MUTED, 0.0));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match state {
+                    State::Linked { command } => {
+                        if theme::link(ui, "Remove", 13.0, Face::Mono).clicked() {
+                            app.send(Cmd::Unlink(*which));
+                        }
+                        linked_mark(ui, command);
+                    }
+                    State::NotLinked => {
+                        if theme::button(ui, "Link", Kind::Primary, false, true).clicked() {
+                            app.send(Cmd::Link(*which));
+                        }
+                    }
+                    State::Missing => {
+                        theme::label(ui, "NOT INSTALLED", false, 13.0, MUTED).on_hover_text(format!("Install {}, then come back", which.name()));
+                    }
                 });
             });
-        });
-    }
-}
-
-fn notice(ui: &mut Ui, model: &Model) {
-    if let Some(busy) = model.busy {
-        ui.add_space(16.0);
-        theme::label(ui, &format!("{}…", busy.to_uppercase()), false, 13.0, MUTED);
-    } else if let Some((text, error)) = &model.notice {
-        ui.add_space(16.0);
-        if *error {
-            problem(ui, text);
-        } else {
-            theme::text(ui, text, Face::Mono, 13.0, BODY);
+            ui.add_space(14.0);
+            theme::rule(ui, 1.0, RULE);
         }
     }
-}
 
-pub fn home(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
-    let top = ui.cursor().top();
-    let side_by_side = columns(ui, &[1.25, 1.0], &[440.0, 320.0], 0.0, |ui, column| {
-        egui::Frame::new().inner_margin(Margin::symmetric(theme::GUTTER as i8, 44)).show(ui, |ui| {
-            if column == 0 {
-                agent(app, ui, model);
-            } else {
-                console(app, ui, model);
-            }
-        });
-    });
-    if side_by_side {
-        // The rule between the columns, down to the footer.
-        let x = ui.min_rect().left() + (ui.available_width()) * 1.25 / 2.25;
-        let bottom = ui.clip_rect().bottom();
-        ui.painter().vline(x, top..=bottom, Stroke::new(1.5, INK));
+    /// The most height the home screen's linked apps take before they scroll (two groups of two, open), and
+    /// the least (one group of two).
+    const LINKED_HEIGHT: f32 = 2.0 * 45.0 + 4.0 * 37.0;
+    const LINKED_MIN_HEIGHT: f32 = 45.0 + 2.0 * 37.0;
+    /// The height of the Switch's section under them, with its buttons on one line or two.
+    const SWITCH_HEIGHT: f32 = 330.0;
+    const SWITCH_HEIGHT_WRAPPED: f32 = 390.0;
+
+    /// "1 AGENT", "3 AGENTS".
+    fn agents_count(n: usize) -> String {
+        if n == 1 { "1 AGENT".into() } else { format!("{n} AGENTS") }
     }
-}
 
-/// The left column: the console's state and what the agent is up to.
-fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
-    ui.spacing_mut().item_spacing.y = 18.0;
-    let live = match &model.reach {
-        Reach::Connected(live) => Some(live),
-        _ => None,
-    };
-    let agents = live.and_then(|l| l.agents.as_ref()).map(|a| a.agents.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
-    let busiest = agents.iter().min_by_key(|c| c.idle_ms);
-    let (status, status_color, heading, standing) = match (&model.reach, busiest) {
-        (Reach::Unknown, _) => ("CONNECTING", MUTED, "Getting in touch".to_string(), false),
-        (Reach::Unreachable(_), _) => ("CAN'T REACH IT", MUTED, "Your Switch isn't answering".to_string(), false),
-        // Until its first request an agent's "doing" is "connecting", which read as the Switch connecting.
-        (Reach::Connected(_), Some(c)) if c.idle_ms < 90_000 && c.requests > 0 => ("AGENT CONNECTED", RED, capitalize(&c.doing), true),
-        (Reach::Connected(_), Some(_)) => ("AGENT CONNECTED", RED, "Waiting on the agent".to_string(), true),
-        (Reach::Connected(_), None) => ("READY", INK, "Ready for an agent".to_string(), true),
-    };
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 28.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(150.0, 98.0), Sense::hover());
-        art::side(ui.painter(), Rect::from_min_size(rect.min - Vec2::new(0.0, 12.0), Vec2::new(150.0, 98.0)), standing);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            ui.add_space(8.0);
-            theme::status(ui, status, status_color);
-            theme::heading(ui, &heading, 46.0);
-        });
-    });
-
-    match (&model.reach, live) {
-        (Reach::Unreachable(error), _) => {
-            ui.set_max_width(ui.available_width().min(520.0));
-            theme::text(
-                ui,
-                "Wake it up and check it's on the same Wi-Fi as this computer. Without the background service, Kickstand also has to be open on it (Homebrew Menu, then Kickstand).",
-                Face::Regular,
-                16.0,
-                BODY,
-            );
-            theme::text(ui, error, Face::Mono, 12.0, MUTED);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 18.0;
-                if theme::button(ui, "Try again", Kind::Primary, true, true).clicked() {
-                    app.send(Cmd::Retry);
-                }
-                if theme::link(ui, "Find it on the network", 16.0, Face::Semi).clicked() {
-                    app.go(model, Screen::Find);
-                }
-            });
-        }
-        (_, Some(live)) => activity(ui, model, live, busiest.copied()),
-        _ => {}
+    /// ✓ LINKED, naming the command it runs on hover. (Right to left.)
+    fn linked_mark(ui: &mut Ui, command: &str) {
+        let response = theme::label(ui, "LINKED", false, 13.0, INK);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 11.0), Sense::hover());
+        art::check(ui.painter(), rect.min, INK);
+        response.on_hover_text(format!("Runs {command}"));
     }
-}
 
-fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::AgentInfo>) {
-    let Some(report) = &live.agents else {
-        theme::text(ui, "Update Kickstand on the Switch to see what the agent is doing here.", Face::Regular, 16.0, BODY);
-        return;
-    };
-    let me = report.agents.iter().find(|c| c.you).map(|c| c.ip);
-    let who = |ip: [u8; 4]| if Some(ip) == me { "This computer".to_string() } else { std::net::Ipv4Addr::from(ip).to_string() };
-    let meta = match busiest {
-        Some(c) => {
-            let label = model.labels.get(c.id).map(|l| format!("{l} · ")).unwrap_or_default();
-            format!("{label}{} · connected {} · {} requests", who(c.ip), duration(c.connected_ms), c.requests)
-        }
-        None => {
-            let linked = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
-            if linked { "Ask an agent to use the Switch and it shows up here".into() } else { "Link an AI app, then ask it to use the Switch".into() }
-        }
-    };
-    ui.label(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0));
-
-    ui.add_space(14.0);
-    ui.spacing_mut().item_spacing.y = 0.0;
-    theme::rule(ui, 1.5, INK);
-    ui.add_space(12.0);
-    theme::label(ui, "ACTIVITY", true, 13.0, INK);
-    ui.add_space(12.0);
-    theme::rule(ui, 1.0, RULE);
-    if report.recent.is_empty() {
-        ui.add_space(12.0);
-        theme::text(ui, "Nothing yet.", Face::Mono, 13.0, MUTED);
-    }
-    let now = chrono::Local::now();
-    let elapsed = live.at.elapsed().as_millis() as i64;
-    // The only part of the window that scrolls: it takes whatever height the column has left.
-    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
-        for event in &report.recent {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
+    /// The Custom tab's part for apps Kickstand doesn't know: the command, and the JSON most of them take.
+    fn any_app(ui: &mut Ui, model: &mut Model) {
+        let Ok((command, args)) = crate::link::server_command(None) else { return };
+        let line = std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+        let config = serde_json::json!({ "mcpServers": { crate::link::NAME: { "command": command, "args": args } } });
+        // Shown on one line to keep the window still; copied laid out.
+        let (shown, json) = (config.to_string(), serde_json::to_string_pretty(&config).unwrap_or_default());
+        ui.add_space(28.0);
+        theme::label(ui, "ANY OTHER MCP APP", true, 13.0, INK);
+        ui.add_space(10.0);
+        theme::text(ui, "Cursor, VS Code, Jan, or a local model's chat app: add a server that runs this command (stdio).", Face::Regular, 15.0, BODY);
+        for (shown, copied, what) in [(line.clone(), line, "the command"), (shown, json, "the JSON")] {
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                let at = now - chrono::TimeDelta::milliseconds(event.ago_ms as i64 + elapsed);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
-                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if let Some(label) = model.labels.get(event.id) {
-                    ui.label(theme::job(&format!("[{label}]"), Face::Mono, 13.0, MUTED, 0.0));
+                if theme::button(ui, "Copy", Kind::Outline, false, true).clicked() {
+                    ui.ctx().copy_text(copied);
+                    model.notice = Some((format!("Copied {what}"), false));
                 }
-                let mut what = capitalize(&event.what);
-                if Some(event.ip) != me {
-                    what = format!("{what} ({})", who(event.ip));
-                }
-                ui.add(egui::Label::new(theme::job(&what, Face::Mono, 13.0, INK, 0.0)).wrap());
+                let frame = egui::Frame::new().fill(theme::FIELD).stroke(Stroke::new(1.0, RULE)).inner_margin(Margin::symmetric(12, 10));
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width() - 12.0);
+                        ui.add(egui::Label::new(theme::job(&shown, Face::Mono, 12.5, INK, 0.0)).wrap());
+                    });
+                });
             });
-            ui.add_space(10.0);
-            theme::rule(ui, 1.0, RULE_LIGHT);
+        }
+    }
+
+    fn notice(ui: &mut Ui, model: &Model) {
+        if let Some(busy) = model.busy {
+            ui.add_space(16.0);
+            theme::label(ui, &format!("{}…", busy.to_uppercase()), false, 13.0, MUTED);
+        } else if let Some((text, error)) = &model.notice {
+            ui.add_space(16.0);
+            if *error {
+                problem(ui, text);
+            } else {
+                theme::text(ui, text, Face::Mono, 13.0, BODY);
+            }
+        }
+    }
+
+    pub fn home(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
+        let top = ui.cursor().top();
+        let side_by_side = columns(ui, &[1.25, 1.0], &[440.0, 320.0], 0.0, |ui, column| {
+            egui::Frame::new().inner_margin(Margin::symmetric(theme::GUTTER as i8, 44)).show(ui, |ui| {
+                if column == 0 {
+                    agent(app, ui, model);
+                } else {
+                    console(app, ui, model);
+                }
+            });
+        });
+        if side_by_side {
+            // The rule between the columns, down to the footer.
+            let x = ui.min_rect().left() + (ui.available_width()) * 1.25 / 2.25;
+            let bottom = ui.clip_rect().bottom();
+            ui.painter().vline(x, top..=bottom, Stroke::new(1.5, INK));
+        }
+    }
+
+    /// The left column: the console's state and what the agent is up to.
+    fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
+        ui.spacing_mut().item_spacing.y = 18.0;
+        let live = match &model.reach {
+            Reach::Connected(live) => Some(live),
+            _ => None,
+        };
+        let agents = live.and_then(|l| l.agents.as_ref()).map(|a| a.agents.iter().filter(|c| !c.you).collect::<Vec<_>>()).unwrap_or_default();
+        let busiest = agents.iter().min_by_key(|c| c.idle_ms);
+        let (status, status_color, heading, standing) = match (&model.reach, busiest) {
+            (Reach::Unknown, _) => ("CONNECTING", MUTED, "Getting in touch".to_string(), false),
+            (Reach::Unreachable(_), _) => ("CAN'T REACH IT", MUTED, "Your Switch isn't answering".to_string(), false),
+            // Until its first request an agent's "doing" is "connecting", which read as the Switch connecting.
+            (Reach::Connected(_), Some(c)) if c.idle_ms < 90_000 && c.requests > 0 => ("AGENT CONNECTED", RED, capitalize(&c.doing), true),
+            (Reach::Connected(_), Some(_)) => ("AGENT CONNECTED", RED, "Waiting on the agent".to_string(), true),
+            (Reach::Connected(_), None) => ("READY", INK, "Ready for an agent".to_string(), true),
+        };
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 28.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(150.0, 98.0), Sense::hover());
+            art::side(ui.painter(), Rect::from_min_size(rect.min - Vec2::new(0.0, 12.0), Vec2::new(150.0, 98.0)), standing);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.add_space(8.0);
+                theme::status(ui, status, status_color);
+                theme::heading(ui, &heading, 46.0);
+            });
+        });
+
+        match (&model.reach, live) {
+            (Reach::Unreachable(error), _) => {
+                ui.set_max_width(ui.available_width().min(520.0));
+                theme::text(
+                    ui,
+                    "Wake it up and check it's on the same Wi-Fi as this computer. Without the background service, Kickstand also has to be open on it (Homebrew Menu, then Kickstand).",
+                    Face::Regular,
+                    16.0,
+                    BODY,
+                );
+                theme::text(ui, error, Face::Mono, 12.0, MUTED);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 18.0;
+                    if theme::button(ui, "Try again", Kind::Primary, true, true).clicked() {
+                        app.send(Cmd::Retry);
+                    }
+                    if theme::link(ui, "Find it on the network", 16.0, Face::Semi).clicked() {
+                        app.go(model, Screen::Find);
+                    }
+                });
+            }
+            (_, Some(live)) => activity(ui, model, live, busiest.copied(), &mut app.seen),
+            _ => {}
+        }
+    }
+
+    /// `seen`: [`Kickstand::seen`], to fade in entries that are new here.
+    fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::AgentInfo>, seen: &mut Vec<(f64, f64)>) {
+        let Some(report) = &live.agents else {
+            theme::text(ui, "Update Kickstand on the Switch to see what the agent is doing here.", Face::Regular, 16.0, BODY);
+            return;
+        };
+        let me = report.agents.iter().find(|c| c.you).map(|c| c.ip);
+        let who = |ip: [u8; 4]| if Some(ip) == me { "This computer".to_string() } else { std::net::Ipv4Addr::from(ip).to_string() };
+        let meta = match busiest {
+            Some(c) => {
+                let label = model.labels.get(c.id).map(|l| format!("{l} · ")).unwrap_or_default();
+                format!("{label}{} · connected {} · {} requests", who(c.ip), duration(c.connected_ms), c.requests)
+            }
+            None => {
+                let linked = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
+                if linked { "Ask an agent to use the Switch and it shows up here".into() } else { "Link an AI app, then ask it to use the Switch".into() }
+            }
+        };
+        ui.label(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0));
+
+        ui.add_space(14.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        theme::rule(ui, 1.5, INK);
+        ui.add_space(12.0);
+        theme::label(ui, "ACTIVITY", true, 13.0, INK);
+        ui.add_space(12.0);
+        theme::rule(ui, 1.0, RULE);
+        if report.recent.is_empty() {
+            ui.add_space(12.0);
+            theme::text(ui, "Nothing yet.", Face::Mono, 13.0, MUTED);
+        }
+        let now = chrono::Local::now();
+        let elapsed = live.at.elapsed().as_millis() as i64;
+        // The only part of the window that scrolls: it takes whatever height the column has left.
+        let time = ui.input(|i| i.time);
+        egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
+            for event in &report.recent {
+                let at = now - chrono::TimeDelta::milliseconds(event.ago_ms as i64 + elapsed);
+                // The same entry comes back each poll, its time off by a few milliseconds.
+                let at_s = at.timestamp_millis() as f64 / 1000.0;
+                let appeared = match seen.iter().find(|(when, _)| (when - at_s).abs() < 0.75) {
+                    Some(&(_, appeared)) => appeared,
+                    None => {
+                        seen.push((at_s, time));
+                        time
+                    }
+                };
+                let t = super::eased(time - appeared, super::ENTER_S);
+                if t < 1.0 {
+                    ui.ctx().request_repaint();
+                }
+                ui.scope(|ui| {
+                ui.multiply_opacity(t);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 16.0), Sense::hover());
+                    ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, at.format("%H:%M:%S"), Face::Mono.size(13.0), MUTED);
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if let Some(label) = model.labels.get(event.id) {
+                        ui.label(theme::job(&format!("[{label}]"), Face::Mono, 13.0, MUTED, 0.0));
+                    }
+                    let mut what = capitalize(&event.what);
+                    if Some(event.ip) != me {
+                        what = format!("{what} ({})", who(event.ip));
+                    }
+                    ui.add(egui::Label::new(theme::job(&what, Face::Mono, 13.0, INK, 0.0)).wrap());
+                });
+                ui.add_space(10.0);
+                theme::rule(ui, 1.0, RULE_LIGHT);
+            });
         }
     });
+    let keep = seen.len().saturating_sub(4 * proto::MAX_RECENT);
+    seen.drain(..keep);
 }
 
 /// "3 min", "1 h 5 min", "20 s".
@@ -624,14 +664,17 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 continue;
             }
             let open = !app.folded[maker.index()];
+            // Rows grow and shrink rather than appear and vanish.
+            let mut fold = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), egui::Id::unique(("linked-group", maker.index())), open);
+            fold.set_open(open);
+            let openness = fold.openness(ui.ctx());
             let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
             let painter = ui.painter();
-            if response.hovered() {
-                painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER);
-            }
+            painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER.gamma_multiply(hover));
             let mid = rect.center().y;
-            art::fold(painter, egui::pos2(rect.left() + 2.0, mid - 6.0), open, INK);
+            art::fold(painter, egui::pos2(rect.left() + 2.0, mid - 6.0), openness, INK);
             let size = super::brands::SIZE;
             app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
             let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, INK, 0.0));
@@ -641,33 +684,35 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             painter.galley(egui::pos2(rect.right() - count.size().x, mid - count.size().y / 2.0), count, MUTED);
             if response.clicked() {
                 app.folded[maker.index()] = open;
-                // Opened: its rows appear next frame, then get scrolled into view.
+                fold.set_open(!open);
+                // Opened: followed into view while it grows.
                 if !open {
                     app.reveal = Some(maker);
-                    ui.ctx().request_repaint();
                 }
             }
             theme::rule(ui, 1.0, RULE);
-            if !open {
-                continue;
-            }
-            for (which, state) in apps {
-                ui.horizontal(|ui| {
-                    ui.set_min_height(36.0);
-                    ui.add_space(24.0 + size + 10.0);
-                    ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let State::Linked { command } = state {
-                            let n = running(*which);
-                            theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { INK } else { MUTED }).on_hover_text(format!("Linked: runs {command}"));
-                        }
+            fold.show_body_unindented(ui, |ui| {
+                ui.multiply_opacity(openness);
+                for (which, state) in apps {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(36.0);
+                        ui.add_space(24.0 + size + 10.0);
+                        ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let State::Linked { command } = state {
+                                let n = running(*which);
+                                theme::label(ui, &agents_count(n), false, 13.0, if n > 0 { INK } else { MUTED }).on_hover_text(format!("Linked: runs {command}"));
+                            }
+                        });
                     });
-                });
-                theme::rule(ui, 1.0, RULE_LIGHT);
-            }
+                    theme::rule(ui, 1.0, RULE_LIGHT);
+                }
+            });
             if app.reveal == Some(maker) {
-                app.reveal = None;
                 ui.scroll_to_rect(Rect::from_x_y_ranges(rect.x_range(), rect.top()..=ui.min_rect().bottom()), None);
+                if openness >= 1.0 {
+                    app.reveal = None;
+                }
             }
         }
     });
@@ -724,7 +769,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         if theme::button(ui, "Keep awake 1 h", Kind::Outline, false, ready).clicked() {
             app.send(Cmd::KeepAwake { minutes: 60 });
         }
-        if theme::button(ui, "Restart into hekate…", Kind::Dashed, false, ready).clicked() {
+        if theme::button(ui, "Restart into hekate", Kind::Dashed, false, ready).clicked() {
             app.confirm_reboot = true;
         }
     });
@@ -734,9 +779,17 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 }
 
-pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context) {
+/// `open` runs from 0 to 1 as it opens and back as it closes; it only takes clicks while open.
+pub fn confirm_reboot(app: &mut Kickstand, ctx: &egui::Context, open: f32) {
     let frame = egui::Frame::new().fill(theme::PAPER).stroke(Stroke::new(1.5, INK)).inner_margin(Margin::same(28));
-    let modal = egui::Modal::new(egui::Id::unique("reboot")).frame(frame).backdrop_color(INK.gamma_multiply(0.35)).show(ctx, |ui| {
+    let id = egui::Id::unique("reboot");
+    // Rises a little as it fades in.
+    let area = egui::Modal::default_area(id).fade_in(false).anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - open) * 14.0));
+    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(INK.gamma_multiply(0.35 * open)).show(ctx, |ui| {
+        ui.multiply_opacity(open);
+        if !app.confirm_reboot {
+            ui.disable();
+        }
         ui.set_max_width(ui.available_width().min(440.0));
         ui.spacing_mut().item_spacing.y = 16.0;
         theme::heading(ui, "Restart into hekate?", 30.0);
