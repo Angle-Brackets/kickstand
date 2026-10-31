@@ -297,7 +297,7 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 return;
             }
             ui.spacing_mut().item_spacing.y = 0.0;
-            tabs(app, ui, model);
+            tabs(app, ui);
             let tab = app.tab;
             app_rows(app, ui, model, tab);
             if tab == Maker::Custom {
@@ -317,9 +317,8 @@ pub fn link(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     });
 }
 
-/// Claude, Gemini, OpenAI, Custom: each with its mark, the chosen one underlined in red; a dot marks a tab
-/// with something linked.
-fn tabs(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
+/// Claude, Gemini, OpenAI, Custom: each with its mark, the chosen one underlined in red.
+fn tabs(app: &mut Kickstand, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 22.0;
         for maker in Maker::ALL {
@@ -334,10 +333,6 @@ fn tabs(app: &mut Kickstand, ui: &mut Ui, model: &Model) {
             let mid = rect.top() + 14.0;
             app.brands.paint(ui.painter(), Rect::from_center_size(egui::pos2(rect.left() + icon / 2.0, mid), Vec2::splat(icon)), maker);
             ui.painter().galley(egui::pos2(rect.left() + icon + 8.0, mid - galley.size().y / 2.0), galley, color);
-            let linked = model.links.iter().any(|(a, s)| a.maker() == maker && matches!(s, State::Linked { .. }));
-            if linked {
-                ui.painter().circle_filled(egui::pos2(rect.right() + 6.0, mid - 7.0), 3.0, RED);
-            }
             if chosen {
                 ui.painter().rect_filled(Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom()), 0.0, RED);
             }
