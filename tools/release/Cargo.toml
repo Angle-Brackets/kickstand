@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-description = "Signs Kickstand releases (keygen, sign) with the key kept on the releaser's PC."
+description = "Makes and uses Kickstand's release signing key (keygen, public, sign)."
 
 [dependencies]
 anyhow = "1"

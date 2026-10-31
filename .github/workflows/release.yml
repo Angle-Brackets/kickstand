@@ -1,7 +1,6 @@
-# Builds a release when a version tag (v1.2.3) is pushed: the PC app for each platform and the Switch's
-# sysmodule and NRO, with SHA256SUMS over all of them, as a DRAFT release. Nothing installed picks it up
-# until scripts/publish-release.sh signs SHA256SUMS with the key on the releaser's PC and publishes it
-# (the key never comes to CI, so a GitHub compromise alone can't ship code to anyone's Switch).
+# Releases a version when its tag (v1.2.3) is pushed: builds the PC app for each platform and the Switch's
+# sysmodule and NRO, writes SHA256SUMS over all of them, signs it with the KICKSTAND_SIGNING_KEY secret
+# (installed copies only take releases signed with it) and publishes the release.
 name: release
 
 on:
@@ -104,11 +103,12 @@ jobs:
           path: dist/*
 
   release:
-    name: Draft release
+    name: Sign and publish
     needs: [version, switch, pc]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -116,9 +116,22 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - name: Draft
+      - name: Sign
+        env:
+          KICKSTAND_SIGNING_KEY: ${{ secrets.KICKSTAND_SIGNING_KEY }}
+        run: |
+          if [ -z "$KICKSTAND_SIGNING_KEY" ]; then echo "::error::the KICKSTAND_SIGNING_KEY secret isn't set"; exit 1; fi
+          cargo build -q --locked -p kickstand-release
+          # A key that doesn't match the app's would publish a release nobody can install.
+          expected=$(grep -oP 'PUBLIC_KEY: &str = "\K[^"]+' mcp/src/update.rs)
+          if [ "$(target/debug/kickstand-release public)" != "$expected" ]; then
+            echo "::error::KICKSTAND_SIGNING_KEY doesn't match PUBLIC_KEY in mcp/src/update.rs"
+            exit 1
+          fi
+          target/debug/kickstand-release sign dist/SHA256SUMS
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --generate-notes \
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --latest \
             --title "Kickstand ${{ needs.version.outputs.version }}"

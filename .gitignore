@@ -7,3 +7,5 @@ target/
 # Screenshots and logs pulled from the console
 captures/
 logs/
+# Agent worktrees (Claude Code).
+.claude/worktrees/

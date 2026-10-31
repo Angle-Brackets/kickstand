@@ -3,8 +3,9 @@
 //! Switch never goes online: the PC puts its own version's sysmodule and NRO on it over the usual
 //! connection (from the PC version's release, kept in a cache), as `kickstand sysmodule install` does.
 //!
-//! A release counts only if its `SHA256SUMS` carries a signature by [`PUBLIC_KEY`], made on the releaser's
-//! PC (`tools/release`, `scripts/publish-release.sh`), and every file downloaded must match it.
+//! A release counts only if its `SHA256SUMS` carries a signature by [`PUBLIC_KEY`] (made by the release
+//! workflow with `tools/release` and the `KICKSTAND_SIGNING_KEY` secret), and every file downloaded must
+//! match it.
 
 use std::collections::HashMap;
 use std::io::Read;

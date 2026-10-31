@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Signs a release's `SHA256SUMS` so the updater can tell it came from the releaser, not just from GitHub.
-//! The key stays on the releaser's PC (`~/.config/kickstand-release/signing.key`), never in CI.
+//! Signs a release's `SHA256SUMS` so the updater only takes releases made with Kickstand's key. The key is
+//! the `KICKSTAND_SIGNING_KEY` repository secret, which the release workflow signs with; a copy is kept
+//! at `~/.config/kickstand-release/signing.key` (back it up: GitHub won't show a secret again).
 //!
 //! - `keygen`: makes the key and prints the public key to put in `mcp/src/update.rs` (`PUBLIC_KEY`).
 //! - `sign FILE`: writes `FILE.sig` (base64 of the 64-byte ed25519 signature).
 //! - `public`: prints the public key again.
+//!
+//! `sign` and `public` take the key from `$KICKSTAND_SIGNING_KEY` when it's set, else from the file.
 
 use std::path::PathBuf;
 
@@ -22,9 +25,15 @@ fn key_path() -> Result<PathBuf> {
 }
 
 fn load() -> Result<SigningKey> {
-    let path = key_path()?;
-    let text = std::fs::read_to_string(&path).with_context(|| format!("no signing key at {} (run `keygen` first)", path.display()))?;
-    let bytes: [u8; 32] = STANDARD.decode(text.trim())?.try_into().map_err(|_| anyhow::anyhow!("{} isn't a key", path.display()))?;
+    let (text, from) = match std::env::var("KICKSTAND_SIGNING_KEY").ok().filter(|k| !k.trim().is_empty()) {
+        Some(key) => (key, "$KICKSTAND_SIGNING_KEY".to_string()),
+        None => {
+            let path = key_path()?;
+            let text = std::fs::read_to_string(&path).with_context(|| format!("no signing key at {} (run `keygen` first)", path.display()))?;
+            (text, path.display().to_string())
+        }
+    };
+    let bytes: [u8; 32] = STANDARD.decode(text.trim()).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| anyhow::anyhow!("{from} isn't a key"))?;
     Ok(SigningKey::from_bytes(&bytes))
 }
 

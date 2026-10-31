@@ -82,7 +82,7 @@ Discovery uses UDP port 28791 (broadcast) and the daemon listens on TCP port 287
 
 The desktop app looks for a new release when it opens and every 6 hours, and shows **Update to X** in its footer; one click downloads it, checks its signature and reopens. When the Switch is then behind the PC, **Update** appears beside *This Switch*: the PC puts its own version's sysmodule and NRO on the Switch over the usual connection (the Switch never goes online itself), restarting the background service in about 15 seconds without a reboot. It waits until nothing is running on the Switch and no agent is at work. From a terminal: `kickstand update` (both), `kickstand update --check`, `kickstand update --switch`. Agents can't update anything.
 
-Releases are only installed if their `SHA256SUMS` is signed by Kickstand's release key, which is kept off GitHub. A copy built from source updates with `git pull` and `cargo build` instead.
+Releases are only installed if their `SHA256SUMS` is signed with Kickstand's release key, and every file matches it. A copy built from source updates with `git pull` and `cargo build` instead.
 
 To add Kickstand to your OS application launcher (Linux & macOS):
 ```sh
@@ -177,6 +177,7 @@ Kickstand is designed so an AI agent can iterate autonomously without risking co
 
 ## Releasing
 
-1. `scripts/bump-version.sh 0.2.0` sets the PC and Switch versions, commits and tags `v0.2.0`.
-2. `git push && git push origin v0.2.0`: the `release` workflow builds the PC app (Linux x86_64, macOS arm64 and x86_64), the sysmodule and the NRO, and makes a **draft** release with `SHA256SUMS`.
-3. `scripts/publish-release.sh v0.2.0` checks the files, signs `SHA256SUMS` with the key in `~/.config/kickstand-release/` (made once with `cargo run -p kickstand-release -- keygen`; back it up) and publishes. Installed copies see the release only from then on.
+1. `scripts/bump-version.sh 0.1.0` sets the PC and Switch versions (committing if they change) and tags `v0.1.0`.
+2. `git push && git push origin v0.1.0`. The `release` workflow builds the PC app (Linux x86_64, macOS arm64 and x86_64), the sysmodule and the NRO, signs `SHA256SUMS` with the `KICKSTAND_SIGNING_KEY` secret and publishes the release; installed copies offer it from then on.
+
+The key was made once with `cargo run -p kickstand-release -- keygen` (its public half is `PUBLIC_KEY` in `mcp/src/update.rs`) and stored with `gh secret set KICKSTAND_SIGNING_KEY < ~/.config/kickstand-release/signing.key`. Keep that file backed up: GitHub never shows a secret again, and without the key installed copies can't take new releases.
