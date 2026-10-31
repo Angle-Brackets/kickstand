@@ -176,13 +176,14 @@ pub fn run(config: &'static Config<'static>) {
             Some(ip) => log!("listening on {ip}:{}", config.port),
             None => log!("listening on port {} (no network address yet)", config.port),
         }
-        // Without it the console just can't be found; connecting by address still works.
-        let probes = UdpSocket::bind(Ipv4Addr::UNSPECIFIED, Some(discovery::PORT))
-            .map_err(|rc| log!("discovery off: binding UDP {} failed: {rc}", discovery::PORT))
-            .ok();
+        let mut probes = bind_probes(false);
         loop {
             match wait_client_or_probe(&listener, probes.as_ref(), config) {
                 Ok(Some(Ready::Client)) => {}
+                Ok(Some(Ready::RetryProbes)) => {
+                    probes = bind_probes(true);
+                    continue;
+                }
                 Ok(Some(Ready::Probe)) => {
                     if let Some(probes) = &probes {
                         answer_probe(probes, config, &nickname);
@@ -311,13 +312,43 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
 enum Ready {
     Client,
     Probe,
+    /// Time to try binding the probe socket again (only without one).
+    RetryProbes,
+}
+
+/// How often binding the discovery socket is retried after it failed.
+const PROBE_RETRY_MS: u64 = 10_000;
+
+/// Binds the discovery socket, or logs why not (once per run of failures).
+fn bind_probes(failed_before: bool) -> Option<UdpSocket> {
+    match UdpSocket::bind(Ipv4Addr::UNSPECIFIED, Some(discovery::PORT)) {
+        Ok(socket) => {
+            if failed_before {
+                log!("discovery on (UDP {})", discovery::PORT);
+            }
+            Some(socket)
+        }
+        Err(rc) => {
+            if !failed_before {
+                // Without it the console just can't be found; connecting by address still works.
+                log!("discovery off: binding UDP {} failed: {rc}; retrying every {} s", discovery::PORT, PROBE_RETRY_MS / 1000);
+            }
+            None
+        }
+    }
 }
 
 /// Waits for a connection on `listener` or a datagram on `probes`; `None` once the server is stopping.
+/// Without `probes`, returns [`Ready::RetryProbes`] every [`PROBE_RETRY_MS`].
 fn wait_client_or_probe(listener: &TcpListener, probes: Option<&UdpSocket>, config: &Config) -> Result<Option<Ready>> {
     let mut fds = alloc::vec![(RawFd(listener.get_poll_fd()), PollFlags::PollIn())];
     fds.extend(probes.map(|p| (RawFd(p.get_poll_fd()), PollFlags::PollIn())));
-    let step = config.stop.is_some().then_some(STOP_CHECK_MS);
+    let retry_at = probes.is_none().then(|| crate::uptime_ms() + PROBE_RETRY_MS);
+    let step = match (config.stop.is_some(), retry_at.is_some()) {
+        (true, _) => Some(STOP_CHECK_MS),
+        (false, true) => Some(PROBE_RETRY_MS as i32),
+        (false, false) => None,
+    };
     loop {
         if stopped(config) {
             return Ok(None);
@@ -328,6 +359,7 @@ fn wait_client_or_probe(listener: &TcpListener, probes: Option<&UdpSocket>, conf
         match ready.first() {
             Some(0) => return Ok(Some(Ready::Client)),
             Some(_) => return Ok(Some(Ready::Probe)),
+            None if retry_at.is_some_and(|at| crate::uptime_ms() >= at) => return Ok(Some(Ready::RetryProbes)),
             None => {}
         }
     }

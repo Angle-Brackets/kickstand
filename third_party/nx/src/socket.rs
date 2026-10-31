@@ -1240,6 +1240,9 @@ pub mod net {
                 }
             };
 
+            // Closes the fd if the bind fails. (This returned NotInitialized after a successful bind,
+            // leaking the bound fd.)
+            let udp = Self(socket);
             let ipaddr: Ipv4Addr = addr.into();
             let socketaddr = SocketAddrRepr::from((ipaddr, port.unwrap_or(0)));
             if let BsdResult::Err(errno) = socket_server
@@ -1251,7 +1254,7 @@ pub mod net {
                     1000 + errno.cast_unsigned(),
                 ));
             };
-            Err(rc::ResultNotInitialized::make())
+            Ok(udp)
         }
 
         fn connect_impl(destination: SocketAddrRepr) -> Result<Self> {
