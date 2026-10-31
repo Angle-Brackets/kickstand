@@ -91,7 +91,7 @@ pub fn contact_sheet(shots: &[Shot], count: usize) -> Result<Vec<u8>> {
 
 /// Crops `jpeg` to `region` (x, y, w, h in the 1280x720 screen) and scales it to `width` pixels wide; the
 /// original if neither is asked for.
-pub fn reframe(jpeg: &[u8], region: Option<(u32, u32, u32, u32)>, width: Option<u32>) -> Result<Vec<u8>> {
+pub fn reframe(jpeg: &[u8], region: Option<Region>, width: Option<u32>) -> Result<Vec<u8>> {
     frame(jpeg, region, width, false)
 }
 
@@ -104,12 +104,8 @@ pub fn frame(jpeg: &[u8], region: Option<Region>, width: Option<u32>, grid: bool
     if grid {
         draw_grid(&mut img, region.unwrap_or((0, 0, SCREEN.0, SCREEN.1)));
     }
-    if let Some((x, y, w, h)) = region {
-        let (iw, ih) = img.dimensions();
-        if x >= iw || y >= ih || w == 0 || h == 0 {
-            anyhow::bail!("region {x},{y},{w},{h} is off the {iw}x{ih} screen");
-        }
-        img = image::imageops::crop_imm(&img, x, y, w.min(iw - x), h.min(ih - y)).to_image();
+    if let Some(region) = region {
+        img = crop(&img, region)?;
     }
     if let Some(width) = width.filter(|&w| w < img.width()) {
         let height = (u64::from(img.height()) * u64::from(width) / u64::from(img.width())).max(1) as u32;
@@ -122,6 +118,15 @@ pub fn frame(jpeg: &[u8], region: Option<Region>, width: Option<u32>, grid: bool
 
 /// x, y, width, height in the 1280x720 screen.
 pub type Region = (u32, u32, u32, u32);
+
+/// `region` of `img`, clipped to the image; an error if none of it is on the screen.
+fn crop<P: image::Pixel<Subpixel = u8> + 'static>(img: &image::ImageBuffer<P, Vec<u8>>, (x, y, w, h): Region) -> Result<image::ImageBuffer<P, Vec<u8>>> {
+    let (iw, ih) = img.dimensions();
+    if x >= iw || y >= ih || w == 0 || h == 0 {
+        bail!("region {x},{y},{w},{h} is off the {iw}x{ih} screen");
+    }
+    Ok(image::imageops::crop_imm(img, x, y, w.min(iw - x), h.min(ih - y)).to_image())
+}
 
 pub const SCREEN: (u32, u32) = (1280, 720);
 
@@ -221,7 +226,7 @@ pub const MAX_WAIT_SECONDS: f64 = 60.0;
 
 /// Captures until `until` holds or `timeout` passes, comparing small grayscale copies of `region` (the
 /// whole screen if `None`) so JPEG noise and the odd pixel don't count.
-pub async fn wait(client: &Client, until: Until, region: Option<(u32, u32, u32, u32)>, timeout: Duration) -> Result<Waited> {
+pub async fn wait(client: &Client, until: Until, region: Option<Region>, timeout: Duration) -> Result<Waited> {
     let start = Instant::now();
     let first = client.screenshot().await?;
     let reference = thumbnail(&first, region)?;
@@ -257,12 +262,8 @@ pub const STILL: f32 = 0.003;
 /// A 128x72 (for the whole screen) grayscale copy.
 pub fn thumbnail(jpeg: &[u8], region: Option<Region>) -> Result<image::GrayImage> {
     let mut img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?.to_luma8();
-    if let Some((x, y, w, h)) = region {
-        let (iw, ih) = img.dimensions();
-        if x >= iw || y >= ih || w == 0 || h == 0 {
-            bail!("region {x},{y},{w},{h} is off the {iw}x{ih} screen");
-        }
-        img = image::imageops::crop_imm(&img, x, y, w.min(iw - x), h.min(ih - y)).to_image();
+    if let Some(region) = region {
+        img = crop(&img, region)?;
     }
     let (w, h) = ((img.width() / 10).max(1), (img.height() / 10).max(1));
     Ok(image::imageops::resize(&img, w, h, FilterType::Triangle))
