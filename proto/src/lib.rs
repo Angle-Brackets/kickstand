@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -236,6 +236,11 @@ pub enum Request {
     /// holding nothing, so [`Request::Press`] and [`Request::Input`] meanwhile skip the second a new
     /// controller needs to settle. Answers [`Response::Ok`] once it's held.
     Hold { step: InputStep },
+    /// (24) Each connected client's last request and its last one that changed something on the console
+    /// (not [`ROUTINE`] or [`LOOKING`]), so an agent can tell another is at work even while that one is
+    /// looking at the screen between presses. Passive like [`Request::Activity`]. Answers
+    /// [`Response::Agents`].
+    Agents,
 }
 
 /// Longest lease of one [`Request::Hold`].
@@ -251,7 +256,8 @@ impl Request {
             | Request::AppStatus
             | Request::AppletStatus
             | Request::FatalReports
-            | Request::Activity => "checking on the console",
+            | Request::Activity
+            | Request::Agents => "checking on the console",
             Request::ListDir { .. } | Request::Stat { .. } | Request::ReadFile { .. } => "reading files",
             Request::UploadBegin { .. } | Request::UploadChunk { .. } | Request::UploadFinish { .. } | Request::UploadAbort => {
                 "copying a file to the SD card"
@@ -278,6 +284,20 @@ impl Request {
             | Request::Threads => "debugging the running software",
         }
     }
+}
+
+/// What every client does all the time ([`Request::describe`]), so not worth a line in
+/// [`ActivityReport::recent`] or a warning to another agent.
+pub const ROUTINE: [&str; 2] = ["connecting", "checking on the console"];
+
+/// What a client does without changing anything on the console ([`Request::describe`]).
+pub const LOOKING: [&str; 6] =
+    ["reading files", "looking at the screen", "looking at installed software", "checking memory use", "keeping the screen on", "placing the indicator"];
+
+/// Whether a request described as `doing` changes something on the console (input, launching or closing,
+/// files, memory, restarting): what another agent could clash with.
+pub fn changes_console(doing: &str) -> bool {
+    !ROUTINE.contains(&doing) && !LOOKING.contains(&doing)
 }
 
 /// Digits in a pairing code.
@@ -435,6 +455,8 @@ pub enum Response {
     Threads { app: App, threads: Vec<ThreadInfo> },
     /// (22)
     Activity(ActivityReport),
+    /// (24) Longest connected first.
+    Agents(Vec<AgentInfo>),
 }
 
 /// Answer to [`Request::Activity`].
@@ -464,6 +486,19 @@ pub struct ClientInfo {
     pub doing: String,
     /// How long ago that was.
     pub idle_ms: u64,
+}
+
+/// One client in [`Response::Agents`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub ip: [u8; 4],
+    /// The connection that asked.
+    pub you: bool,
+    /// Its last request, in plain words ([`Request::describe`]), and how long ago.
+    pub doing: String,
+    pub idle_ms: u64,
+    /// Its last request that changed something ([`changes_console`]), and how long ago.
+    pub change: Option<(String, u64)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -745,6 +780,7 @@ mod tests {
                 Request::Pair { .. } => 37,
                 Request::Activity => 38,
                 Request::Hold { .. } => 39,
+                Request::Agents => 40,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -769,6 +805,7 @@ mod tests {
                 Response::Status(_) => 17,
                 Response::Threads { .. } => 18,
                 Response::Activity(_) => 19,
+                Response::Agents(_) => 20,
             }
         }
         let s = || String::from("/a");
@@ -813,6 +850,7 @@ mod tests {
             Request::Pair { version: 0, code: s(), token: s() },
             Request::Activity,
             Request::Hold { step: InputStep::default() },
+            Request::Agents,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -839,6 +877,7 @@ mod tests {
             Response::Status(ConsoleStatus { uptime_ms: 0, unlocking_ms: None, keep_awake_s: 0, application: None, applet: None }),
             Response::Threads { app: app.clone(), threads: Vec::new() },
             Response::Activity(ActivityReport { clients: Vec::new(), recent: Vec::new(), keep_awake_s: 0 }),
+            Response::Agents(Vec::new()),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

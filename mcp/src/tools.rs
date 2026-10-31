@@ -9,7 +9,8 @@ use anyhow::Context as _;
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
 use rmcp::service::{ElicitationError, RequestContext};
 use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
@@ -662,6 +663,10 @@ impl Tools {
             if let Some(fatal) = &fatal {
                 text = format!("{fatal}\n{text}");
             }
+            let others = crate::client::other_agents(&self.client.agents().await?, false);
+            if !others.is_empty() {
+                write!(text, "\nother agents: {} (launching, closing, input and restarts aren't coordinated between agents)", others.join("; "))?;
+            }
             let mut content = vec![ContentBlock::text(text)];
             if args.screenshot.unwrap_or(true) && fatal.is_none() {
                 let jpeg = self.client.screenshot().await?;
@@ -1203,6 +1208,58 @@ impl Tools {
 #[tool_handler(
     router = self.tool_router,
     name = "kickstand",
-    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished. To run homebrew, use run_nro (it opens hbmenu itself) and read its stdout with nro_output; status says where the console is (what runs, the lock screen after a reboot, keep-awake) with a small screenshot."
+    instructions = "Tools for a real Nintendo Switch running the kickstand daemon. Paths are absolute from the SD card root. Start with ping. The console stays awake for 30 minutes after each tool call and can't be woken remotely once asleep: call keep_awake before going longer than that without a tool call, and keep_awake with minutes 0 when finished. To run homebrew, use run_nro (it opens hbmenu itself) and read its stdout with nro_output; status says where the console is (what runs, the lock screen after a reboot, keep-awake, other agents using it) with a small screenshot. When another agent is changing things on the console, tools that press buttons, launch, close or restart start their result with a warning: don't fight over the console; wait or ask the user."
 )]
-impl ServerHandler for Tools {}
+impl ServerHandler for Tools {
+    /// Runs the tool, warning first when another agent changed something on the console lately and the
+    /// tool could clash with it.
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let warning = if CONTENTIOUS.contains(&request.name.as_ref()) { self.clash().await } else { None };
+        let mut response = self.tool_router.call(ToolCallContext::new(self, request, context)).await?;
+        if let (Some(warning), CallToolResponse::Complete(result)) = (warning, &mut response) {
+            result.content.insert(0, ContentBlock::text(warning));
+        }
+        Ok(response)
+    }
+}
+
+/// Tools that change what the console does, so can clash with another agent using it.
+const CONTENTIOUS: &[&str] = &[
+    "press",
+    "input",
+    "input_until",
+    "close_app",
+    "launch_title",
+    "open_hbmenu",
+    "run_nro",
+    "test_build",
+    "supervise",
+    "write_memory",
+    "reboot",
+    "sysmodule",
+    "keep_awake",
+];
+
+impl Tools {
+    /// A warning if other agents changed something on the console in the last two minutes.
+    async fn clash(&self) -> Option<String> {
+        let others = crate::client::other_agents(&self.client.agents().await.ok()?, true);
+        (!others.is_empty()).then(|| {
+            format!(
+                "Heads up, the console is shared right now: {}. Input, launching, closing and restarts aren't coordinated between agents, so this may clash with what they're doing (check the screen). If it matters, wait for them to finish or ask the user.",
+                others.join("; ")
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn contentious_tools_exist() {
+        let names: Vec<String> = super::Tools::tool_router().list_all().into_iter().map(|t| t.name.into()).collect();
+        for name in super::CONTENTIOUS {
+            assert!(names.iter().any(|n| n == name), "no tool named {name}");
+        }
+    }
+}

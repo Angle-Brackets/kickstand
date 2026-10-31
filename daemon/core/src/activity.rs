@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Who is connected and what they're doing, in plain words, for the NRO's screen and
-//! [`Request::Activity`].
+//! [`Request::Activity`] and [`Request::Agents`].
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
-use proto::{MAX_RECENT, Request};
+use proto::{MAX_RECENT, ROUTINE, Request};
 
 use crate::server::MAX_CLIENTS;
 
@@ -19,6 +19,8 @@ pub struct Client {
     /// The last request, as something a person would understand.
     pub doing: &'static str,
     pub last_ms: u64,
+    /// The last request that changed something ([`proto::changes_console`]), and when.
+    pub change: Option<(&'static str, u64)>,
 }
 
 /// A client turning to something else.
@@ -33,12 +35,9 @@ static CLIENTS: nx::sync::Mutex<[Option<Client>; MAX_CLIENTS]> = nx::sync::Mutex
 /// Oldest first.
 static RECENT: nx::sync::Mutex<VecDeque<Event>> = nx::sync::Mutex::new(VecDeque::new());
 
-/// Not worth a line in [`recent`]: every agent does these all the time.
-const ROUTINE: [&str; 2] = ["connecting", "checking on the console"];
-
 pub fn connected(slot: usize, ip: Ipv4Addr) {
     let now = crate::uptime_ms();
-    CLIENTS.lock()[slot] = Some(Client { slot, ip, connected_ms: now, requests: 0, doing: "connecting", last_ms: now });
+    CLIENTS.lock()[slot] = Some(Client { slot, ip, connected_ms: now, requests: 0, doing: "connecting", last_ms: now, change: None });
 }
 
 pub fn disconnected(slot: usize) {
@@ -54,6 +53,9 @@ pub fn request(slot: usize, req: &Request) {
             client.requests += 1;
             client.doing = doing;
             client.last_ms = now;
+            if proto::changes_console(doing) {
+                client.change = Some((doing, now));
+            }
             changed.then_some(client.ip)
         }
         None => None,

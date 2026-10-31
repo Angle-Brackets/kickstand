@@ -429,6 +429,25 @@ impl Client {
         }
     }
 
+    /// Every connected client: what it's doing and the last thing it changed (see [`Request::Agents`]). From
+    /// a daemon before protocol 24, the last change is only known while it's what the client is doing;
+    /// before protocol 22, there's nothing to go on.
+    pub async fn agents(&self) -> Result<Vec<proto::AgentInfo>> {
+        match self.request(Request::Agents).await? {
+            Response::Agents(agents) => return Ok(agents),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => {}
+            other => return Err(unexpected(other)),
+        }
+        let clients = self.activity().await?.map(|r| r.clients).unwrap_or_default();
+        Ok(clients
+            .into_iter()
+            .map(|c| {
+                let change = proto::changes_console(&c.doing).then(|| (c.doing.clone(), c.idle_ms));
+                proto::AgentInfo { ip: c.ip, you: c.you, doing: c.doing, idle_ms: c.idle_ms, change }
+            })
+            .collect())
+    }
+
     /// Keeps the console awake for `minutes` (0 ends it; `None` just asks); returns the seconds left.
     pub async fn keep_awake(&self, minutes: Option<u32>) -> Result<u64> {
         match self.request(Request::KeepAwake { minutes }).await? {
@@ -779,6 +798,36 @@ pub fn describe_status(status: &proto::ConsoleStatus) -> String {
     format!("uptime {}m {}s; {unlock}\n{awake}\n{application}\n{applet}", secs / 60, secs % 60)
 }
 
+/// How long after its last request another agent still counts as at work.
+const BUSY_MS: u64 = 120_000;
+
+/// The other agents at work in the last two minutes, a line each ("an agent on this PC was pressing
+/// buttons 12 s ago"): by the last thing each changed on the console, or with `changing` false, failing
+/// that by what it last looked at.
+pub fn other_agents(agents: &[proto::AgentInfo], changing: bool) -> Vec<String> {
+    let mine = agents.iter().find(|a| a.you).map(|a| a.ip);
+    let when = |ms: u64| if ms < 2_000 { "just now".to_string() } else { format!("{} s ago", ms / 1000) };
+    agents
+        .iter()
+        .filter(|a| !a.you)
+        .filter_map(|a| {
+            let who = if Some(a.ip) == mine { "an agent on this PC".to_string() } else { format!("an agent at {}", std::net::Ipv4Addr::from(a.ip)) };
+            match &a.change {
+                Some((what, ms)) if *ms < BUSY_MS => {
+                    let now = if a.idle_ms < BUSY_MS && a.doing != *what && !proto::ROUTINE.contains(&a.doing.as_str()) && !changing {
+                        format!(", then {}", a.doing)
+                    } else {
+                        String::new()
+                    };
+                    Some(format!("{who} was {what} {}{now}", when(*ms)))
+                }
+                _ if !changing && a.idle_ms < BUSY_MS && !proto::ROUTINE.contains(&a.doing.as_str()) => Some(format!("{who} was {} {}", a.doing, when(a.idle_ms))),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 pub fn describe_app(app: &proto::App) -> String {
     let what = match app.hbl {
         Some(true) => "hbloader (hbmenu or an NRO) in place of",
@@ -786,4 +835,36 @@ pub fn describe_app(app: &proto::App) -> String {
         None => "title (unknown whether hbloader is in its place)",
     };
     format!("{what} {:016x}, pid {}", app.program_id, app.pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use proto::AgentInfo;
+
+    #[test]
+    fn other_agents_at_work() {
+        let agent = |ip: [u8; 4], you, doing: &str, idle_ms, change: Option<(&str, u64)>| AgentInfo {
+            ip,
+            you,
+            doing: doing.into(),
+            idle_ms,
+            change: change.map(|(what, ms)| (what.into(), ms)),
+        };
+        let agents = [
+            agent([192, 168, 1, 2], true, "pressing buttons", 0, Some(("pressing buttons", 0))),
+            // Pressed, then looked at the screen.
+            agent([192, 168, 1, 2], false, "looking at the screen", 800, Some(("pressing buttons", 12_400))),
+            agent([192, 168, 1, 9], false, "looking at the screen", 500, None),
+            agent([192, 168, 1, 2], false, "checking on the console", 100, None),
+            agent([192, 168, 1, 7], false, "closing software", 300_000, Some(("closing software", 300_000))),
+        ];
+        assert_eq!(
+            super::other_agents(&agents, false),
+            [
+                "an agent on this PC was pressing buttons 12 s ago, then looking at the screen",
+                "an agent at 192.168.1.9 was looking at the screen just now"
+            ]
+        );
+        assert_eq!(super::other_agents(&agents, true), ["an agent on this PC was pressing buttons 12 s ago"]);
+    }
 }

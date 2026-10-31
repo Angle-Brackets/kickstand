@@ -419,3 +419,21 @@ async fn reports_what_other_clients_do_without_counting_itself() {
     let recent: Vec<&str> = report.recent.iter().map(|e| e.what.as_str()).collect();
     assert_eq!(recent, ["reading files"]);
 }
+
+#[tokio::test]
+async fn another_agent_pressing_shows_after_it_looks() {
+    let (agent, _) = start("tok").await;
+    let other = Client::new(agent.addr().to_string(), "tok".into());
+    other.press(vec![proto::Button::B], 1, 50).await.unwrap();
+    other.list_dir("/atmosphere/crash_reports").await.unwrap();
+    agent.ping().await.unwrap();
+    let agents = agent.agents().await.unwrap();
+    assert_eq!(crate::client::other_agents(&agents, true), ["an agent on this PC was pressing buttons just now"]);
+    assert_eq!(crate::client::other_agents(&agents, false), ["an agent on this PC was pressing buttons just now, then reading files"]);
+    // Only looking isn't a clash.
+    let looker = Client::new(agent.addr().to_string(), "tok".into());
+    looker.list_dir("/").await.unwrap();
+    drop(other);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(crate::client::other_agents(&agent.agents().await.unwrap(), true).is_empty());
+}

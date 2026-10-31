@@ -37,6 +37,7 @@ struct MockClient {
     requests: u32,
     doing: &'static str,
     last: Instant,
+    change: Option<(&'static str, Instant)>,
 }
 
 impl Console {
@@ -53,7 +54,7 @@ impl Console {
         activity.next_id += 1;
         let id = activity.next_id;
         let now = Instant::now();
-        activity.clients.push((id, MockClient { ip, connected: now, requests: 0, doing: "connecting", last: now }));
+        activity.clients.push((id, MockClient { ip, connected: now, requests: 0, doing: "connecting", last: now, change: None }));
         id
     }
 
@@ -70,13 +71,32 @@ impl Console {
         client.requests += 1;
         client.doing = doing;
         client.last = Instant::now();
+        if proto::changes_console(doing) {
+            client.change = Some((doing, client.last));
+        }
         let ip = client.ip;
-        if changed && !["connecting", "checking on the console"].contains(&doing) {
+        if changed && !proto::ROUTINE.contains(&doing) {
             if activity.recent.len() == proto::MAX_RECENT {
                 activity.recent.pop_front();
             }
             activity.recent.push_back((Instant::now(), ip, doing));
         }
+    }
+
+    fn agents(&self, you: u64) -> Vec<proto::AgentInfo> {
+        let activity = self.activity.lock().unwrap();
+        let ms = |t: Instant| t.elapsed().as_millis() as u64;
+        activity
+            .clients
+            .iter()
+            .map(|(id, c)| proto::AgentInfo {
+                ip: c.ip,
+                you: *id == you,
+                doing: c.doing.into(),
+                idle_ms: ms(c.last),
+                change: c.change.map(|(what, at)| (what.into(), ms(at))),
+            })
+            .collect()
     }
 
     fn report(&self, you: u64) -> proto::ActivityReport {
@@ -183,7 +203,7 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             stream.write_all(&proto::encode(&Response::error(ErrorKind::Unsupported, "unknown request"))?).await?;
             continue;
         };
-        if authed && !matches!(req, Request::Activity) {
+        if authed && !matches!(req, Request::Activity | Request::Agents) {
             console.request(id, &req);
         }
         let resp = match req {
@@ -213,6 +233,7 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             },
             _ if !authed => Response::error(ErrorKind::Unauthorized, "send Hello first"),
             Request::Activity => Response::Activity(console.report(id)),
+            Request::Agents => Response::Agents(console.agents(id)),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },
             Request::ListDir { path } => match path::check_read(&path) {
                 Ok(p) => list(&root.join(&p[1..])),

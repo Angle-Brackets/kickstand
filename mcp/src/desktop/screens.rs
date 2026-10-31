@@ -522,11 +522,8 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Cli
     let meta = match busiest {
         Some(c) => format!("{} · connected {} · {} requests", who(c.ip), duration(c.connected_ms), c.requests),
         None => {
-            let linked = model.links.iter().find(|(_, s)| matches!(s, State::Linked { .. }));
-            match linked {
-                Some((app, _)) => format!("Ask {} to use the Switch and it shows up here", app.name()),
-                None => "Link an AI app, then ask it to use the Switch".into(),
-            }
+            let linked = model.links.iter().any(|(_, s)| matches!(s, State::Linked { .. }));
+            if linked { "Ask an agent to use the Switch and it shows up here".into() } else { "Link an AI app, then ask it to use the Switch".into() }
         }
     };
     ui.label(theme::job(&meta, Face::Mono, 14.0, MUTED, 0.0));

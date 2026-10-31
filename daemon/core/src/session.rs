@@ -75,6 +75,7 @@ impl Session {
             _ if !self.authed => Response::error(ErrorKind::Unauthorized, "send Hello with the token first"),
             // Passive: a status display shouldn't look like an agent or keep the console awake.
             Request::Activity => self.activity(),
+            Request::Agents => self.agents(),
             req => {
                 crate::activity::request(self.slot, &req);
                 // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
@@ -89,7 +90,7 @@ impl Session {
 
     fn handle_authed(&mut self, req: Request) -> Response {
         match req {
-            Request::Hello { .. } | Request::Pair { .. } | Request::Activity => unreachable!("handled above"),
+            Request::Hello { .. } | Request::Pair { .. } | Request::Activity | Request::Agents => unreachable!("handled above"),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: crate::uptime_ms() },
             Request::ListDir { path } => self.list_dir(&path),
             Request::Stat { path } => match path::check_read(&path) {
@@ -183,6 +184,21 @@ impl Session {
     fn welcome(&mut self) -> Response {
         self.authed = true;
         Response::Hello { version: PROTOCOL_VERSION, daemon_version: String::from(crate::VERSION), kind: self.kind }
+    }
+
+    fn agents(&self) -> Response {
+        let now = crate::uptime_ms();
+        let agents = crate::activity::clients()
+            .into_iter()
+            .map(|c| proto::AgentInfo {
+                ip: c.ip.octets(),
+                you: c.slot == self.slot,
+                doing: String::from(c.doing),
+                idle_ms: now.saturating_sub(c.last_ms),
+                change: c.change.map(|(what, at)| (String::from(what), now.saturating_sub(at))),
+            })
+            .collect();
+        Response::Agents(agents)
     }
 
     fn activity(&self) -> Response {
