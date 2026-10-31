@@ -80,3 +80,14 @@ Only the power button should ever need the user.
 5. Watchdog: detect a hung app (no heartbeat or log output) and recover.
 6. GDB stub integration.
 Steps 1–4 are the useful core: deploy, test, look, recover.
+
+## Future ideas
+- **More than one Switch** (not needed yet: the user has one). Today this PC keeps one address
+  (`~/.config/kickstand/host`), and each MCP server reads it at startup. If it's ever wanted:
+  - Remember every paired console by its System Settings nickname (discovery already announces it) and last
+    address, and find it again on the network when the address changes.
+  - Keep one default; add a `consoles` tool to list them and move a session to another by name.
+  - Name the console in every reply ("Ankit's Switch: …"), and mention the others when the agent didn't
+    pick one, so "ping my switch" stays unambiguous.
+  - The desktop app shows a row per console, with its agents.
+  - The default changes only when the user changes it, never when an agent moves to another console.
