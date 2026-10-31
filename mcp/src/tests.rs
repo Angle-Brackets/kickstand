@@ -365,7 +365,7 @@ async fn start_pairing() -> (String, std::net::SocketAddr) {
     let probes = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let probe_addr = probes.local_addr().unwrap();
     tokio::spawn(mock::answer_probes(probes, port, true));
-    let console = mock::Console { root, tokens: std::sync::Mutex::new(vec!["tok".into()]), pair_code: Some("123456".into()) };
+    let console = mock::Console::new(root, vec!["tok".into()], Some("123456".into()));
     tokio::spawn(mock::serve_console(listener, Arc::new(console)));
     (format!("127.0.0.1:{port}"), probe_addr)
 }
@@ -402,4 +402,19 @@ async fn pairing_needs_the_screen() {
     let (client, _root) = start("tok").await;
     let err = client.pair("123456").await.unwrap_err();
     assert!(format!("{err:#}").contains("isn't pairing"), "{err:#}");
+}
+
+#[tokio::test]
+async fn reports_what_other_clients_do_without_counting_itself() {
+    let (agent, _) = start("tok").await;
+    let display = Client::new(agent.addr().to_string(), "tok".into());
+    agent.ping().await.unwrap();
+    agent.list_dir("/atmosphere/crash_reports").await.unwrap();
+    let report = display.activity().await.unwrap().unwrap();
+    assert_eq!(report.clients.len(), 2);
+    let (you, other): (Vec<_>, Vec<_>) = report.clients.iter().partition(|c| c.you);
+    assert_eq!((you[0].requests, you[0].doing.as_str()), (0, "connecting"));
+    assert_eq!((other[0].requests, other[0].doing.as_str()), (2, "reading files"));
+    let recent: Vec<&str> = report.recent.iter().map(|e| e.what.as_str()).collect();
+    assert_eq!(recent, ["reading files"]);
 }

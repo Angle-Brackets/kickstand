@@ -354,7 +354,7 @@ pub struct WriteMemoryArgs {
 
 /// `~/Pictures/kickstand/<ext>-<unix time>.<ext>`, creating the folder: where captures go when the agent
 /// doesn't say, so the user knows where to look.
-fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME isn't set; pass local_path"))?;
     let dir = std::path::Path::new(&home).join("Pictures/kickstand");
     std::fs::create_dir_all(&dir)?;

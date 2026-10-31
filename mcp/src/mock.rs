@@ -3,8 +3,11 @@
 //! path rules as the real one, so the client and MCP tools can be tested without the console.
 //! It is not a model of the console's quirks (FS result codes, memory limits, timing).
 
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
 use proto::path;
@@ -17,18 +20,101 @@ pub struct Console {
     pub root: PathBuf,
     pub tokens: Mutex<Vec<String>>,
     pub pair_code: Option<String>,
+    activity: Mutex<Activity>,
+}
+
+/// Who is connected and what they did, for [`Request::Activity`].
+#[derive(Default)]
+struct Activity {
+    next_id: u64,
+    clients: Vec<(u64, MockClient)>,
+    recent: VecDeque<(Instant, [u8; 4], &'static str)>,
+}
+
+struct MockClient {
+    ip: [u8; 4],
+    connected: Instant,
+    requests: u32,
+    doing: &'static str,
+    last: Instant,
+}
+
+impl Console {
+    pub fn new(root: PathBuf, tokens: Vec<String>, pair_code: Option<String>) -> Self {
+        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default() }
+    }
+
+    fn connected(&self, from: SocketAddr) -> u64 {
+        let ip = match from.ip() {
+            std::net::IpAddr::V4(v4) => v4.octets(),
+            std::net::IpAddr::V6(_) => [0; 4],
+        };
+        let mut activity = self.activity.lock().unwrap();
+        activity.next_id += 1;
+        let id = activity.next_id;
+        let now = Instant::now();
+        activity.clients.push((id, MockClient { ip, connected: now, requests: 0, doing: "connecting", last: now }));
+        id
+    }
+
+    fn disconnected(&self, id: u64) {
+        self.activity.lock().unwrap().clients.retain(|(c, _)| *c != id);
+    }
+
+    /// Like the daemon's: every request but Activity counts.
+    fn request(&self, id: u64, req: &Request) {
+        let mut activity = self.activity.lock().unwrap();
+        let doing = req.describe();
+        let Some((_, client)) = activity.clients.iter_mut().find(|(c, _)| *c == id) else { return };
+        let changed = client.doing != doing;
+        client.requests += 1;
+        client.doing = doing;
+        client.last = Instant::now();
+        let ip = client.ip;
+        if changed && !["connecting", "checking on the console"].contains(&doing) {
+            if activity.recent.len() == proto::MAX_RECENT {
+                activity.recent.pop_front();
+            }
+            activity.recent.push_back((Instant::now(), ip, doing));
+        }
+    }
+
+    fn report(&self, you: u64) -> proto::ActivityReport {
+        let activity = self.activity.lock().unwrap();
+        let ms = |t: Instant| t.elapsed().as_millis() as u64;
+        proto::ActivityReport {
+            clients: activity
+                .clients
+                .iter()
+                .map(|(id, c)| proto::ClientInfo {
+                    ip: c.ip,
+                    you: *id == you,
+                    connected_ms: ms(c.connected),
+                    requests: c.requests,
+                    doing: c.doing.into(),
+                    idle_ms: ms(c.last),
+                })
+                .collect(),
+            recent: activity.recent.iter().rev().map(|(at, ip, what)| proto::ActivityEvent { ago_ms: ms(*at), ip: *ip, what: (*what).into() }).collect(),
+            keep_awake_s: 0,
+        }
+    }
 }
 
 #[cfg(test)]
 pub async fn serve(listener: TcpListener, root: PathBuf, token: String) -> Result<()> {
-    serve_console(listener, Arc::new(Console { root, tokens: Mutex::new(vec![token]), pair_code: None })).await
+    serve_console(listener, Arc::new(Console::new(root, vec![token], None))).await
 }
 
 pub async fn serve_console(listener: TcpListener, console: Arc<Console>) -> Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
-        // One client at a time, like the daemon.
-        let _ = handle(stream, &console).await;
+        let (stream, from) = listener.accept().await?;
+        let console = console.clone();
+        tokio::spawn(async move {
+            let id = console.connected(from);
+            let _ = handle(stream, &console, id).await;
+            console.disconnected(id);
+        });
     }
 }
 
@@ -81,7 +167,7 @@ struct Upload {
     size: u64,
 }
 
-async fn handle(mut stream: TcpStream, console: &Console) -> Result<()> {
+async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()> {
     let root = console.root.as_path();
     let mut authed = false;
     let mut upload: Option<Upload> = None;
@@ -97,6 +183,9 @@ async fn handle(mut stream: TcpStream, console: &Console) -> Result<()> {
             stream.write_all(&proto::encode(&Response::error(ErrorKind::Unsupported, "unknown request"))?).await?;
             continue;
         };
+        if authed && !matches!(req, Request::Activity) {
+            console.request(id, &req);
+        }
         let resp = match req {
             Request::Hello { version, token: t } => {
                 if !proto::compatible(version) {
@@ -123,6 +212,7 @@ async fn handle(mut stream: TcpStream, console: &Console) -> Result<()> {
                 }
             },
             _ if !authed => Response::error(ErrorKind::Unauthorized, "send Hello first"),
+            Request::Activity => Response::Activity(console.report(id)),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },
             Request::ListDir { path } => match path::check_read(&path) {
                 Ok(p) => list(&root.join(&p[1..])),

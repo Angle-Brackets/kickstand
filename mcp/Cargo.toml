@@ -16,7 +16,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.22"
 getrandom = "0.3"
-image = { version = "0.25", default-features = false, features = ["jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "gif", "png"] }
 flate2 = "1"
 addr2line = { version = "0.25", features = ["loader", "rustc-demangle", "cpp_demangle"] }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The desktop app (`kickstand` with no command, from a terminal or a launcher).
+eframe = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "clipboard", "default_fonts"] }

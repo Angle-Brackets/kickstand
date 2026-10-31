@@ -403,6 +403,16 @@ impl Client {
         expect(self.request(Request::IndicatorPosition { x, y }).await?, |r| matches!(r, Response::Ok)).map(|_| ())
     }
 
+    /// Who is connected and what they've been doing (see [`Request::Activity`]); `None` from a daemon older
+    /// than protocol 22. Doesn't count as activity or keep the console awake.
+    pub async fn activity(&self) -> Result<Option<proto::ActivityReport>> {
+        match self.request(Request::Activity).await? {
+            Response::Activity(report) => Ok(Some(report)),
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Ok(None),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Keeps the console awake for `minutes` (0 ends it; `None` just asks); returns the seconds left.
     pub async fn keep_awake(&self, minutes: Option<u32>) -> Result<u64> {
         match self.request(Request::KeepAwake { minutes }).await? {

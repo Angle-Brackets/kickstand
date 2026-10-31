@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! kickstand: an MCP server (stdio) for the daemon on the Switch, plus a few CLI commands for using
-//! the daemon by hand.
+//! kickstand: an MCP server (stdio) for the daemon on the Switch, a desktop app for setting it up and
+//! following along, and a few CLI commands for using the daemon by hand.
 
 mod capture;
 mod client;
 mod config;
 mod crash;
+mod desktop;
 mod launch;
 mod link;
 mod memory;
@@ -42,8 +43,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the MCP server on stdio (the default).
+    /// Run the MCP server on stdio (what AI apps start; the default when stdin is a pipe).
     Serve,
+    /// Open the desktop app (the default otherwise): find the Switch, pair, link an AI app, and see what
+    /// the agent is doing.
+    Desktop,
     /// Create the shared token if there isn't one, and print it and where the console needs it.
     Token,
     /// Add Kickstand to Claude Code or Claude Desktop ("code" or "desktop"); without one, show where it's
@@ -343,10 +347,33 @@ enum SysmoduleCmd {
     Disable,
 }
 
+fn main() -> Result<()> {
+    let mut cli = Cli::parse();
+    let command = cli.command.take().unwrap_or(if stdin_is_pipe() { Command::Serve } else { Command::Desktop });
+    if let Command::Desktop = command {
+        return desktop::run();
+    }
+    run(cli, command)
+}
+
+/// Whether an MCP client started this, talking over stdin (configs from before `serve` was spelled out).
+fn stdin_is_pipe() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::FileTypeExt;
+        let stdin = std::io::stdin().as_fd().try_clone_to_owned().map(std::fs::File::from);
+        stdin.and_then(|f| f.metadata()).is_ok_and(|m| m.file_type().is_fifo() || m.file_type().is_socket())
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::IsTerminal;
+        !std::io::stdin().is_terminal()
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Serve);
+async fn run(cli: Cli, command: Command) -> Result<()> {
 
     match command {
         Command::Symbolize { elf, text, module } => {
@@ -371,7 +398,7 @@ async fn main() -> Result<()> {
             let probes = tokio::net::UdpSocket::bind((bind.as_str(), proto::discovery::PORT)).await?;
             eprintln!("mock daemon serving {} on {} (discovery on UDP {})", root.display(), listener.local_addr()?, probes.local_addr()?);
             tokio::spawn(mock::answer_probes(probes, cli.port, pair_code.is_some()));
-            let console = mock::Console { root, tokens: std::sync::Mutex::new(tokens), pair_code };
+            let console = mock::Console::new(root, tokens, pair_code);
             return mock::serve_console(listener, Arc::new(console)).await;
         }
         Command::Link { app, remove } => {
@@ -427,6 +454,7 @@ async fn main() -> Result<()> {
     let client = Arc::new(Client::new(format!("{host}:{}", cli.port), config::load_token()?));
 
     match command {
+        Command::Desktop => unreachable!("opened before the runtime starts"),
         Command::Serve => {
             let service = tools::Tools::new(client).serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;

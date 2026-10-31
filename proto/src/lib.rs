@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -224,6 +224,50 @@ pub enum Request {
     /// the console then accepts from now on. Only the on-console screen (the NRO) pairs, as only it shows
     /// a code. Answers [`Response::Hello`], and the connection is authenticated as after Hello.
     Pair { version: u32, code: String, token: String },
+    /// (22) Who is connected, what they have been doing and the keep-awake lease, for a status display
+    /// (the desktop app). Unlike every other request it isn't counted as activity and doesn't extend the
+    /// lease, so a display left open neither shows up as an agent nor keeps the console awake. Answers
+    /// [`Response::Activity`].
+    Activity,
+}
+
+impl Request {
+    /// What the request is doing, in plain words, for a person watching ("looking at the screen").
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Request::Hello { .. } | Request::Pair { .. } => "connecting",
+            Request::Ping { .. }
+            | Request::Status
+            | Request::AppStatus
+            | Request::AppletStatus
+            | Request::FatalReports
+            | Request::Activity => "checking on the console",
+            Request::ListDir { .. } | Request::Stat { .. } | Request::ReadFile { .. } => "reading files",
+            Request::UploadBegin { .. } | Request::UploadChunk { .. } | Request::UploadFinish { .. } | Request::UploadAbort => {
+                "copying a file to the SD card"
+            }
+            Request::Delete { .. } => "deleting a file",
+            Request::SysmoduleStatus | Request::SysmoduleStart | Request::SysmoduleStop | Request::Handover => {
+                "managing the background service"
+            }
+            Request::Exit => "closing Kickstand",
+            Request::RebootToHekate { .. } => "restarting the console",
+            Request::Press { .. } | Request::Input { .. } => "pressing buttons",
+            Request::KeepAwake { .. } => "keeping the screen on",
+            Request::IndicatorPosition { .. } => "placing the indicator",
+            Request::Screenshot | Request::ScreenshotRead { .. } => "looking at the screen",
+            Request::ListApps { .. } => "looking at installed software",
+            Request::CloseApp | Request::CloseApplet => "closing software",
+            Request::HblOverride { .. } => "opening homebrew",
+            Request::Resources => "checking memory use",
+            Request::IramPeek { .. }
+            | Request::MemoryMap
+            | Request::ReadMemory { .. }
+            | Request::WriteMemory { .. }
+            | Request::MemoryTarget { .. }
+            | Request::Threads => "debugging the running software",
+        }
+    }
 }
 
 /// Digits in a pairing code.
@@ -379,6 +423,44 @@ pub enum Response {
     Status(ConsoleStatus),
     /// (20)
     Threads { app: App, threads: Vec<ThreadInfo> },
+    /// (22)
+    Activity(ActivityReport),
+}
+
+/// Answer to [`Request::Activity`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ActivityReport {
+    /// Longest connected first.
+    pub clients: Vec<ClientInfo>,
+    /// What clients did lately, newest first, at most [`MAX_RECENT`]: each time one turned to something
+    /// else (checking on the console isn't counted).
+    pub recent: Vec<ActivityEvent>,
+    /// Seconds left on the keep-awake lease.
+    pub keep_awake_s: u64,
+}
+
+/// Most entries in [`ActivityReport::recent`].
+pub const MAX_RECENT: usize = 12;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+    pub ip: [u8; 4],
+    /// The connection that asked.
+    pub you: bool,
+    /// How long ago it connected.
+    pub connected_ms: u64,
+    pub requests: u32,
+    /// Its last request, in plain words ([`Request::describe`]).
+    pub doing: String,
+    /// How long ago that was.
+    pub idle_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ActivityEvent {
+    pub ago_ms: u64,
+    pub ip: [u8; 4],
+    pub what: String,
 }
 
 /// Most threads [`Request::Threads`] reports.
@@ -651,6 +733,7 @@ mod tests {
                 Request::FatalReports => 35,
                 Request::Threads => 36,
                 Request::Pair { .. } => 37,
+                Request::Activity => 38,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -674,6 +757,7 @@ mod tests {
                 Response::Error(_) => 16,
                 Response::Status(_) => 17,
                 Response::Threads { .. } => 18,
+                Response::Activity(_) => 19,
             }
         }
         let s = || String::from("/a");
@@ -716,6 +800,7 @@ mod tests {
             Request::FatalReports,
             Request::Threads,
             Request::Pair { version: 0, code: s(), token: s() },
+            Request::Activity,
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -741,6 +826,7 @@ mod tests {
             Response::error(ErrorKind::Io, s()),
             Response::Status(ConsoleStatus { uptime_ms: 0, unlocking_ms: None, keep_awake_s: 0, application: None, applet: None }),
             Response::Threads { app: app.clone(), threads: Vec::new() },
+            Response::Activity(ActivityReport { clients: Vec::new(), recent: Vec::new(), keep_awake_s: 0 }),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

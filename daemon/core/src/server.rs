@@ -35,9 +35,9 @@ pub struct Config<'a> {
 /// How often blocking waits wake to check [`Config::stop`].
 const STOP_CHECK_MS: i32 = 250;
 
-/// Most clients served at once: the MCP server, a CLI and a spare. Each costs a worker thread with a
-/// [`CLIENT_STACK`] stack and, while it holds a screenshot, 512 KiB of heap.
-pub const MAX_CLIENTS: usize = 3;
+/// Most clients served at once: the MCP server, a CLI, the desktop app and a spare. Each costs a worker
+/// thread with a [`CLIENT_STACK`] stack and, while it holds a screenshot, 512 KiB of heap.
+pub const MAX_CLIENTS: usize = 4;
 const CLIENT_STACK: usize = 0x10000;
 /// Bit n set: client slot n is taken (a client is connected, or its worker didn't start).
 static SLOTS: AtomicU32 = AtomicU32::new(0);

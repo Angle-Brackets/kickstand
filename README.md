@@ -20,7 +20,8 @@ All Rust:
   Opened from hbmenu, the NRO is Kickstand's status screen: whether an agent is connected and what it's
   doing, the console's address, token and background service, and the log. + leaves it and hands back to
   the background service.
-- `mcp/`: the MCP server on the PC (stdio, on `rmcp`), plus a CLI with the same features. Stable Rust.
+- `mcp/`: the MCP server on the PC (stdio, on `rmcp`), the desktop app (egui) and a CLI with the same
+  features. Stable Rust.
 - `proto/`: the wire protocol both sides share (no_std + serde/postcard).
 
 Status: in daily use on hardware (fw 23.0.1, Atmosphère) for the PaperBoat port. See `context/DESIGN.md`
@@ -35,7 +36,9 @@ cd daemon && cargo nx build --release -p kickstand-nro   # kickstand.nro (first 
 
 ## Set up
 Copy `kickstand.nro` to `/switch/kickstand/` on the SD card and open it from hbmenu. Its screen shows a
-pairing code; on a PC on the same Wi-Fi:
+pairing code. On a PC on the same Wi-Fi, run `kickstand` with no arguments: the desktop app finds the
+Switch, takes the code and links Claude Code or Claude Desktop, then shows what the agent is doing.
+Or from a terminal:
 ```sh
 target/release/kickstand discover               # the Switches running Kickstand on this network
 target/release/kickstand pair 482913            # finds the one showing a code, pairs, saves its address
@@ -72,4 +75,5 @@ consoles lose hekate on a cold boot). Every request keeps the console awake for 
 icon by the clock shows it), then its own sleep timers apply again.
 
 ## License
-GPL-3.0-only (see `LICENSE`). `third_party/nx` is MIT.
+GPL-3.0-only (see `LICENSE`). `third_party/nx` is MIT. The fonts in `assets/fonts/` (Archivo, JetBrains
+Mono) are under the SIL Open Font License 1.1, with their license files beside them.

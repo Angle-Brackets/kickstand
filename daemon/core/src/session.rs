@@ -73,6 +73,8 @@ impl Session {
             Request::Hello { version, token } => self.hello(version, &token),
             Request::Pair { version, code, token } => self.pair(version, &code, &token),
             _ if !self.authed => Response::error(ErrorKind::Unauthorized, "send Hello with the token first"),
+            // Passive: a status display shouldn't look like an agent or keep the console awake.
+            Request::Activity => self.activity(),
             req => {
                 crate::activity::request(self.slot, &req);
                 // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
@@ -87,7 +89,7 @@ impl Session {
 
     fn handle_authed(&mut self, req: Request) -> Response {
         match req {
-            Request::Hello { .. } | Request::Pair { .. } => unreachable!("handled above"),
+            Request::Hello { .. } | Request::Pair { .. } | Request::Activity => unreachable!("handled above"),
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: crate::uptime_ms() },
             Request::ListDir { path } => self.list_dir(&path),
             Request::Stat { path } => match path::check_read(&path) {
@@ -180,6 +182,26 @@ impl Session {
     fn welcome(&mut self) -> Response {
         self.authed = true;
         Response::Hello { version: PROTOCOL_VERSION, daemon_version: String::from(crate::VERSION), kind: self.kind }
+    }
+
+    fn activity(&self) -> Response {
+        let now = crate::uptime_ms();
+        let clients = crate::activity::clients()
+            .into_iter()
+            .map(|c| proto::ClientInfo {
+                ip: c.ip.octets(),
+                you: c.slot == self.slot,
+                connected_ms: now.saturating_sub(c.connected_ms),
+                requests: c.requests,
+                doing: String::from(c.doing),
+                idle_ms: now.saturating_sub(c.last_ms),
+            })
+            .collect();
+        let recent = crate::activity::recent()
+            .into_iter()
+            .map(|e| proto::ActivityEvent { ago_ms: now.saturating_sub(e.at_ms), ip: e.ip.octets(), what: String::from(e.what) })
+            .collect();
+        Response::Activity(proto::ActivityReport { clients, recent, keep_awake_s: crate::awake::remaining_ms() / 1000 })
     }
 
     fn list_dir(&mut self, path: &str) -> Response {
