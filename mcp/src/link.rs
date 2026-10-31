@@ -45,6 +45,11 @@ pub enum Maker {
 impl Maker {
     pub const ALL: [Maker; 4] = [Maker::Claude, Maker::Gemini, Maker::OpenAi, Maker::Custom];
 
+    /// Its place in [`Maker::ALL`].
+    pub fn index(self) -> usize {
+        Maker::ALL.iter().position(|&m| m == self).unwrap_or(0)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Maker::Claude => "Claude",

@@ -61,6 +61,8 @@ pub struct Kickstand {
     confirm_reboot: bool,
     /// The Link screen's tab.
     tab: crate::link::Maker,
+    /// Which makers' groups are folded in the home screen's linked apps (by [`crate::link::Maker::index`]).
+    folded: [bool; 4],
     brands: brands::Brands,
 }
 
@@ -77,7 +79,7 @@ impl Kickstand {
             (screen, linked.or_else(installed).map_or(crate::link::Maker::Claude, |(app, _)| app.maker()))
         };
         let brands = brands::Brands::load(ctx);
-        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, brands }
+        Kickstand { model, tx, screen, code: String::new(), address: None, confirm_reboot: false, tab, folded: [false; 4], brands }
     }
 
     fn send(&self, cmd: Cmd) {

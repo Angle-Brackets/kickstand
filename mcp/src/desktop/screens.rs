@@ -382,6 +382,14 @@ fn app_rows(app: &mut Kickstand, ui: &mut Ui, model: &Model, maker: Maker) {
     }
 }
 
+/// The most height the home screen's linked apps take before they scroll (two groups of two, open), and
+/// the least (one group of two).
+const LINKED_HEIGHT: f32 = 2.0 * 45.0 + 4.0 * 37.0;
+const LINKED_MIN_HEIGHT: f32 = 45.0 + 2.0 * 37.0;
+/// The height of the Switch's section under them, with its buttons on one line or two.
+const SWITCH_HEIGHT: f32 = 330.0;
+const SWITCH_HEIGHT_WRAPPED: f32 = 390.0;
+
 /// ✓ LINKED, naming the command it runs on hover. (Right to left.)
 fn linked_mark(ui: &mut Ui, command: &str) {
     let response = theme::label(ui, "LINKED", false, 13.0, INK);
@@ -465,7 +473,8 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     let (status, status_color, heading, standing) = match (&model.reach, busiest) {
         (Reach::Unknown, _) => ("CONNECTING", MUTED, "Getting in touch".to_string(), false),
         (Reach::Unreachable(_), _) => ("CAN'T REACH IT", MUTED, "Your Switch isn't answering".to_string(), false),
-        (Reach::Connected(_), Some(c)) if c.idle_ms < 90_000 => ("AGENT CONNECTED", RED, capitalize(&c.doing), true),
+        // Until its first request an agent's "doing" is "connecting", which read as the Switch connecting.
+        (Reach::Connected(_), Some(c)) if c.idle_ms < 90_000 && c.requests > 0 => ("AGENT CONNECTED", RED, capitalize(&c.doing), true),
         (Reach::Connected(_), Some(_)) => ("AGENT CONNECTED", RED, "Waiting on the agent".to_string(), true),
         (Reach::Connected(_), None) => ("READY", INK, "Ready for an agent".to_string(), true),
     };
@@ -583,31 +592,59 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     });
     ui.add_space(10.0);
     theme::rule(ui, 1.5, INK);
-    let mut linked = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).peekable();
-    if linked.peek().is_none() {
+    let linked: Vec<_> = model.links.iter().filter(|(_, s)| matches!(s, State::Linked { .. })).collect();
+    if linked.is_empty() {
         ui.add_space(14.0);
         theme::text(ui, "No AI app yet.", Face::Regular, 16.0, BODY);
         ui.add_space(14.0);
         theme::rule(ui, 1.0, RULE);
     }
-    // Compact, so several linked apps still fit above the buttons.
-    for (which, state) in linked {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.set_min_height(32.0);
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(super::brands::SIZE), Sense::hover());
-            app.brands.paint(ui.painter(), rect, which.maker());
-            ui.label(theme::job(which.name(), Face::Semi, 17.0, INK, 0.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let State::Linked { command } = state {
-                    linked_mark(ui, command);
-                }
-            });
-        });
-        ui.add_space(8.0);
-        theme::rule(ui, 1.0, RULE);
-    }
+    // Grouped by maker, each group folding; scrolls in what the Switch's section below leaves.
+    let below = if ui.available_width() < 440.0 { SWITCH_HEIGHT_WRAPPED } else { SWITCH_HEIGHT };
+    let height = (ui.available_height() - below).clamp(LINKED_MIN_HEIGHT, LINKED_HEIGHT);
+    egui::ScrollArea::vertical().id_salt("linked").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+        for maker in Maker::ALL {
+            let apps: Vec<_> = linked.iter().filter(|(a, _)| a.maker() == maker).collect();
+            if apps.is_empty() {
+                continue;
+            }
+            let open = !app.folded[maker.index()];
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let painter = ui.painter();
+            if response.hovered() {
+                painter.rect_filled(rect, 0.0, theme::PRESSED_PAPER);
+            }
+            let mid = rect.center().y;
+            art::fold(painter, egui::pos2(rect.left() + 2.0, mid - 6.0), open, INK);
+            let size = super::brands::SIZE;
+            app.brands.paint(painter, Rect::from_min_size(egui::pos2(rect.left() + 24.0, mid - size / 2.0), Vec2::splat(size)), maker);
+            let name = painter.layout_job(theme::job(maker.name(), Face::Semi, 17.0, INK, 0.0));
+            painter.galley(egui::pos2(rect.left() + 24.0 + size + 10.0, mid - name.size().y / 2.0), name, INK);
+            let count = painter.layout_job(theme::job(&format!("{} LINKED", apps.len()), Face::Mono, 13.0, MUTED, 0.04));
+            painter.galley(egui::pos2(rect.right() - count.size().x, mid - count.size().y / 2.0), count, MUTED);
+            if response.clicked() {
+                app.folded[maker.index()] = open;
+            }
+            theme::rule(ui, 1.0, RULE);
+            if !open {
+                continue;
+            }
+            for (which, state) in apps {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(36.0);
+                    ui.add_space(24.0 + size + 10.0);
+                    ui.label(theme::job(which.name(), Face::Regular, 15.0, BODY, 0.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let State::Linked { command } = state {
+                            linked_mark(ui, command);
+                        }
+                    });
+                });
+                theme::rule(ui, 1.0, RULE_LIGHT);
+            }
+        }
+    });
     ui.add_space(34.0);
     theme::label(ui, "THIS SWITCH", true, 13.0, INK);
     ui.add_space(12.0);

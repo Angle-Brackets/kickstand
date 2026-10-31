@@ -86,6 +86,13 @@ pub fn chevron(painter: &Painter, at: Pos2) {
     painter.add(Shape::line(vec![p(1.0, 1.5), p(6.0, 6.5), p(11.0, 1.5)], Stroke::new(2.0, INK)));
 }
 
+/// A section's fold mark in a 12×12 box at `at`: pointing down when `open`, right when folded.
+pub fn fold(painter: &Painter, at: Pos2, open: bool, color: Color32) {
+    let p = |x: f32, y: f32| at + Vec2::new(x, y);
+    let points = if open { vec![p(1.5, 4.0), p(6.0, 8.5), p(10.5, 4.0)] } else { vec![p(4.0, 1.5), p(8.5, 6.0), p(4.0, 10.5)] };
+    painter.add(Shape::line(points, Stroke::new(2.0, color)));
+}
+
 /// Kickstand's mark: the K whose lower leg is a kickstand, on an ink tile filling `rect` (drawn in the
 /// 256×256 box of `assets/logo/kickstand-icon.svg`).
 pub fn mark(painter: &Painter, rect: Rect) {
