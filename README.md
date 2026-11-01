@@ -16,7 +16,7 @@
 
 **Kickstand** lets AI agents and developers autonomously build, deploy, run, play, and debug homebrew on a real Nintendo Switch running Atmosphère — with nobody holding the console.
 
-> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 43 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
+> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 44 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
 
 ---
 
@@ -153,11 +153,11 @@ Use the `projects` MCP tool (or `kickstand projects`) to inspect configured proj
 
 ## MCP Tools Overview
 
-Kickstand provides **43 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
+Kickstand provides **44 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
 
 | Category | Tools | Highlights |
 | :--- | :--- | :--- |
-| **[Develop & Run](TOOLS.md#1-develop--run-homebrew)** | `test_build`, `projects`, `run_nro`, `nro_output`, `supervise`, `open_hbmenu`, `close_app`, `list_apps`, `launch_title` | Build, verify NRO/ELF match, deploy, launch with full memory via Atmosphère title takeover (or `applet` mode), stream stdout, and supervise until exit, crash, or hang. |
+| **[Develop & Run](TOOLS.md#1-develop--run-homebrew)** | `test_build`, `projects`, `run_nro`, `nro_output`, `supervise`, `open_hbmenu`, `quit_app`, `force_quit_app`, `list_apps`, `launch_title` | Build, verify NRO/ELF match, deploy, launch with full memory via Atmosphère title takeover (or `applet` mode), stream stdout, and supervise until exit, crash, or hang. |
 | **[See (Screen Vision)](TOOLS.md#2-screen-vision--capture)** | `screenshot`, `wait_screen`, `record_gif` | Downscaled/cropped screenshots to save tokens, 100px coordinate overlays (`grid`), shot numbering, GIF contact sheets, and visual condition waiting. |
 | **[Play (Input)](TOOLS.md#3-controller-keyboard--macros)** | `press`, `input`, `input_until`, `type_text`, `macros`, `record_macro`, `play_macro` | Single presses, multi-step button/stick/touch sequences, closed-loop input (`input_until`) that holds, mashes, or replays actions until a screen region changes, settles, or matches an earlier shot, typing on a virtual keyboard, and macros: controller input you record once (in the desktop app or `kickstand macro record`) that agents replay to get back to the same place in a game. |
 | **[Debug & Memory](TOOLS.md#4-debugging-crash-analysis--memory)** | `crash_reports`, `crash_report`, `symbolize`, `threads`, `memory_map`, `read_memory`, `write_memory` | Decoded Atmosphère crash reports, live `addr2line` symbolization, all-thread stack traces with source lines, and symbolic memory reads/writes (`main+0x1234`, `[sym+0x10]+0x8`). |
@@ -178,7 +178,7 @@ Kickstand is designed so an AI agent can iterate autonomously without risking co
 - **Memory & Process Safety:**
   - Projects configured in `projects.json` always launch with full memory (never applet mode).
   - `write_memory` only writes to homebrew processes (`hbloader`), never retail games or system processes, and warns if the local ELF build ID differs from the running binary.
-  - Closing the Album (`close_app`) exits cleanly via `HOME` rather than terminating the process.
+  - `quit_app` closes programs the way a person does (HOME, then Close software), so they can save and flush output first; terminating one at once is a separate tool, `force_quit_app`, for hangs. The Album is always closed with `HOME`, never terminated.
 - **RCM-Safe Reboots:** `reboot` only performs warm reboots into Hekate (a boot entry, UMS, or the Hekate menu) and requires `confirm: true` — preventing cold boots that would lose RCM payload injection on unpatched consoles.
 - **Automatic Sleep Prevention:** Every request extends a 30-minute keep-awake lease on the console (indicated by a Kickstand icon next to the system clock), after which normal Switch sleep timers resume.
 

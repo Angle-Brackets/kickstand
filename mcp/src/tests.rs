@@ -469,3 +469,39 @@ async fn agents_name_their_app() {
     let event = &report.recent[0];
     assert_eq!((event.what.as_str(), event.app.as_deref(), event.id), ("pressing buttons", Some("code"), report.agents[1].id));
 }
+
+/// A mock with an application running (hbloader with full memory); `hung`: it ignores Close software.
+async fn with_app(hung: bool) -> (Arc<Client>, Arc<mock::Console>) {
+    let root = std::env::temp_dir().join(format!("kickstand-test-quit-{}-{hung}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let console = Arc::new(mock::Console::new(root, vec!["tok".into()], None));
+    *console.app.lock().unwrap() =
+        mock::MockApp { running: Some(proto::App { pid: 77, program_id: 0x0100000000001000, hbl: Some(true) }), ignores_exit: hung };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(mock::serve_console(listener, console.clone()));
+    (Arc::new(Client::new(addr, "tok".into())), console)
+}
+
+#[tokio::test]
+async fn quitting_asks_first_and_forcing_doesnt() {
+    use crate::launch::{Closed, How, Mode, close_running};
+    // Close software from the home menu ends a program that listens.
+    let (client, _) = with_app(false).await;
+    let (app, how) = close_running(&client, Mode::Full, How::Quit).await.unwrap().unwrap();
+    assert_eq!((app.pid, how), (77, Closed::Quit));
+    assert!(client.app_status().await.unwrap().is_none());
+
+    // A hung one: quit says so and leaves it running; replacing it falls back to terminating.
+    let (client, console) = with_app(true).await;
+    let err = close_running(&client, Mode::Full, How::Quit).await.unwrap_err().to_string();
+    assert!(err.contains("force_quit_app"), "{err}");
+    assert!(console.app.lock().unwrap().running.is_some());
+    let (_, how) = close_running(&client, Mode::Full, How::QuitOrForce).await.unwrap().unwrap();
+    assert_eq!(how, Closed::TerminatedAfterQuit);
+
+    // force_quit terminates without pressing anything.
+    let (client, _) = with_app(false).await;
+    let (_, how) = close_running(&client, Mode::Full, How::Force).await.unwrap().unwrap();
+    assert_eq!(how, Closed::Terminated);
+}

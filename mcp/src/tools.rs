@@ -303,7 +303,7 @@ pub struct OpenHbmenuArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct CloseAppArgs {
+pub struct QuitAppArgs {
     /// "applet" (hbmenu or an NRO in the Album) or "application" (a game, or hbmenu or an NRO with full
     /// memory). Default: the applet if hbloader runs there, otherwise the application.
     pub target: Option<String>,
@@ -1116,8 +1116,8 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Close homebrew or a game. By default the hbmenu applet (hbmenu or an NRO in applet mode) if it's open, otherwise the application (hbmenu or an NRO with full memory, or a game); target picks one. The applet is closed with HOME (it's never terminated: that crashes the home menu); the application (a game, or an NRO with full memory) is terminated immediately and can't save first, so only close a game the user isn't playing.")]
-    async fn close_app(&self, Parameters(args): Parameters<CloseAppArgs>) -> CallToolResult {
+    #[tool(description = "Quit homebrew or a game the way a person does: for the application (a game, or an NRO or hbmenu with full memory), HOME, then Close software from the home menu, so the program is asked to exit and can save and flush its output first (no error message). Waits up to 12 s for it to end; if it doesn't (hung), says so: then force_quit_app. The applet (hbmenu or an NRO in the Album) is closed with HOME. By default the applet if hbloader runs there, otherwise the application; target picks one. Only quit a game the user isn't playing.")]
+    async fn quit_app(&self, Parameters(args): Parameters<QuitAppArgs>) -> CallToolResult {
         let result = async {
             let applet = match args.target.as_deref() {
                 Some("applet") => true,
@@ -1126,9 +1126,20 @@ impl Tools {
                 None => self.client.applet_status().await?.is_some_and(|a| a.hbl == Some(true)),
             };
             let mode = if applet { crate::launch::Mode::Applet } else { crate::launch::Mode::Full };
-            anyhow::Ok(match crate::launch::close_running(&self.client, mode).await? {
+            anyhow::Ok(match crate::launch::close_running(&self.client, mode, crate::launch::How::Quit).await? {
                 Some((app, how)) => format!("closed {} ({})", crate::client::describe_app(&app), crate::launch::describe_closed(how)),
                 None if applet => "the Album wasn't open".to_string(),
+                None => "no application was running".to_string(),
+            })
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Force-quit the application (a game, or an NRO or hbmenu with full memory): terminate it at once, whatever state it's in, like kill -9. It can't save or flush anything, and the home menu shows an error that the software closed. For when quit_app didn't work (a hang, a stuck screen); prefer quit_app. Never for the applet (killing the Album crashes the home menu): quit_app closes it.")]
+    async fn force_quit_app(&self) -> CallToolResult {
+        let result = async {
+            anyhow::Ok(match crate::launch::close_running(&self.client, crate::launch::Mode::Full, crate::launch::How::Force).await? {
+                Some((app, how)) => format!("closed {} ({})", crate::client::describe_app(&app), crate::launch::describe_closed(how)),
                 None => "no application was running".to_string(),
             })
         };
@@ -1172,7 +1183,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"full\" (default) runs it with the console's full memory in a game's place (see open_hbmenu), closing whatever application runs (ask before closing a game the user is playing); games always need this. mode \"applet\" runs small tools quickly from the Album, and is refused for the projects in projects.json (the user's games). An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with close_app. Takes about 30 s plus the transfer.")]
+    #[tool(description = "Run homebrew: start an NRO (local_path from this PC, or sd_path already on the SD card) with args from hbmenu, and return its stdout so far. mode \"full\" (default) runs it with the console's full memory in a game's place (see open_hbmenu), closing whatever application runs (ask before closing a game the user is playing); games always need this. mode \"applet\" runs small tools quickly from the Album, and is refused for the projects in projects.json (the user's games). An NRO already running in that mode is closed first; then hbmenu's NetLoader receives it. The NRO keeps running after this returns; read more output with nro_output, see it with screenshot, stop it with quit_app. Takes about 30 s plus the transfer.")]
     async fn run_nro(&self, Parameters(args): Parameters<RunNroArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let program = match (args.local_path, args.sd_path) {
@@ -1652,7 +1663,8 @@ const CONTENTIOUS: &[&str] = &[
     "input_until",
     "play_macro",
     "type_text",
-    "close_app",
+    "quit_app",
+    "force_quit_app",
     "launch_title",
     "open_hbmenu",
     "run_nro",

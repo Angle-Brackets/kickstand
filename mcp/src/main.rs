@@ -209,11 +209,15 @@ enum Command {
     App,
     /// Where the console is: uptime, unlock presses after a reboot, keep-awake, application, applet.
     Status,
-    /// Close the running application (terminated without saving), or with --applet, the Album (with HOME).
-    CloseApp {
+    /// Quit the running application as from the home menu (HOME, Close software), so it can save first; with
+    /// --applet, the Album (with HOME).
+    #[command(alias = "close-app")]
+    Quit {
         #[arg(long)]
         applet: bool,
     },
+    /// Terminate the running application at once (it can't save; the home menu shows an error).
+    ForceQuit,
     /// Installed titles, most recently used first (the home menu's order).
     Apps {
         #[arg(long, default_value_t = proto::HOME_MENU_TILES as u16)]
@@ -952,19 +956,11 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 format!("{app}\n{applet}")
             });
         }
-        Command::CloseApp { applet } => {
+        Command::Quit { applet } => {
             let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
-            let closed = launch::close_running(&client, mode).await?;
-            let value = match &closed {
-                Some((app, how)) => json!({ "closed": out::app(app), "how": if matches!(how, launch::Closed::Exited) { "exited" } else { "terminated" } }),
-                None => json!({ "closed": null }),
-            };
-            out.done(value, || match &closed {
-                Some((app, how)) => format!("closed {} ({})", client::describe_app(app), launch::describe_closed(*how)),
-                None if applet => "the Album wasn't open".into(),
-                None => "no application was running".into(),
-            });
+            closed(&out, launch::close_running(&client, mode, launch::How::Quit).await?, applet);
         }
+        Command::ForceQuit => closed(&out, launch::close_running(&client, launch::Mode::Full, launch::How::Force).await?, false),
         Command::Apps { max } => {
             let apps = client.list_apps(max).await?;
             let value: Vec<_> = apps.iter().map(|a| json!({ "id": out::id(a.id), "name": a.name })).collect();
@@ -1157,6 +1153,19 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What `quit` and `force-quit` closed.
+fn closed(out: &out::Out, closed: Option<(proto::App, launch::Closed)>, applet: bool) {
+    let value = match &closed {
+        Some((app, how)) => json!({ "closed": out::app(app), "how": launch::closed_word(*how) }),
+        None => json!({ "closed": null }),
+    };
+    out.done(value, || match &closed {
+        Some((app, how)) => format!("closed {} ({})", client::describe_app(app), launch::describe_closed(*how)),
+        None if applet => "the Album wasn't open".into(),
+        None => "no application was running".into(),
+    });
 }
 
 /// `kickstand update`: the PC first; a new copy then updates the Switch itself, with its own version.

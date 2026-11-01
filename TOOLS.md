@@ -1,6 +1,6 @@
 # Kickstand Capabilities & MCP Tools Reference
 
-This document details all **43 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
+This document details all **44 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
 ## At a Glance
 
@@ -8,7 +8,7 @@ The tool names are the same in every AI app.
 
 | Area | Tools |
 | :--- | :--- |
-| [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`close_app`](#close_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
+| [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`quit_app`](#quit_app) · [`force_quit_app`](#force_quit_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
 | [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`play_macro`](#play_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
@@ -108,14 +108,21 @@ Open the Homebrew Menu (`hbmenu`).
 
 ---
 
-### `close_app`
-Close the running homebrew or game.
-- **`"applet"`:** Closes the Album applet cleanly by pressing `HOME` (never terminates the applet process, which would crash `qlaunch`).
-- **`"application"`:** Terminates the running full-memory homebrew or game immediately (without saving).
+### `quit_app`
+Quit the running homebrew or game the way a person does, so it can save and flush its output first.
+- **`"application"`** (a game, or hbmenu or an NRO with full memory): presses `HOME`, then **Close software** (`X`, then `A`) on the home menu. The system asks the program to exit: an SDL port gets `SDL_QUIT`, and libnx's `appletMainLoop()` returns `false`. No error message is shown. Waits up to 12 s for it to end; if it's still running (hung), says so and suggests [`force_quit_app`](#force_quit_app).
+- **`"applet"`:** closes the Album with `HOME` (it's never terminated: that would crash the home menu).
+
+When `run_nro`, `test_build`, `open_hbmenu` or `launch_title` replace what's running, they quit it the same way first, and only terminate it if it doesn't exit.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `target` | `string` | `"applet"` if open, else `"application"` | `"applet"` or `"application"`. |
+
+---
+
+### `force_quit_app`
+Terminate the running application at once, whatever state it's in (like `kill -9`). It can't save or flush anything, and the home menu reports that the software closed because of an error. For a hang or a stuck screen, when [`quit_app`](#quit_app) didn't work. Never used on the Album. No parameters.
 
 ---
 
@@ -580,7 +587,8 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | | `kickstand hbmenu [--full]` | Open `hbmenu` in applet mode or `--full` title-takeover mode. |
 | | `kickstand apps [--max <n>]` | List installed titles in home-menu order. |
 | | `kickstand launch <title> [--user <n>]` | Launch an installed title by ID or name substring. |
-| | `kickstand close-app [--applet]` | Close the running application or (`--applet`) the Album applet. |
+| | `kickstand quit [--applet]` | Quit the running application from the home menu (HOME, Close software), or (`--applet`) close the Album. |
+| | `kickstand force-quit` | Terminate the running application at once (it can't save). |
 | | `kickstand app` | Show the currently running application and whether it is `hbloader`. |
 | **See & Play** | `kickstand watch [--bind 0.0.0.0]` | Serve a live web page (`http://127.0.0.1:8790`) streaming the console's screen and status. |
 | | `kickstand screenshot <file.jpg>` | Save a `1280x720` JPEG screenshot of the console. |

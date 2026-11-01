@@ -21,6 +21,15 @@ pub struct Console {
     pub tokens: Mutex<Vec<String>>,
     pub pair_code: Option<String>,
     activity: Mutex<Activity>,
+    /// A running application, for tests of closing one (none unless a test sets it).
+    pub app: Mutex<MockApp>,
+}
+
+#[derive(Default)]
+pub struct MockApp {
+    pub running: Option<proto::App>,
+    /// Like a hung program: Close software from the home menu doesn't end it; only terminating does.
+    pub ignores_exit: bool,
 }
 
 /// Who is connected and what they did, for [`Request::Activity`].
@@ -51,7 +60,7 @@ struct MockClient {
 
 impl Console {
     pub fn new(root: PathBuf, tokens: Vec<String>, pair_code: Option<String>) -> Self {
-        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default() }
+        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default(), app: Mutex::default() }
     }
 
     fn connected(&self, from: SocketAddr) -> u64 {
@@ -328,8 +337,21 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Response::Sysmodule(proto::SysmoduleStatus { installed, boot2, pid: None })
             }
             Request::IramPeek { .. } => Response::error(ErrorKind::Unsupported, "the mock has no IRAM"),
+            Request::Input { steps } => {
+                // X then A on the home menu: Close software, confirmed.
+                let pressed = |b: proto::Button| steps.iter().position(|s| s.buttons.contains(&b));
+                let mut app = console.app.lock().unwrap();
+                if let (Some(x), Some(a)) = (pressed(proto::Button::X), pressed(proto::Button::A))
+                    && x < a
+                    && !app.ignores_exit
+                {
+                    app.running = None;
+                }
+                Response::Ok
+            }
+            Request::CloseApp => Response::App(console.app.lock().unwrap().running.take()),
+            Request::AppStatus => Response::App(console.app.lock().unwrap().running.clone()),
             Request::Press { .. }
-            | Request::Input { .. }
             | Request::Hold { .. }
             | Request::Play { .. }
             | Request::TypeText { .. }
@@ -355,13 +377,13 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Ok(p) => grep(root, &p, &needle, ignore_case, max.max(1) as usize),
                 Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
             },
-            Request::AppStatus | Request::CloseApp | Request::AppletStatus | Request::CloseApplet => Response::App(None),
+            Request::AppletStatus | Request::CloseApplet => Response::App(None),
             Request::ListApps { .. } => Response::Apps(Vec::new()),
             Request::Status => Response::Status(proto::ConsoleStatus {
                 uptime_ms: 1,
                 unlocking_ms: None,
                 keep_awake_s: 0,
-                application: None,
+                application: console.app.lock().unwrap().running.clone(),
                 applet: None,
             }),
             Request::Threads => Response::Threads {

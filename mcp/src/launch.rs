@@ -35,6 +35,9 @@ static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
 /// How long to look for a new application process after the last input.
 const PROCESS_WAIT: Duration = Duration::from_secs(5);
+/// How long an application gets to exit after the home menu asks it to (libnx gives a program that
+/// delays its exit 15 s before the system ends it).
+const QUIT_WAIT: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(12) };
 /// How long the Album gets to exit after HOME.
 const EXIT_WAIT: Duration = Duration::from_secs(4);
 /// How long the Album gets to show up after A.
@@ -96,7 +99,7 @@ async fn open_applet(client: &Client, mut at_home: bool) -> Result<Opened> {
             notes.push("hbmenu (or an NRO) was already open in applet mode".into());
             return Ok(Opened { host: None, notes });
         }
-        close(client, Mode::Applet, &app).await?;
+        close(client, Mode::Applet, &app, How::Quit).await?;
         notes.push("closed the Album (it was showing pictures, not hbmenu)".into());
         at_home = true;
     }
@@ -135,7 +138,7 @@ async fn open_full(client: &Client) -> Result<Opened> {
             notes.push("hbloader was already running (hbmenu or an NRO)".into());
             return Ok(Opened { host: Some(host), notes });
         }
-        close(client, Mode::Full, &app).await?;
+        close(client, Mode::Full, &app, How::QuitOrForce).await?;
         notes.push(format!("closed the running title {:016x}", app.program_id));
     }
 
@@ -167,7 +170,7 @@ async fn open_full(client: &Client) -> Result<Opened> {
             Some(app) => {
                 let how = if app.hbl.is_none() { "Atmosphère didn't say whether it was hbloader" } else { "it started as the game" };
                 notes.push(format!("{label} (tile {tile}): {how}"));
-                close(client, Mode::Full, &app).await?;
+                close(client, Mode::Full, &app, How::Force).await?;
             }
             None => {
                 notes.push(format!("{label} (tile {tile}): nothing started (it needs a card, rights or an online check)"));
@@ -257,7 +260,7 @@ pub async fn launch_title(client: &Client, query: &str, user: usize) -> Result<(
             notes.push(format!("{} was already running; switch to it with HOME then A", target.name));
             return Ok((target, notes));
         }
-        close(client, Mode::Full, &app).await?;
+        close(client, Mode::Full, &app, How::QuitOrForce).await?;
         notes.push(format!("closed the running application {:016x}", app.program_id));
     }
     select_tile(client, tile).await?;
@@ -306,20 +309,38 @@ async fn wait_for_app(client: &Client) -> Result<Option<App>> {
     }
 }
 
+/// How to close an application (a game, or hbloader with full memory).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum How {
+    /// As a person would: HOME, X (Close software), A. The home menu asks it to exit, so it can save and
+    /// flush first (an SDL port gets SDL_QUIT; libnx's appletMainLoop returns false), and no error shows.
+    /// If it's still running after [`QUIT_WAIT`], that's an error.
+    Quit,
+    /// [`How::Quit`], then [`How::Force`] if it's still running: for replacing it with something else.
+    QuitOrForce,
+    /// Terminated at once (pm:shell), whatever state it's in: it can't save, and the home menu reports that
+    /// the software closed because of an error.
+    Force,
+}
+
 /// How a process was closed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Closed {
     /// It exited when HOME was pressed (the Album).
     Exited,
+    /// It exited when the home menu asked it to.
+    Quit,
     /// It was terminated (an application).
     Terminated,
+    /// It was asked to exit and didn't within [`QUIT_WAIT`], so it was terminated.
+    TerminatedAfterQuit,
 }
 
-/// Closes `app` and waits for the home menu to take over again. The Album is closed with HOME, which makes
-/// the system ask it to exit: terminating it behind the home menu's back crashes the home menu (2144-0001,
-/// twice), and hbmenu has no exit button. An application (a game, or hbloader
-/// with full memory) is terminated.
-pub async fn close(client: &Client, mode: Mode, app: &App) -> Result<Closed> {
+/// Closes `app` and waits for the home menu to take over again. The Album is always closed with HOME, which
+/// makes the system ask it to exit: terminating it behind the home menu's back crashes the home menu
+/// (2144-0001, twice), and hbmenu has no exit button. An application (a game, or hbloader with full memory)
+/// is closed as `how` says.
+pub async fn close(client: &Client, mode: Mode, app: &App, how: How) -> Result<Closed> {
     if mode == Mode::Applet {
         client.input(vec![step(&[Button::Home], 100)]).await?;
         if !gone(client, mode, app, EXIT_WAIT).await? {
@@ -332,25 +353,55 @@ pub async fn close(client: &Client, mode: Mode, app: &App) -> Result<Closed> {
         tokio::time::sleep(AFTER_CLOSE).await;
         return Ok(Closed::Exited);
     }
+    if how != How::Force {
+        // HOME shows the home menu with the running software's tile selected (it's the first tile, and HOME
+        // on the home menu selects the first tile); X there is Close software, and A confirms.
+        let steps = vec![step(&[Button::Home], 100), step(&[], 1500), step(&[Button::X], 100), step(&[], 900), step(&[Button::A], 100)];
+        client.input(steps).await?;
+        if gone(client, mode, app, QUIT_WAIT).await? {
+            tokio::time::sleep(AFTER_CLOSE).await;
+            return Ok(Closed::Quit);
+        }
+        if how == How::Quit {
+            bail!(
+                "{} was asked to quit from the home menu but is still running after {} s (it may be hung, or the home \
+                 menu wasn't where it should be: check with screenshot); force_quit_app ends it at once",
+                crate::client::describe_app(app),
+                QUIT_WAIT.as_secs()
+            );
+        }
+    }
     client.close_app().await?;
     if !gone(client, mode, app, PROCESS_WAIT).await? {
         bail!("application {:016x} didn't close", app.program_id);
     }
     tokio::time::sleep(AFTER_CLOSE).await;
-    Ok(Closed::Terminated)
+    Ok(if how == How::Force { Closed::Terminated } else { Closed::TerminatedAfterQuit })
 }
 
 /// Closes whatever runs in `mode`'s place (the Album, or the application), if anything, as [`close`] does.
-pub async fn close_running(client: &Client, mode: Mode) -> Result<Option<(App, Closed)>> {
+pub async fn close_running(client: &Client, mode: Mode, how: How) -> Result<Option<(App, Closed)>> {
     let Some(app) = status(client, mode).await? else { return Ok(None) };
-    let closed = close(client, mode, &app).await?;
+    let closed = close(client, mode, &app, how).await?;
     Ok(Some((app, closed)))
 }
 
 pub fn describe_closed(how: Closed) -> &'static str {
     match how {
         Closed::Exited => "it exited on HOME",
+        Closed::Quit => "it quit when the home menu asked",
+        Closed::Terminated => "force-quit: terminated at once",
+        Closed::TerminatedAfterQuit => "it didn't quit when the home menu asked, so it was terminated",
+    }
+}
+
+/// A word for how it closed, for `--json`.
+pub fn closed_word(how: Closed) -> &'static str {
+    match how {
+        Closed::Exited => "exited",
+        Closed::Quit => "quit",
         Closed::Terminated => "terminated",
+        Closed::TerminatedAfterQuit => "terminated_after_quit",
     }
 }
 
@@ -453,7 +504,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
             if let Some(app) = status(client, mode).await?
                 && app.hbl == Some(true)
             {
-                close(client, mode, &app).await?;
+                close(client, mode, &app, How::QuitOrForce).await?;
                 notes.push("closed the running hbloader (hbmenu or an NRO)".into());
                 closed = true;
             }
@@ -513,7 +564,7 @@ pub async fn restart_sysmodule(client: &Client, nro: Option<Vec<u8>>) -> Result<
     notes.push(format!("the sysmodule is back: {} (protocol {})", info.version, info.protocol));
     // The NRO exited to hbmenu, still in the Album.
     if let Some(app) = status(client, Mode::Applet).await? {
-        close(client, Mode::Applet, &app).await?;
+        close(client, Mode::Applet, &app, How::Quit).await?;
         notes.push("closed the Album".into());
     }
     Ok(notes)
