@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Macros: controller input the user recorded once (from the desktop app, `kickstand macro record`, or an
-//! agent's record_macro), saved on this PC and replayed by agents to get back to the same place in a game.
+//! agent's record_macro) or an agent wrote (save_macro), saved on this PC and replayed by agents to get back
+//! to the same place in a game.
 //! Each lives in `~/.config/kickstand/macros/<name>.json`, its input written in the `input` tool's step
 //! syntax, so it can be read and edited by hand.
 
@@ -27,7 +28,13 @@ pub struct Macro {
     pub note: String,
     /// The input, in the `input` tool's step syntax.
     pub steps: String,
+    /// Who wrote it (an AI app's name, or "kickstand in a terminal"), if it wasn't recorded from a controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
+
+/// Longest macro written by hand or by an agent, as long as the longest recording.
+pub const MAX_MS: u64 = proto::MAX_RECORD_MS as u64;
 
 /// A macro by name, for listings.
 pub struct Listed {
@@ -111,7 +118,33 @@ pub fn from_recording(inputs: &[RecordedInput], ms: u32, note: String) -> Result
     let total: u64 = steps.iter().map(|(_, len)| u64::from(*len)).sum();
     let text: Vec<String> = steps.iter().map(|(input, len)| step_text(input, *len)).collect();
     let recorded = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    Ok(Macro { recorded, ms: total, note, steps: text.join(" ") })
+    Ok(Macro { recorded, ms: total, note, steps: text.join(" "), by: None })
+}
+
+/// A macro from steps in the `input` syntax (checked here), written by `by`.
+pub fn from_steps(steps: &str, note: String, by: String) -> Result<Macro> {
+    let parsed = crate::client::parse_steps(steps)?;
+    if parsed.is_empty() {
+        bail!("a macro needs at least one step, e.g. \"a:100 -:500\"");
+    }
+    let ms: u64 = parsed.iter().map(|s| u64::from(s.ms)).sum();
+    if ms > MAX_MS {
+        bail!("that's {} long; a macro lasts at most {}", length(ms), length(MAX_MS));
+    }
+    let recorded = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    Ok(Macro { recorded, ms, note, steps: steps.split_whitespace().collect::<Vec<_>>().join(" "), by: Some(by) })
+}
+
+/// Saves a new macro; one already called `name` is only replaced if `replace`.
+pub fn create(name: &str, data: &Macro, replace: bool) -> Result<PathBuf> {
+    if !replace && let Ok(old) = load(name) {
+        let whose = match &old.by {
+            Some(by) => format!("written by {by}"),
+            None => "recorded from a controller, most likely by the user".to_string(),
+        };
+        bail!("there's already a macro called {name:?} ({}, {whose}): pick another name, or replace it (only if the user agrees)", length(old.ms));
+    }
+    save(name, data)
 }
 
 /// One step in the `input` syntax: "a+zl+l=0.50,-1:120", or "-:400" for nothing held.
@@ -262,6 +295,18 @@ mod tests {
         let inputs = [at(0, 0, (STICK_MAX / 2, -STICK_MAX)), at(100, 0, (0, 0)), at(300, Button::B.bit() as u32, (0, 0))];
         let m = from_recording(&inputs, 400, String::new()).unwrap();
         assert_eq!(m.steps, "l=0.5,-1:100 -:200 b:100");
+    }
+
+    #[test]
+    fn written_steps_are_checked_and_tidied() {
+        let m = from_steps("  a:100   -:2500\nl=0,1:1800 ", "title".into(), "claude-code".into()).unwrap();
+        assert_eq!((m.steps.as_str(), m.ms, m.by.as_deref()), ("a:100 -:2500 l=0,1:1800", 4400, Some("claude-code")));
+        assert!(from_steps("a", String::new(), String::new()).is_err(), "no duration");
+        assert!(from_steps("  ", String::new(), String::new()).is_err(), "empty");
+        assert!(from_steps(&format!("-:{}", MAX_MS + 1), String::new(), String::new()).is_err(), "too long");
+        // Recordings have no author, and old files without the field still read.
+        let old: Macro = serde_json::from_str(r#"{"recorded":1,"ms":100,"steps":"a:100"}"#).unwrap();
+        assert_eq!(old.by, None);
     }
 
     #[test]

@@ -965,6 +965,14 @@ fn saved_macros(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
                 ui.add_space(ROW_INSET);
                 ui.label(theme::job(&m.name, Face::Semi, 16.0, ink(), 0.0));
                 ui.label(theme::job(&crate::macros::length(m.data.ms), Face::Mono, 13.0, muted(), 0.0));
+                if let Some(by) = &m.data.by {
+                    let by = match by.as_str() {
+                        "kickstand in a terminal" => "from a terminal".to_string(),
+                        "an agent" => "by an agent".to_string(),
+                        name => format!("by {}", super::worker::base(name, &model.links)),
+                    };
+                    ui.label(theme::job(&by, Face::Mono, 13.0, muted(), 0.0));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
                     ui.add_space(ROW_INSET);

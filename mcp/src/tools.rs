@@ -392,6 +392,20 @@ pub struct PlayMacroArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct SaveMacroArgs {
+    /// Its name (letters, digits, spaces, - and _), e.g. "title to rogueport".
+    pub name: String,
+    /// The input, in input's step syntax, e.g. "a:100 -:2500 l=0,1:1800 a:100".
+    pub steps: String,
+    /// Where it starts from and what it does ("from the title screen: file 1 to Rogueport's square"), for
+    /// whoever plays it later.
+    pub note: String,
+    /// Replace a macro already called name (default false). Only with the user's agreement if they
+    /// recorded it.
+    pub replace: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ControlMacroArgs {
     /// "pause", "resume" or "stop".
     pub action: String,
@@ -874,11 +888,14 @@ impl Tools {
         let result = async {
             let all = crate::macros::list()?;
             if all.is_empty() {
-                return anyhow::Ok("no macros yet: the user can record one in Kickstand's desktop app (Macros), with `kickstand macro record NAME`, or you can ask them to play while you call record_macro".to_string());
+                return anyhow::Ok("no macros yet: the user can record one in Kickstand's desktop app (Macros), with `kickstand macro record NAME`, or you can ask them to play while you call record_macro, or write one yourself with save_macro".to_string());
             }
             let mut text = String::new();
             for m in all {
                 write!(text, "{}: {}, {} steps", m.name, crate::macros::length(m.data.ms), m.data.steps.split_whitespace().count())?;
+                if let Some(by) = &m.data.by {
+                    write!(text, ", written by {by}")?;
+                }
                 if !m.data.note.is_empty() {
                     write!(text, ". {}", m.data.note)?;
                 }
@@ -931,6 +948,23 @@ impl Tools {
             }
         };
         result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Save a macro you wrote, in input's step syntax, for replaying later with play_macro (by you, another agent, or the user from Kickstand's desktop app). Work the steps out with input first and check the screen, then save the same steps with a note saying where it starts. Give loading screens generous waits (\"-:3000\"): load times vary. Doesn't replace an existing macro unless replace is true. Nothing is sent to the console.")]
+    async fn save_macro(&self, Parameters(args): Parameters<SaveMacroArgs>) -> CallToolResult {
+        let result = async {
+            let name = crate::macros::check_name(&args.name)?;
+            let by = self.client.app().map_or_else(|| "an agent".to_string(), |app| crate::macros::player(Some(&app)));
+            let data = crate::macros::from_steps(&args.steps, args.note.trim().to_string(), by)?;
+            let path = crate::macros::create(name, &data, args.replace.unwrap_or(false))?;
+            anyhow::Ok(format!(
+                "saved macro {name:?} ({}, {} steps) to {}; play_macro plays it",
+                crate::macros::length(data.ms),
+                data.steps.split_whitespace().count(),
+                path.display()
+            ))
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Pause, resume or stop the macro playing on the console now (from play_macro, the user's desktop app or a terminal, whoever plays it). Paused, nothing is held and the macro's clock stops until resumed; a pause over 10 minutes stops it. Stopping lets go of everything.")]

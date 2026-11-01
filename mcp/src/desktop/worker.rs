@@ -160,7 +160,7 @@ impl Labels {
 }
 
 /// "Claude Agent" for an agent in `name` (an MCP client's name, or a `link` slug).
-fn base(name: &str, links: &[(App, link::State)]) -> String {
+pub fn base(name: &str, links: &[(App, link::State)]) -> String {
     match App::identify(name, |app| linked(links, app)) {
         Some(app) if app.maker() == link::Maker::Custom => format!("{} Agent", app.name()),
         Some(app) => format!("{} Agent", app.maker().name()),

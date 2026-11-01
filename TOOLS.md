@@ -1,6 +1,6 @@
 # Kickstand Capabilities & MCP Tools Reference
 
-This document details all **45 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
+This document details all **46 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
 ## At a Glance
 
@@ -10,7 +10,7 @@ The tool names are the same in every AI app.
 | :--- | :--- |
 | [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`quit_app`](#quit_app) · [`force_quit_app`](#force_quit_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
-| [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
+| [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`save_macro`](#save_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
 | [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
@@ -258,7 +258,7 @@ Type text on a virtual USB keyboard: into the software keyboard (naming a save, 
 ---
 
 ### `macros`
-List the macros saved on this PC: controller input the user recorded once (in the desktop app's **Macros** page, with `kickstand macro record`, or through [`record_macro`](#record_macro)) for agents to replay with [`play_macro`](#play_macro), e.g. to get from the title screen to a level. Each comes with its length, when it was recorded and its note (what it does and where it starts). No parameters.
+List the macros saved on this PC: controller input the user recorded once (in the desktop app's **Macros** page, with `kickstand macro record`, or through [`record_macro`](#record_macro)), or steps an agent wrote with [`save_macro`](#save_macro), for agents to replay with [`play_macro`](#play_macro), e.g. to get from the title screen to a level. Each comes with its length, its note (what it does and where it starts) and, for written ones, who wrote it. No parameters.
 
 Macros live in `~/.config/kickstand/macros/<name>.json` as `input` step text, so they can be read and edited by hand.
 
@@ -273,6 +273,18 @@ Record a macro from the physical controllers while the user plays. Call `start`,
 | `name` | `string` | — | When stopping: the macro's name (letters, digits, spaces, `-` and `_`), e.g. `"title to rogueport"`. |
 | `note` | `string` | — | When stopping: what it does and where it starts from, for whoever plays it later. |
 | `max_seconds` | `integer` | `300` *(max 600)* | When starting: stop by itself after this many seconds. |
+
+---
+
+### `save_macro`
+Save a macro the agent wrote itself, in [`input`](#input)'s step syntax, so it (another agent, or the user from the desktop app) can replay it later with [`play_macro`](#play_macro). The usual way: work the steps out with `input`, checking the screen, then save the same steps with a note saying where it starts. Give loading screens generous waits (`-:3000`), since load times vary. The steps are checked before saving; nothing is sent to the console. It won't replace an existing macro unless `replace` is true (and an agent should only replace one the user recorded if they agree). The desktop app shows who wrote each macro.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `name` | `string` *(required)* | — | Its name (letters, digits, spaces, `-` and `_`). |
+| `steps` | `string` *(required)* | — | The input, e.g. `"a:100 -:2500 l=0,1:1800 a:100"`; up to 10 minutes in all. |
+| `note` | `string` *(required)* | — | Where it starts and what it does. |
+| `replace` | `boolean` | `false` | Replace a macro already called `name`. |
 
 ---
 
@@ -609,6 +621,7 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | | `kickstand input <steps>` | Play timed `WHAT:MS` steps (buttons, sticks, touch). |
 | | `kickstand type <text> [--enter]` | Type text on a virtual USB keyboard (into the software keyboard, for one). |
 | | `kickstand macro record <name> [--note <text>] [--seconds <n>]` | Record the controllers while you play, until Enter is pressed in the terminal, and save it as a macro. |
+| | `kickstand macro save <name> <steps> [--note <text>] [--replace]` | Save `input` steps as a macro. |
 | | `kickstand macro play <name>` | Replay a saved macro. Ctrl-C stops it and lets go of everything. |
 | | `kickstand macro pause` / `resume` / `stop` | Pause, resume or stop the macro playing now, whoever plays it (an agent, the desktop app or another terminal). |
 | | `kickstand macro list` / `delete <name>` | List or delete saved macros. |

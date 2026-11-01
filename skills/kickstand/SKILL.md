@@ -55,6 +55,9 @@ it, so look before you act and leave it how you found it.
   stops one; `status` shows one playing.
 - To record a new one, the user has to be at the console: `record_macro` start, tell them exactly what to
   play and to put the controller down when done, then stop with a clear name and a note on where it starts.
+- Or write one yourself: once a sequence of `input` steps reliably gets somewhere (checked on screen),
+  `save_macro` the same steps with a note on where it starts, so the next run (or another agent) gets there in
+  one call. Give loads generous waits.
 
 ## Safety
 

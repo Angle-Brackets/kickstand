@@ -432,6 +432,17 @@ enum MacroCmd {
         #[arg(long, default_value_t = 300)]
         seconds: u32,
     },
+    /// Save STEPS (in `input`'s syntax, e.g. "a:100 -:2500 l=0,1:1800") as macro NAME.
+    Save {
+        name: String,
+        steps: String,
+        /// What it does and where it starts.
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Replace a macro already called NAME.
+        #[arg(long)]
+        replace: bool,
+    },
     /// Replay macro NAME (Ctrl-C stops it and lets go of everything).
     Play { name: String },
     /// Pause the macro playing now, whoever plays it: everything is let go until `resume` (or `stop`).
@@ -806,6 +817,15 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                     )
                 });
             }
+            MacroCmd::Save { name, steps, note, replace } => {
+                let name = macros::check_name(&name)?.to_string();
+                let data = macros::from_steps(&steps, note, macros::player(Some(crate::client::TERMINAL)))?;
+                let path = macros::create(&name, &data, replace)?;
+                let count = data.steps.split_whitespace().count();
+                out.done(json!({ "name": name, "path": path, "ms": data.ms, "steps": count }), || {
+                    format!("saved {name:?}: {}, {count} steps ({})", macros::length(data.ms), path.display())
+                });
+            }
             MacroCmd::Play { name } => {
                 let play = macros::play(&client, &name);
                 tokio::pin!(play);
@@ -824,7 +844,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             MacroCmd::Stop => control_macro(&out, &client, proto::PlaybackAction::Stop).await?,
             MacroCmd::List => {
                 let all = macros::list()?;
-                let value: Vec<_> = all.iter().map(|m| json!({ "name": m.name, "recorded": m.data.recorded, "ms": m.data.ms, "note": m.data.note, "steps": m.data.steps })).collect();
+                let value: Vec<_> = all.iter().map(|m| json!({ "name": m.name, "recorded": m.data.recorded, "ms": m.data.ms, "note": m.data.note, "steps": m.data.steps, "by": m.data.by })).collect();
                 out.done(json!({ "macros": value }), || {
                     all.iter().map(|m| format!("{}\t{}\t{}", m.name, macros::length(m.data.ms), m.data.note)).collect::<Vec<_>>().join("\n")
                 });
