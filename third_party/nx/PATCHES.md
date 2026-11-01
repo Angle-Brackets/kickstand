@@ -20,3 +20,9 @@ Local changes (worth upstreaming):
 5. `ApplicationProxy::get_application_functions` (cmd 20) and an `ApplicationFunctions` interface with
    `create_application_and_request_to_start` (cmd 12, 4.0+), from libnx `applet.c`. The kickstand NRO uses it to
    launch an installed title from inside the hbl app session.
+6. `sync::sys::Mutex` locks and unlocks as libnx's `mutexLock`/`mutexUnlock` do (the algorithm; libnx is ISC).
+   `lock_contended` only waited in the kernel when the wait flag wasn't set yet, so a second waiter spun
+   forever without re-reading the value; with no time slicing between equal priorities on a core, it starved
+   the owner and nothing ran again. `unlock` cleared the owner before `arbitrate_unlock`, so a third thread
+   could take the mutex while the kernel handed it to a waiter. Found on hardware: stopping a paused macro
+   (the stop and the hold-expiry thread both waiting on the controller's lock) froze every client.

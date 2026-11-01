@@ -83,7 +83,13 @@ pub fn control(action: PlaybackAction) -> Playback {
                 services::hid::release_hold();
             }
         }
-        if action != PlaybackAction::Query {
+        let changed = match action {
+            PlaybackAction::Query => false,
+            PlaybackAction::Pause => !state.paused,
+            PlaybackAction::Resume => state.paused,
+            PlaybackAction::Stop => true,
+        };
+        if changed {
             crate::log!("playback: {action:?}");
         }
     }
