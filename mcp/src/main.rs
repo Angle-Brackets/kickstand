@@ -417,6 +417,9 @@ enum Command {
         /// Act as a console showing this pairing code.
         #[arg(long)]
         pair_code: Option<String>,
+        /// The console's name, as discovery reports it.
+        #[arg(long, default_value = "Mock Switch")]
+        name: String,
     },
 }
 
@@ -539,12 +542,12 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             });
             return Ok(());
         }
-        Command::Mock { root, bind, pair_code } => {
+        Command::Mock { root, bind, pair_code, name } => {
             let tokens = config::load_token().ok().into_iter().collect();
             let listener = tokio::net::TcpListener::bind((bind.as_str(), cli.port)).await?;
             let probes = tokio::net::UdpSocket::bind((bind.as_str(), proto::discovery::PORT)).await?;
             eprintln!("mock daemon serving {} on {} (discovery on UDP {})", root.display(), listener.local_addr()?, probes.local_addr()?);
-            tokio::spawn(mock::answer_probes(probes, cli.port, pair_code.is_some()));
+            tokio::spawn(mock::answer_probes(probes, cli.port, pair_code.is_some(), name));
             let console = mock::Console::new(root, tokens, pair_code);
             return mock::serve_console(listener, Arc::new(console)).await;
         }

@@ -365,7 +365,7 @@ async fn start_pairing() -> (String, std::net::SocketAddr) {
     let port = listener.local_addr().unwrap().port();
     let probes = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let probe_addr = probes.local_addr().unwrap();
-    tokio::spawn(mock::answer_probes(probes, port, true));
+    tokio::spawn(mock::answer_probes(probes, port, true, "Mock Switch".into()));
     let console = mock::Console::new(root, vec!["tok".into()], Some("123456".into()));
     tokio::spawn(mock::serve_console(listener, Arc::new(console)));
     (format!("127.0.0.1:{port}"), probe_addr)

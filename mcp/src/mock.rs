@@ -184,8 +184,9 @@ pub async fn serve_console(listener: TcpListener, console: Arc<Console>) -> Resu
     }
 }
 
-/// Answers discovery probes on `socket` like the daemon, pointing at TCP `port`.
-pub async fn answer_probes(socket: tokio::net::UdpSocket, port: u16, pairing: bool) -> Result<()> {
+/// Answers discovery probes on `socket` like the daemon, pointing at TCP `port`, as a console called
+/// `nickname`.
+pub async fn answer_probes(socket: tokio::net::UdpSocket, port: u16, pairing: bool, nickname: String) -> Result<()> {
     use proto::discovery;
     let mut buf = [0u8; discovery::MAX_DATAGRAM];
     loop {
@@ -197,7 +198,7 @@ pub async fn answer_probes(socket: tokio::net::UdpSocket, port: u16, pairing: bo
             daemon_version: "mock".into(),
             kind: DaemonKind::Nro,
             port,
-            nickname: "Mock Switch".into(),
+            nickname: nickname.clone(),
             pairing,
         };
         socket.send_to(&discovery::encode_announce(&announce), from).await?;

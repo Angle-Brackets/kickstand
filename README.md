@@ -16,6 +16,10 @@
 
 **Kickstand** lets AI agents and developers autonomously build, deploy, run, play, and debug homebrew on a real Nintendo Switch running Atmosphère — with nobody holding the console.
 
+<p align="center">
+  <img src="docs/images/desktop-home.png" width="800" alt="Kickstand's desktop app: a Claude Code agent is pressing buttons on the Switch and replaying a macro, with Pause and Stop buttons, its recent activity, and the linked AI apps">
+</p>
+
 > **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 46 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
 
 ---
@@ -74,6 +78,17 @@ cd daemon && cargo nx build --release -p kickstand-nro   # -> daemon/target/aarc
    - **OpenAI:** Codex (`codex`)
    - **Custom:** LM Studio (`lmstudio`), plus ready-to-copy command and JSON snippets for any other MCP client.
 4. Once linked, the desktop window shows a live feed of connected agents and their actions on the console.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/desktop-link.png" alt="Linking an AI app: Claude Code linked, Claude Desktop not installed, with tabs for Gemini, OpenAI and custom MCP clients"></td>
+    <td width="50%"><img src="docs/images/desktop-macros-dark.png" alt="The Macros page in dark mode: recording a new macro, and four saved macros, two of them written by a Claude agent"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Link an AI app in one click</sub></td>
+    <td align="center"><sub>Record macros for agents to replay (dark mode)</sub></td>
+  </tr>
+</table>
 
 To unpair, click **Unpair** beside *This Switch* in the desktop app, or run `kickstand unpair`: the Switch forgets this PC's token (other paired PCs keep working). You can also delete the PC's line from `/kickstand/token.txt` on the SD card; the daemon reads that file again on every connection, so either way takes effect at once.
 
