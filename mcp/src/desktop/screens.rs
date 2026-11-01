@@ -1027,7 +1027,7 @@ pub fn question(app: &mut Kickstand, ctx: &egui::Context, question: &crate::ques
         ui.spacing_mut().item_spacing.y = 16.0;
         theme::heading(ui, "Allow this?", 30.0);
         theme::text(ui, &format!("{who} wants to {} on your Switch's SD card.", question.action), Face::Regular, 16.0, body());
-        theme::text(ui, &format!("Allowing the folder covers {}.", question.covers), Face::Regular, 15.0, muted());
+        theme::text(ui, &format!("Allowing it covers {}.", question.covers), Face::Regular, 15.0, muted());
         ui.add_space(4.0);
         let mut answer = None;
         ui.horizontal_wrapped(|ui| {
@@ -1035,10 +1035,10 @@ pub fn question(app: &mut Kickstand, ctx: &egui::Context, question: &crate::ques
             if theme::button(ui, "Just this once", Kind::Primary, true, true).clicked() {
                 answer = Some(Answer::Once);
             }
-            if theme::button(ui, "Folder, until it restarts", Kind::Outline, true, true).clicked() {
+            if theme::button(ui, "Until Kickstand restarts", Kind::Outline, true, true).clicked() {
                 answer = Some(Answer::Session);
             }
-            if theme::button(ui, "Folder, from now on", Kind::Outline, true, true).clicked() {
+            if theme::button(ui, "From now on", Kind::Outline, true, true).clicked() {
                 answer = Some(Answer::Always);
             }
         });

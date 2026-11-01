@@ -170,7 +170,7 @@ Kickstand provides **44 MCP tools** across 6 categories. For full parameter tabl
 
 Kickstand is designed so an AI agent can iterate autonomously without risking console state, keys, or personal data:
 
-- **SD Card Folder Permissions:** Agents can freely access Kickstand's own directories, `/atmosphere/crash_reports`, and deployment folders configured in `projects.json`. Accessing any other SD card folder triggers an interactive permission prompt in the AI client (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), regardless of the client's auto-approve mode.
+- **SD Card Folder Permissions:** Agents can freely access Kickstand's own directories, `/atmosphere/crash_reports`, deployment folders configured in `projects.json`, and (for reading) the `sdmc:/` paths an NRO is started with, such as its log file. Accessing any other SD card folder triggers an interactive permission prompt in the AI client (*"Just this once"*, *"Until Kickstand restarts"*, or *"From now on"*; a file at the card's root is asked about by itself, not the whole card), regardless of the client's auto-approve mode.
   - If the AI app can't show that prompt, Kickstand asks in its own desktop window instead (opening it if it's closed) with the same choices, and the agent asks you in the chat at the same time, so you can answer from wherever you are (say, Claude on your phone): whichever you answer counts, and an answer in the chat takes the question out of the window.
   - You can pre-authorize folders from a terminal with `kickstand allow FOLDER [--write]` (saved in `~/.config/kickstand/access.json`).
   - Interactive CLI commands run by a human in a terminal work anywhere; scripted or agent-invoked CLI runs enforce the same allowlist.

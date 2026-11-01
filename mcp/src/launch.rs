@@ -617,6 +617,8 @@ pub struct OutputLog {
     read: usize,
     dropped: usize,
     open: bool,
+    /// How the stream ended, once it has.
+    end: Option<End>,
     /// When the NRO last wrote anything.
     last_output: Option<std::time::Instant>,
     /// When collecting began (about when the NRO started).
@@ -624,6 +626,28 @@ pub struct OutputLog {
     /// Where each piece of output starts (counting dropped bytes) and when it arrived, in seconds since
     /// `started`, oldest first.
     times: std::collections::VecDeque<(usize, f64)>,
+}
+
+/// How an NRO's stdout stream ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum End {
+    /// The NRO closed it: it exited (back to hbmenu), or closed stdout itself.
+    Closed,
+    /// The connection failed (the console slept, or Wi-Fi dropped): the NRO may well still be running.
+    Dropped(String),
+}
+
+impl End {
+    /// For the agent: what it means.
+    pub fn describe(&self) -> String {
+        match self {
+            End::Closed => "the NRO closed its stdout (it exited, back to hbmenu)".into(),
+            End::Dropped(e) => format!(
+                "the stdout connection dropped ({e}), so the NRO may still be running (the console may have slept or lost \
+                 Wi-Fi); status or screenshot shows what runs. Its output from now on can't be read"
+            ),
+        }
+    }
 }
 
 /// Output not read before ([`OutputLog::take_new`]).
@@ -634,6 +658,8 @@ pub struct NewOutput {
     pub dropped: usize,
     /// Whether the NRO still has its stdout open.
     pub open: bool,
+    /// How it ended, if it has.
+    pub end: Option<End>,
 }
 
 impl OutputLog {
@@ -652,8 +678,13 @@ impl OutputLog {
             while let Some(line) = lines.next().await {
                 log.lock().unwrap().push(&line);
             }
-            log.lock().unwrap().open = false;
-            nro_exited(pid);
+            let end = lines.end().cloned().unwrap_or(End::Closed);
+            if end == End::Closed {
+                nro_exited(pid);
+            }
+            let mut log = log.lock().unwrap();
+            log.open = false;
+            log.end = Some(end);
         })
     }
 
@@ -690,11 +721,16 @@ impl OutputLog {
             offset += line.len();
         }
         self.read = self.text.len();
-        NewOutput { lines, dropped, open: self.open }
+        NewOutput { lines, dropped, open: self.open, end: self.end.clone() }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// How the stream ended, if it has.
+    pub fn end(&self) -> Option<&End> {
+        self.end.as_ref()
     }
 
     pub fn last_output(&self) -> Option<std::time::Instant> {
@@ -715,11 +751,17 @@ pub struct Lines {
     symbols: Option<crate::symbolize::Shared>,
     pending: Vec<u8>,
     done: bool,
+    end: Option<End>,
 }
 
 impl Lines {
     pub fn new(stream: TcpStream, symbols: Option<crate::symbolize::Shared>) -> Self {
-        Lines { stream, symbols, pending: Vec::new(), done: false }
+        Lines { stream, symbols, pending: Vec::new(), done: false, end: None }
+    }
+
+    /// How the stream ended, once [`Lines::next`] has returned `None`.
+    pub fn end(&self) -> Option<&End> {
+        self.end.as_ref()
     }
 
     /// The next line with its newline (the last may have none), or `None` once the NRO closes its stdout.
@@ -737,7 +779,14 @@ impl Lines {
                 let mut buf = [0; 4096];
                 match self.stream.read(&mut buf).await {
                     Ok(n @ 1..) => self.pending.extend_from_slice(&buf[..n]),
-                    _ => self.done = true,
+                    Ok(_) => {
+                        self.done = true;
+                        self.end = Some(End::Closed);
+                    }
+                    Err(e) => {
+                        self.done = true;
+                        self.end = Some(End::Dropped(e.to_string()));
+                    }
                 }
                 continue;
             };
@@ -752,7 +801,41 @@ impl Lines {
 
 #[cfg(test)]
 mod tests {
-    use super::{OUTPUT_KEEP, OutputLog};
+    use super::{End, Lines, OUTPUT_KEEP, OutputLog};
+
+    /// An NRO's stdout that sends `text`, then closes cleanly or (`reset`) drops like a lost connection.
+    async fn stream_end(reset: bool) -> (Vec<String>, Option<End>) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sender = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(b"hello\nworld\n").await.unwrap();
+            sock.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if reset {
+                sock.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+            }
+            drop(sock);
+        });
+        let mut lines = Lines::new(tokio::net::TcpStream::connect(addr).await.unwrap(), None);
+        let mut got = Vec::new();
+        while let Some(line) = lines.next().await {
+            got.push(line);
+        }
+        sender.await.unwrap();
+        (got, lines.end().cloned())
+    }
+
+    #[tokio::test]
+    async fn a_clean_close_is_an_exit_and_a_reset_is_not() {
+        let (got, end) = stream_end(false).await;
+        assert_eq!(got, ["hello\n", "world\n"]);
+        assert_eq!(end, Some(End::Closed));
+        let (got, end) = stream_end(true).await;
+        assert_eq!(got, ["hello\n", "world\n"]);
+        assert!(matches!(end, Some(End::Dropped(_))), "{end:?}");
+    }
 
     #[test]
     fn output_lines_keep_their_times_across_reads_and_drops() {

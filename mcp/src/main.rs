@@ -604,7 +604,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                     format!(
                         "agents may {} {} from now on without asking",
                         if write { "read, write and delete in" } else { "read" },
-                        access::describe(&folder)
+                        access::describe(&folder, access::is_file_scope(&folder, folder.rsplit('/').next().is_none_or(|name| !name.contains('.'))))
                     )
                 });
             }
@@ -1106,10 +1106,15 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                         let _ = std::io::stdout().flush();
                     }
                 }
+                let end = lines.end().cloned().unwrap_or(launch::End::Closed);
                 if out.json() {
-                    out.event(json!({ "closed": true, "at": begun.elapsed().as_secs_f64() }));
+                    let dropped = match &end {
+                        launch::End::Dropped(e) => Some(e.clone()),
+                        launch::End::Closed => None,
+                    };
+                    out.event(json!({ "closed": true, "dropped": dropped, "at": begun.elapsed().as_secs_f64() }));
                 } else {
-                    eprintln!("(the NRO closed its stdout)");
+                    eprintln!("({})", end.describe());
                 }
             }
         }

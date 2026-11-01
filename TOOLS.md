@@ -68,7 +68,7 @@ Start a homebrew NRO (either uploaded from `local_path` on the PC or already on 
 ---
 
 ### `nro_output`
-Read additional stdout emitted by the NRO that [`run_nro`](#run_nro) or [`test_build`](#test_build) last started, and check whether its stdout stream is still open (running) or closed (exited).
+Read additional stdout emitted by the NRO that [`run_nro`](#run_nro) or [`test_build`](#test_build) last started, and check whether its stdout stream is still open (running), closed by the NRO (it exited), or dropped (the connection failed, e.g. the console slept or lost Wi-Fi: the NRO may still be running, and `supervise` keeps watching it by its screen).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -376,7 +376,7 @@ Write a value to the running **homebrew's** memory (strictly refused for retail 
 
 Tools for inspecting and transferring files on the Switch's SD card.
 
-> **Access control:** Kickstand's own folders, `/atmosphere/crash_reports`, `/atmosphere/fatal_reports`, and project destination folders from `projects.json` are accessible automatically. For any other SD card folder, Kickstand prompts the user in the AI app (*"Just this once"*, *"This folder, until the app restarts"*, or *"This folder, from now on"*), or in its own desktop window when the AI app can't show the prompt (the agent asks in the chat at the same time, and passes the answer on with [`answer_access`](#answer_access), which takes the question out of the window), or the user can pre-authorize folders in a terminal with `kickstand allow <folder> [--write]`. System folders (`/atmosphere` outside crash reports, `/bootloader`, `/Nintendo`, keys, and NAND backups) are hardware-blocked by the daemon.
+> **Access control:** Kickstand's own folders, `/atmosphere/crash_reports`, `/atmosphere/fatal_reports`, and project destination folders from `projects.json` are accessible automatically, and so are the SD card paths an NRO is started with (`--log=sdmc:/game.log` in `run_nro` or a project's `args`), for reading. For any other SD card folder, Kickstand prompts the user in the AI app (*"Just this once"*, *"Until Kickstand restarts"*, or *"From now on"*; a file at the card's root is asked about by itself, not the whole card), or in its own desktop window when the AI app can't show the prompt (the agent asks in the chat at the same time, and passes the answer on with [`answer_access`](#answer_access), which takes the question out of the window), or the user can pre-authorize folders in a terminal with `kickstand allow <folder> [--write]`. System folders (`/atmosphere` outside crash reports, `/bootloader`, `/Nintendo`, keys, and NAND backups) are hardware-blocked by the daemon.
 
 ### `list_dir`
 List entries in a directory on the SD card (sorted directories-first, with file sizes).

@@ -92,7 +92,8 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
             );
             return Ok(Report { text: with_tail(text), screenshot: client.screenshot().await.ok() });
         }
-        if output.is_some_and(|o| !o.lock().unwrap().is_open()) {
+        // Only a clean close is the NRO exiting; a dropped connection leaves it running, watched by its screen.
+        if output.is_some_and(|o| o.lock().unwrap().end() == Some(&crate::launch::End::Closed)) {
             let text = format!("EXITED after {:.0} s: the NRO closed its stdout (back to hbmenu, or exiting)", start.elapsed().as_secs_f64());
             return Ok(Report { text: with_tail(text), screenshot: None });
         }
@@ -112,7 +113,12 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
             } else if output.is_some() || screenshot.is_some() {
                 let quiet = alive.elapsed().as_secs_f64();
                 let threads = crate::memory::threads(client, elf).await?;
-                let what = if output.is_some() { format!("no output and {screen}") } else { screen.to_string() };
+                let dropped = output.and_then(|o| o.lock().unwrap().end().cloned()).is_some_and(|end| end != crate::launch::End::Closed);
+                let what = match output {
+                    Some(_) if dropped => format!("{screen} (its stdout connection dropped earlier, so output can't show it's alive)"),
+                    Some(_) => format!("no output and {screen}"),
+                    None => screen.to_string(),
+                };
                 let text = format!("LOOKS HUNG after {:.0} s: {what} for {quiet:.0} s. Every thread's backtrace:\n\n{threads}", start.elapsed().as_secs_f64());
                 return Ok(Report { text: with_tail(text), screenshot });
             }

@@ -102,13 +102,47 @@ fn project_folders() -> Vec<String> {
 }
 
 /// What to offer allowing for `path`: the folder itself when it's one (`is_dir`), else the folder it's in.
+///
+/// A file at the card's root is asked about by itself: its folder would be the whole card.
 pub fn folder_of(path: &str, is_dir: bool) -> String {
-    if is_dir { path.to_string() } else { parent(path).to_string() }
+    if is_dir || parent(path) == "/" { path.to_string() } else { parent(path).to_string() }
 }
 
-/// How `folder` reads in a question.
-pub fn describe(folder: &str) -> String {
-    if folder == "/" { "the whole SD card".into() } else { format!("{folder}/") }
+/// Whether [`folder_of`] gave the file itself.
+pub fn is_file_scope(path: &str, is_dir: bool) -> bool {
+    !is_dir && path != "/" && parent(path) == "/"
+}
+
+/// How what's allowed reads in a question: a folder (`file` false) or one file.
+pub fn describe(scope: &str, file: bool) -> String {
+    if scope == "/" {
+        "the whole SD card".into()
+    } else if file {
+        format!("the file {scope}")
+    } else {
+        format!("{scope}/")
+    }
+}
+
+/// The SD card paths (`sdmc:/...`) in an NRO's arguments, normalized: files it was told to write, such as
+/// `--log=sdmc:/game.log`, which the agent may then read without asking.
+pub fn paths_in_args(args: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for arg in args {
+        let mut rest = arg.as_str();
+        while let Some(i) = rest.find("sdmc:/") {
+            let tail = &rest[i + "sdmc:".len()..];
+            let end = tail.find(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '"' | '\'')).unwrap_or(tail.len());
+            if let Ok(path) = proto::path::normalize(&tail[..end])
+                && path != "/"
+                && !paths.contains(&path)
+            {
+                paths.push(path);
+            }
+            rest = &tail[end..];
+        }
+    }
+    paths
 }
 
 fn file() -> Result<std::path::PathBuf> {
@@ -153,9 +187,9 @@ pub struct Approval {
 pub enum AllowFor {
     #[serde(rename = "Just this once")]
     Once,
-    #[serde(rename = "This folder, until the app restarts")]
+    #[serde(rename = "Until Kickstand restarts")]
     Session,
-    #[serde(rename = "This folder, from now on")]
+    #[serde(rename = "From now on")]
     Always,
 }
 
@@ -189,6 +223,26 @@ mod tests {
         assert!(!builtin("/atmosphere/crash_reports/01.log", Need::Write));
         assert!(!builtin("/switch/kickstand2/x", Need::Read));
         assert_eq!(folder_of("/switch/mygame/mygame.nro", false), "/switch/mygame");
-        assert_eq!(describe("/"), "the whole SD card");
+        assert_eq!(describe("/", false), "the whole SD card");
+    }
+
+    #[test]
+    fn root_files_are_asked_about_alone() {
+        assert_eq!(folder_of("/ttyd-bench.log", false), "/ttyd-bench.log");
+        assert!(is_file_scope("/ttyd-bench.log", false));
+        assert_eq!(describe("/ttyd-bench.log", true), "the file /ttyd-bench.log");
+        assert_eq!(folder_of("/switch", true), "/switch");
+        assert!(!is_file_scope("/switch", true));
+        let mut g = Grants::default();
+        g.add("/ttyd-bench.log", Need::Read);
+        assert!(g.covers("/ttyd-bench.log", Need::Read));
+        assert!(!g.covers("/ttyd-bench.log2", Need::Read));
+        assert!(!g.covers("/other.log", Need::Read));
+    }
+
+    #[test]
+    fn paths_an_nro_was_given() {
+        let args = ["--skip-intro".to_string(), "--log=sdmc:/paperboat.log".into(), "out=sdmc:/a/b.txt,sdmc:/c.bin".into(), "sdmc:/".into()];
+        assert_eq!(paths_in_args(&args), ["/paperboat.log", "/a/b.txt", "/c.bin"]);
     }
 }

@@ -48,6 +48,8 @@ struct Asking {
     id: Option<String>,
     path: String,
     folder: String,
+    /// `folder` is the file itself (one at the card's root).
+    file: bool,
     need: Need,
     action: String,
 }
@@ -568,7 +570,11 @@ impl Tools {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         let new = self.output.lock().unwrap().take_new();
-        let status = if new.open { "the NRO is running" } else { "the NRO's stdout is closed (it exited)" };
+        let status = match &new.end {
+            _ if new.open => "the NRO is running".to_string(),
+            Some(end) => end.describe(),
+            None => "the NRO's stdout is closed".to_string(),
+        };
         if new.lines.is_empty() {
             return format!("\n[no new output; {status}]");
         }
@@ -585,7 +591,7 @@ impl Tools {
             text.push_str(line);
             text.push('\n');
         }
-        let notes: Vec<String> = notes.into_iter().chain([status.to_string()]).collect();
+        let notes: Vec<String> = notes.into_iter().chain([status]).collect();
         let _ = write!(text, "[{}]", notes.join("; "));
         text
     }
@@ -737,10 +743,10 @@ impl Tools {
             }
         }
         let folder = access::folder_of(path, is_dir);
+        let file = access::is_file_scope(path, is_dir);
         let message = format!(
-            "Kickstand: the agent wants to {action} on your Switch's SD card. Allowing the folder covers everything in {}{}.",
-            access::describe(&folder),
-            if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
+            "Kickstand: the agent wants to {action} on your Switch's SD card. Allowing it covers {}.",
+            covers(&folder, file, need)
         );
         match peer.elicit_with_timeout::<Approval>(message, Some(std::time::Duration::from_secs(300))).await {
             Ok(Some(answer)) => match answer.allow {
@@ -755,24 +761,21 @@ impl Tools {
                 anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed")
             }
             // This AI app can't show the question: Kickstand asks in its own window, and the agent in the chat.
-            Err(ElicitationError::CapabilityNotSupported) => self.ask_elsewhere(peer, path, &folder, need, action),
+            Err(ElicitationError::CapabilityNotSupported) => self.ask_elsewhere(peer, path, &folder, file, need, action),
             Err(e) => anyhow::bail!("couldn't ask the user about {path}: {e}"),
         }
     }
 
     /// Asks about `path` in Kickstand's window and has the agent ask in the chat; whichever answer comes
     /// first counts ([`Tools::answer_access`] records a chat answer and takes the window's question away).
-    fn ask_elsewhere(&self, peer: &Peer<RoleServer>, path: &str, folder: &str, need: Need, action: &str) -> anyhow::Result<()> {
-        let covers = format!(
-            "everything in {}{}",
-            access::describe(folder),
-            if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" }
-        );
+    fn ask_elsewhere(&self, peer: &Peer<RoleServer>, path: &str, folder: &str, file: bool, need: Need, action: &str) -> anyhow::Result<()> {
+        let covers = covers(folder, file, need);
+        let it = if file { "this file" } else { "this folder" };
         let flag = if need == Need::Write { " --write" } else { "" };
         let in_chat = format!(
             "Ask the user here, as a question (with your app's question tool if it has one), whether you may {action}; \
-             allowing the folder would cover {covers}. Offer: just this once, this folder until Kickstand restarts, this \
-             folder from now on, or no. Then pass their answer to answer_access with path {path:?} and try again. If they \
+             allowing it would cover {covers}. Offer: just this once, {it} until Kickstand restarts, {it} from \
+             now on, or no. Then pass their answer to answer_access with path {path:?} and try again. If they \
              say they answered in Kickstand's window instead, just try again. (They can also run `kickstand allow {folder}{flag}` in \
              their own terminal.)"
         );
@@ -784,7 +787,7 @@ impl Tools {
                 let app = self.client.app().or_else(|| peer.peer_info().map(|info| info.client_info.name.clone()));
                 let id = crate::questions::post(app, action, &covers).ok();
                 let window_open = id.is_some();
-                self.asking.lock().unwrap().push(Asking { id, path: path.into(), folder: folder.into(), need, action: action.into() });
+                self.asking.lock().unwrap().push(Asking { id, path: path.into(), folder: folder.into(), file, need, action: action.into() });
                 (None, window_open)
             }
         };
@@ -798,6 +801,16 @@ impl Tools {
         };
         self.take_asking(path);
         self.apply(answer, folder, need, action)
+    }
+
+    /// Lets the agent read the SD card paths an NRO is started with (`--log=sdmc:/game.log`) for the rest of
+    /// this session: files it was told to write, which whoever started it needs to read back.
+    fn readable_outputs(&self, args: &[String]) {
+        for path in access::paths_in_args(args) {
+            if proto::path::check_read(&path).is_ok() {
+                self.access.allow_for_session(&path, Need::Read);
+            }
+        }
     }
 
     /// Drops the question about `path`, taking it out of Kickstand's window.
@@ -843,8 +856,8 @@ impl Tools {
             }
             self.apply(answer, &asked.folder, asked.need, &asked.action)?;
             Ok(match answer {
-                Answer::Session => format!("{} allowed until Kickstand restarts: try again", access::describe(&asked.folder)),
-                _ => format!("{} allowed from now on: try again", access::describe(&asked.folder)),
+                Answer::Session => format!("{} allowed until Kickstand restarts: try again", access::describe(&asked.folder, asked.file)),
+                _ => format!("{} allowed from now on: try again", access::describe(&asked.folder, asked.file)),
             })
         };
         result.await.map_or_else(fail, ok)
@@ -1209,7 +1222,9 @@ impl Tools {
                 *self.elf.lock().unwrap() = Some((elf.clone(), args.module.clone()));
             }
             let mode = crate::launch::Mode::parse(args.mode.as_deref(), crate::launch::Mode::Full)?;
-            let started = crate::launch::run_nro(&self.client, program, args.args.unwrap_or_default(), mode).await?;
+            let nro_args = args.args.unwrap_or_default();
+            self.readable_outputs(&nro_args);
+            let started = crate::launch::run_nro(&self.client, program, nro_args, mode).await?;
             let mut text = started.notes.join("\n");
             if let Some(stream) = started.output {
                 let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols, started.pid);
@@ -1277,6 +1292,7 @@ impl Tools {
         let result = async {
             let project = crate::project::get(&args.project)?;
             let settings = watch_settings(args.seconds, args.quiet_seconds, true);
+            self.readable_outputs(args.args.as_ref().unwrap_or(&project.args));
             let run = crate::project::test(&self.client, &project, args.skip_build.unwrap_or(false), args.args, &self.output, &settings).await?;
             if let Some(handle) = run.collector
                 && let Some(old) = self.collector.lock().unwrap().replace(handle)
@@ -1654,6 +1670,12 @@ impl ServerHandler for Tools {
         }
         Ok(response)
     }
+}
+
+/// What allowing `scope` covers, for an access question.
+fn covers(scope: &str, file: bool, need: Need) -> String {
+    let what = if file { access::describe(scope, true) } else { format!("everything in {}", access::describe(scope, false)) };
+    format!("{what}{}", if need == Need::Write { " (reading, writing and deleting)" } else { " (reading only)" })
 }
 
 /// Tools that change what the console does, so can clash with another agent using it.
