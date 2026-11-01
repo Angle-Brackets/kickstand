@@ -37,6 +37,10 @@ pub struct Client {
 struct Conn {
     stream: TcpStream,
     info: DaemonInfo,
+    /// Requests sent (or being sent) whose replies haven't been read in full. Above 0 between calls, a
+    /// call was cancelled part way (an agent cancelling a tool mid-upload): a frame may be half sent and
+    /// replies are queued, so the connection is out of step and [`Client::connected`] replaces it.
+    pending: u32,
 }
 
 /// How a [`Client::play`] ended.
@@ -760,6 +764,11 @@ impl Client {
     }
 
     async fn connected<'a>(&self, slot: &'a mut Option<Conn>) -> Result<&'a mut Conn> {
+        // Left out of step by a cancelled call: closing it also ends the console's side (an upload's
+        // staging file goes with it).
+        if slot.as_ref().is_some_and(|c| c.pending > 0) {
+            *slot = None;
+        }
         if slot.is_none() {
             *slot = Some(self.connect_retrying().await?);
         }
@@ -830,7 +839,7 @@ impl Client {
                 if hint.is_empty() { e } else { e.context(hint) }
             })?;
         stream.set_nodelay(true)?;
-        let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro } };
+        let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro }, pending: 0 };
         match round_trip(&mut conn, &first).await? {
             Response::Hello { version, .. } if !proto::compatible(version) => Err(anyhow!(
                 "the daemon speaks protocol {version}, older than {} (the oldest this client talks to): install a newer sysmodule",
@@ -852,6 +861,7 @@ async fn round_trip(conn: &mut Conn, req: &Request) -> Result<Response> {
 
 async fn send(conn: &mut Conn, req: &Request) -> Result<()> {
     let frame = proto::encode(req)?;
+    conn.pending += 1;
     let io = conn.stream.write_all(&frame);
     timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon stopped reading for {REPLY_TIMEOUT:?}"))??;
     Ok(())
@@ -869,6 +879,7 @@ async fn recv_within(conn: &mut Conn, wait: Duration) -> Result<Response> {
         let len = proto::frame_len(prefix).ok_or_else(|| anyhow!("daemon sent an oversized frame"))?;
         let mut body = vec![0u8; len];
         conn.stream.read_exact(&mut body).await?;
+        conn.pending = conn.pending.saturating_sub(1);
         let reply = proto::decode::<Response>(&body);
         // Only a reply appended after this client's version would fail here.
         anyhow::Ok(reply.with_context(|| format!("couldn't read the daemon's reply (daemon protocol {}, this client {PROTOCOL_VERSION}): update the MCP server", conn.info.protocol))?)

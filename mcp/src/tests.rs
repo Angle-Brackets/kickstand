@@ -547,3 +547,21 @@ async fn macros_pause_resume_and_stop_from_another_connection() {
     // The connection is still good, and the next macro plays.
     assert_eq!(client.play(vec![vec![step(10)]]).await.unwrap(), crate::client::Played::Finished);
 }
+
+#[tokio::test]
+async fn a_cancelled_upload_leaves_the_connection_usable() {
+    use std::time::{Duration, Instant};
+    let (client, root) = start("tok").await;
+    client.ping().await.unwrap();
+    // Cancelled part way, like an agent cancelling the tool: a chunk half sent, replies unread.
+    let big: Vec<u8> = (0..proto::MAX_CHUNK * 400).map(|i| (i % 251) as u8).collect();
+    let cut = tokio::time::timeout(Duration::from_millis(30), client.upload("/switch/big.bin", &big)).await;
+    assert!(cut.is_err(), "the upload should still have been going");
+    let started = Instant::now();
+    client.ping().await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3), "ping took {:?}", started.elapsed());
+    let (entries, _) = client.list_dir("/atmosphere/crash_reports").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    client.upload("/switch/small.bin", b"hello").await.unwrap();
+    assert_eq!(std::fs::read(root.join("switch/small.bin")).unwrap(), b"hello");
+}

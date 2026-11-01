@@ -149,6 +149,7 @@ fn stopped(config: &Config) -> bool {
 /// Serves clients until [`Config::stop`] is set (forever without it), then waits for their threads to
 /// finish. Rebinds after network errors, which happen when Wi-Fi drops or the console sleeps.
 pub fn run(config: &'static Config<'static>) {
+    clear_staging();
     let mailboxes: &'static [Mailbox; MAX_CLIENTS] = Box::leak(Box::new(core::array::from_fn(|_| Mailbox::new())));
     // A stoppable server (the NRO) joins its workers before returning: hbloader loads the next NRO into the
     // same process, and a thread left running there executes unmapped code.
@@ -255,7 +256,7 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
             }
         }
         let mut prefix = [0u8; 4];
-        if read_exact(stream, &mut prefix).is_err() {
+        if read_exact(stream, &mut prefix, config).is_err() {
             return;
         }
         let Some(len) = proto::frame_len(prefix) else {
@@ -263,7 +264,7 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
             return;
         };
         frame.resize(len, 0);
-        if read_exact(stream, &mut frame).is_err() {
+        if read_exact(stream, &mut frame, config).is_err() {
             return;
         }
         let resp = match proto::decode::<Request>(&frame) {
@@ -307,6 +308,18 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
                 }
                 return;
             }
+        }
+    }
+}
+
+/// Deletes uploads left half done when the last server ended mid-transfer (a restart, a crash, a reboot):
+/// nobody is connected yet, and a big one would otherwise take its space on the SD card for good.
+fn clear_staging() {
+    let Ok((entries, _)) = crate::sd::list_dir(proto::path::STAGING_DIR, 64) else { return };
+    for entry in entries.iter().filter(|e| !e.is_dir && e.name.starts_with("upload-") && e.name.ends_with(".part")) {
+        let path = format!("{}/{}", proto::path::STAGING_DIR, entry.name);
+        if crate::sd::remove_if_exists(&path).is_ok() {
+            log!("removed {path} ({} MB), left by an upload cut short", entry.size >> 20);
         }
     }
 }
@@ -432,9 +445,22 @@ impl Pollable for RawFd {
     }
 }
 
-fn read_exact(stream: &TcpStream, buf: &mut [u8]) -> core::result::Result<(), ()> {
+/// Longest a frame may stall part way: a client that stops in the middle of one (its call cancelled with the
+/// connection left open) is let go, with its upload's staging file, rather than holding a slot for good.
+const FRAME_STALL_MS: i32 = 30_000;
+
+fn read_exact(stream: &TcpStream, buf: &mut [u8], config: &Config) -> core::result::Result<(), ()> {
     let mut done = 0;
     while done < buf.len() {
+        match wait_readable(stream, Some(FRAME_STALL_MS), config) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                if done > 0 || buf.len() > 4 {
+                    log!("client stalled {} s into a frame ({done} of {} bytes): letting it go", FRAME_STALL_MS / 1000, buf.len());
+                }
+                return Err(());
+            }
+        }
         match stream.recv(&mut buf[done..]) {
             Ok(0) | Err(_) => return Err(()),
             Ok(n) => done += n,
