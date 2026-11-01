@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "kickstand-proto",
  "nx",
@@ -136,7 +136,7 @@ checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 
 [[package]]
 name = "hello"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nx",
  "nxlink",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "kickstand-nro"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ab_glyph",
  "daemon-core",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "nxlink"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nx",
 ]
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "services"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nx",
  "nx-derive",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "sys-kickstand"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "daemon-core",
  "kickstand-proto",
