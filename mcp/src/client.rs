@@ -294,6 +294,49 @@ impl Client {
         result.map(|_| UploadStats { size: data.len() as u64, elapsed: start.elapsed() })
     }
 
+    /// Streams `local` from disk to `path` in [`proto::MAX_CHUNK`] pieces, verified with CRC-32 before it
+    /// replaces the old file, without reading the whole file into memory.
+    pub async fn upload_file(&self, path: &str, local: &std::path::Path) -> Result<UploadStats> {
+        use tokio::io::AsyncReadExt;
+        let mut file = tokio::fs::File::open(local).await.with_context(|| format!("opening {}", local.display()))?;
+        let meta = file.metadata().await.with_context(|| format!("reading {}", local.display()))?;
+        anyhow::ensure!(meta.is_file(), "{} isn't a regular file", local.display());
+        let size = meta.len();
+        let start = Instant::now();
+        let mut guard = self.conn.lock().await;
+        // The whole upload runs on one connection: the daemon's staging state is per connection.
+        let begin = Request::UploadBegin { path: path.into(), size };
+        expect(self.request_locked(&mut guard, begin).await?, |r| matches!(r, Response::UploadReady { .. }))?;
+        let result = async {
+            let conn = self.connected(&mut guard).await?;
+            let mut crc = proto::crc32::INIT;
+            let (mut sent_bytes, mut acked_bytes) = (0u64, 0u64);
+            let mut in_flight = std::collections::VecDeque::new();
+            while acked_bytes < size {
+                while sent_bytes < size && in_flight.len() < PIPELINE_DEPTH {
+                    let want = (size - sent_bytes).min(proto::MAX_CHUNK as u64) as usize;
+                    let mut buf = vec![0u8; want];
+                    file.read_exact(&mut buf).await.with_context(|| format!("reading {}", local.display()))?;
+                    crc = proto::crc32::update(crc, &buf);
+                    let offset = sent_bytes;
+                    sent_bytes += want as u64;
+                    send(conn, &Request::UploadChunk { offset, data: buf }).await?;
+                    in_flight.push_back(sent_bytes);
+                }
+                let expected = in_flight.pop_front().unwrap();
+                expect(recv(conn).await?, |r| matches!(r, Response::ChunkOk { received: n } if *n == expected))?;
+                acked_bytes = expected;
+            }
+            let finish = Request::UploadFinish { crc32: proto::crc32::finish(crc) };
+            expect(round_trip(conn, &finish).await?, |r| matches!(r, Response::UploadDone { .. }))
+        }
+        .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result.map(|_| UploadStats { size, elapsed: start.elapsed() })
+    }
+
     /// Deletes a file or directory; returns whether it was a directory.
     pub async fn delete(&self, path: &str, recursive: bool) -> Result<bool> {
         match self.request(Request::Delete { path: path.into(), recursive }).await? {

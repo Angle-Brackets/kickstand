@@ -51,6 +51,13 @@ async fn upload_round_trip_multi_chunk() {
     let (back, size) = client.read("/switch/mygame/mygame.nro", 0, data.len() as u64).await.unwrap();
     assert_eq!(size, data.len() as u64);
     assert_eq!(back, data);
+
+    // Streaming from disk (`upload_file`) produces the exact same result without reading the whole file into memory.
+    let local = root.join("local-stream.bin");
+    std::fs::write(&local, &data).unwrap();
+    let stats = client.upload_file("/switch/mygame/streamed.bin", &local).await.unwrap();
+    assert_eq!(stats.size, data.len() as u64);
+    assert_eq!(std::fs::read(root.join("switch/mygame/streamed.bin")).unwrap(), data);
 }
 
 #[tokio::test]

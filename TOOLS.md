@@ -1,6 +1,6 @@
 # Kickstand Capabilities & MCP Tools Reference
 
-This document details all **46 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
+This document details all **47 MCP tools** exposed by `kickstand serve` and the matching **CLI commands** provided by the `kickstand` binary.
 
 ## At a Glance
 
@@ -12,7 +12,7 @@ The tool names are the same in every AI app.
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
 | [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`save_macro`](#save_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
-| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
+| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`usb_upload`](#usb_upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
 | [CLI Command Reference](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
@@ -467,12 +467,26 @@ Search a file, or every file under a folder, for lines containing some text. The
 ---
 
 ### `upload`
-Upload a file from the PC to the Switch's SD card. Verified with CRC-32 on the console before replacing the target file.
+Upload a file from the PC to the Switch's SD card over Wi-Fi. Streamed from disk in chunks and verified with CRC-32 on the console before replacing the target file. For large files (ROMs, ISOs, `.o2r` archives), prefer [`usb_upload`](#usb_upload) when the Switch is connected via USB.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `local_path` | `string` *(required)* | — | Path to the source file on the PC. |
 | `remote_path` | `string` *(required)* | — | Destination path on the SD card (e.g. `/switch/mygame/mygame.nro`). |
+
+---
+
+### `usb_upload`
+Upload a file from the PC to the Switch's SD card over USB, streaming directly from disk without loading the file into memory. Preferred over [`upload`](#upload) for large files like ROMs, ISOs, or `.o2r` archives whenever the Switch is connected via USB ([`status`](#status) reports when USB is connected).
+- **Mounted SD card** (Hekate USB Mass Storage, an SD card reader, or `$KICKSTAND_USB_MOUNT`): streams in 1 MiB chunks to `/kickstand/staging/` on the card and atomically renames the file into place.
+- **Horizon OS USB MTP** (`/switch/haze.nro`, shipped with Atmosphère): when the Switch is plugged into USB (`057e:2000` or `057e:201d`), launches `/switch/haze.nro` with **full memory** (`Mode::Full`, never applet mode) if it isn't already running, waits for the desktop's GVFS MTP mount (`gio mount` fallback if auto-mount is off), streams the file over USB bulk endpoints via `gio copy` (~15–20 MB/s), verifies the uploaded size on the SD card through the daemon, and presses `+` to exit `haze.nro` cleanly back to full-memory `hbmenu`.
+- Over MTP, a file already at `remote_path` is deleted before the copy (MTP can't overwrite one), so if the transfer fails the old copy is gone too. Through a mounted SD card the old file is only replaced once the new one is complete.
+- Enforces the same path and folder permission rules as [`upload`](#upload).
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `local_path` | `string` *(required)* | — | Path to the source file on the PC. |
+| `remote_path` | `string` *(required)* | — | Destination path on the SD card (e.g. `/switch/paperboat/paperboat.o2r`). |
 
 ---
 
@@ -515,6 +529,7 @@ One-call snapshot of the console's state:
 - Running application (game, or `hbloader` with `hbmenu`/NRO in full-memory mode) and running applet (`hbloader` in the Album).
 - Whether the console is stuck on an Atmosphère fatal error screen.
 - Whether the sysmodule is still pressing `B` to dismiss the lock screen after a reboot.
+- Whether the Switch is connected to this PC via USB (or has its SD card mounted) so [`usb_upload`](#usb_upload) can be used for fast large-file transfers.
 - Remaining keep-awake lease time, console uptime, any other AI agents currently sharing the console, a macro playing or paused (and who plays it), and a small screenshot (if the console refuses one, the rest is still returned with a note).
 
 | Parameter | Type | Default | Description |
@@ -635,12 +650,13 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | **SD Card Files** | `kickstand ls <path>` | List a directory on the SD card. |
 | | `kickstand cat <path>` | Print a file from the SD card. |
 | | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
-| | `kickstand put <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified). |
+| | `kickstand put [--usb] <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified over Wi-Fi, or `--usb` over USB). |
+| | `kickstand usb-put <local> <remote>` | Upload a file from the PC to the SD card over USB (`haze.nro` MTP or mounted SD card; ~15–20 MB/s for large files). |
 | | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
 | | `kickstand find <dir> [name] [--max <n>]` | Find files and folders by name, searched on the console. |
 | | `kickstand grep [-i] <text> <path> [--max <n>]` | Print matching lines of a file or of every file under a folder, searched on the console. |
 | | `kickstand rm [-r] <path>` | Delete a file or directory on the SD card. |
-| **Console** | `kickstand status` | Show uptime, unlock state, keep-awake timer, running app, and applet status. |
+| **Console** | `kickstand status` | Show uptime, unlock state, keep-awake timer, running app, applet status, and USB connection status. |
 | | `kickstand ping` | Ping the daemon and report round-trip time and version. |
 | | `kickstand resources` | Show kernel resource limit usage of the daemon's group. |
 | | `kickstand keep-awake [minutes]` | Set or check the keep-awake timer (`0` to end immediately). |

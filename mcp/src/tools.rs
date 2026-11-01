@@ -1160,7 +1160,7 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the console is stuck on a fatal error screen (then reboot it), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
+    #[tool(description = "Where the console is, in one call: what runs (the application: a game, or hbloader with hbmenu or an NRO with full memory; and applet mode: hbloader in the Album), whether the console is stuck on a fatal error screen (then reboot it), whether the sysmodule is still pressing B to get past the lock screen after a reboot, the keep-awake lease, uptime, whether USB is connected for fast file transfers (usb_upload), and a small screenshot of the screen (screenshot: false to skip it). Check it before pressing buttons, after a reboot, and whenever unsure what's on screen.")]
     async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> CallToolResult {
         let result = async {
             let status = self.client.status().await?;
@@ -1168,6 +1168,9 @@ impl Tools {
             let mut text = crate::client::describe_status(&status);
             if let Some(fatal) = &fatal {
                 text = format!("{fatal}\n{text}");
+            }
+            if let Some(usb) = crate::usb::describe() {
+                write!(text, "\n{usb}")?;
             }
             let others = self.client.agents().await?.map(|r| crate::client::other_agents(&r.agents, false)).unwrap_or_default();
             if !others.is_empty() {
@@ -1623,13 +1626,12 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build. Verified with CRC-32 before it replaces the old file. Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card over Wi-Fi, e.g. a fresh .nro build. Streamed in chunks and verified with CRC-32 before it replaces the old file. For large files (ROMs, ISOs, .o2r archives, multi-MB assets), prefer usb_upload when the Switch is connected via USB (~15-20 MB/s vs ~1.5 MB/s over Wi-Fi). Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
     async fn upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
             self.permit(&context.peer, &remote, Need::Write, false, &format!("write {remote}")).await?;
-            let data = tokio::fs::read(&args.local_path).await?;
-            let stats = self.client.upload(&remote, &data).await?;
+            let stats = self.client.upload_file(&remote, std::path::Path::new(&args.local_path)).await?;
             let secs = stats.elapsed.as_secs_f64();
             anyhow::Ok(format!(
                 "uploaded {} -> {remote}: {} bytes in {secs:.1}s ({:.2} MB/s)",
@@ -1637,6 +1639,28 @@ impl Tools {
                 stats.size,
                 stats.size as f64 / 1e6 / secs.max(1e-6)
             ))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Upload a file from this PC to the Switch's SD card over USB (~15-20 MB/s via Atmosphère's haze.nro MTP or a mounted SD card), streaming directly from disk without loading the file into memory. Preferred over upload for large files like ROMs, ISOs, or .o2r archives whenever the Switch is connected via USB (status reports when USB is connected). If haze.nro isn't already open, launches it with full memory (closing any running application first) for the transfer and exits back to hbmenu afterwards. Same path and permission rules as upload.")]
+    async fn usb_upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let remote = check_path(&args.remote_path, true)?;
+            self.permit(&context.peer, &remote, Need::Write, false, &format!("write {remote}")).await?;
+            let stats = crate::usb::upload(&self.client, std::path::Path::new(&args.local_path), &remote).await?;
+            let secs = stats.elapsed.as_secs_f64();
+            let mut out = format!(
+                "uploaded {} -> {remote} via {}: {} bytes in {secs:.1}s ({:.2} MB/s)",
+                args.local_path,
+                stats.via,
+                stats.size,
+                stats.size as f64 / 1e6 / secs.max(1e-6)
+            );
+            if !stats.notes.is_empty() {
+                write!(out, "\n{}", stats.notes.join("\n"))?;
+            }
+            anyhow::Ok(out)
         };
         result.await.map_or_else(fail, ok)
     }
@@ -1759,6 +1783,7 @@ const CONTENTIOUS: &[&str] = &[
     "test_build",
     "supervise",
     "write_memory",
+    "usb_upload",
     "reboot",
     "sysmodule",
     "keep_awake",

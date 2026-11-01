@@ -10,8 +10,8 @@ it, so look before you act and leave it how you found it.
 
 ## Start and finish
 
-- Start with `status`: what's running, whether it's at the lock screen, keep-awake, other agents. Don't ask
-  the user to press anything before checking it yourself.
+- Start with `status`: what's running, whether it's at the lock screen, keep-awake, whether USB is connected,
+  and other agents. Don't ask the user to press anything before checking it yourself.
 - If the console is unreachable, it's most likely asleep (it can't be woken over the network) or Kickstand
   isn't running. Say so and ask the user to wake it; don't retry in a loop.
 - Every tool call keeps it awake for 30 minutes. Before a longer gap (a long build, waiting on the user), call
@@ -33,6 +33,11 @@ it, so look before you act and leave it how you found it.
   source lines. For a hang: `threads` with the `elf` gives every thread's stack.
 - Logs on the SD card: `tail_file` (it can follow and stop at a line), `grep` and `find`. Both run on the
   console, so nothing large crosses Wi-Fi.
+- Sending files to the SD card: use `upload` for small files (configs, `.nro` builds), and prefer `usb_upload`
+  whenever the Switch is connected via USB (`status` says when it is) for large files like ROMs, ISOs, or
+  `.o2r` asset archives (~15–20 MB/s over USB MTP vs ~1.5 MB/s over Wi-Fi, streamed directly from disk without
+  loading the file into memory; launches `/switch/haze.nro` with full memory if needed and exits back to
+  `hbmenu`).
 
 ## Seeing the screen
 

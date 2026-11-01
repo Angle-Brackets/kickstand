@@ -72,6 +72,7 @@ const TOOLS: &[Area] = &[
             ("grep", "Find lines in files, searched on the Switch"),
             ("download", "Copy a file to this computer"),
             ("upload", "Copy a file to the SD card"),
+            ("usb_upload", "Copy a large file to the SD card over USB"),
             ("delete", "Delete a file or folder"),
             ("answer_access", "Pass on your answer when you allowed a folder in the chat instead"),
         ],

@@ -447,6 +447,16 @@ pub struct Started {
 /// Starts an NRO with `args` from a fresh hbmenu in `mode`: an NRO already running there is closed first
 /// (and in full-memory mode, any game).
 pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode) -> Result<Started> {
+    send_nro(client, program, args, mode, true).await
+}
+
+/// Starts an NRO already on the SD card with full memory (`Mode::Full`) without waiting for nxlink stdout,
+/// for utilities such as `/switch/haze.nro`.
+pub async fn start_full_tool(client: &Client, sd_path: &str) -> Result<Started> {
+    send_nro(client, Program::Sd(sd_path.into()), Vec::new(), Mode::Full, false).await
+}
+
+async fn send_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode, listen_stdout: bool) -> Result<Started> {
     let target = match &program {
         Program::Local { dest, .. } => dest,
         Program::Sd(path) => path,
@@ -484,7 +494,7 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     };
 
     let mut notes = Vec::new();
-    let output = nxlink::OutputListener::bind().await?;
+    let output = if listen_stdout { Some(nxlink::OutputListener::bind().await?) } else { None };
     // hbmenu can't be told apart from an NRO, so only a process known to show hbmenu is used as is.
     let current = status(client, mode).await?;
     let mut sock = None;
@@ -528,10 +538,16 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         None => format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()),
     });
     let pid = status(client, mode).await?.map_or(0, |a| a.pid);
-    let output = output.accept(OUTPUT_WAIT).await?;
-    if output.is_none() {
-        notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
-    }
+    let output = match output {
+        Some(listener) => {
+            let stream = listener.accept(OUTPUT_WAIT).await?;
+            if stream.is_none() {
+                notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
+            }
+            stream
+        }
+        None => None,
+    };
     Ok(Started { notes, pid, output })
 }
 

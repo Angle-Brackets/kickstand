@@ -24,6 +24,7 @@ mod tail;
 mod tools;
 mod until;
 mod update;
+mod usb;
 mod watch;
 mod watchdog;
 
@@ -113,8 +114,17 @@ enum Command {
     Cat { path: String },
     /// Copy a file from the SD card to this PC.
     Get { path: String, local: PathBuf },
-    /// Upload a file to the SD card.
-    Put { local: PathBuf, path: String },
+    /// Upload a file to the SD card (over Wi-Fi, or --usb over USB).
+    Put {
+        local: PathBuf,
+        path: String,
+        /// Transfer over USB (Atmosphère's haze.nro MTP or a mounted SD card) instead of Wi-Fi.
+        #[arg(long)]
+        usb: bool,
+    },
+    /// Upload a file to the SD card over USB (Atmosphère's haze.nro MTP or a mounted SD card; ~15-20 MB/s
+    /// for large files like ROMs or .o2r archives).
+    UsbPut { local: PathBuf, path: String },
     /// Print the last lines of a file on the SD card, such as a log; with -f, keep printing what's added.
     Tail {
         path: String,
@@ -768,14 +778,25 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 format!("{} bytes in {secs:.1}s ({}) -> {}", data.len(), mb_per_s(data.len() as u64, secs), local.display())
             });
         }
-        Command::Put { local, path } => {
+        Command::Put { local, path, usb: false } => {
             let path = check_path(&path, true)?;
             typed_or_allowed(&path, access::Need::Write, false)?;
-            let data = std::fs::read(&local).with_context(|| format!("reading {}", local.display()))?;
-            let stats = client.upload(&path, &data).await?;
+            let stats = client.upload_file(&path, &local).await?;
             let secs = stats.elapsed.as_secs_f64();
             out.done(json!({ "local": local, "path": path, "bytes": stats.size, "seconds": secs }), || {
-                format!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size as u64, secs))
+                format!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size, secs))
+            });
+        }
+        Command::Put { local, path, usb: true } | Command::UsbPut { local, path } => {
+            let path = check_path(&path, true)?;
+            typed_or_allowed(&path, access::Need::Write, false)?;
+            let stats = usb::upload(&client, &local, &path).await?;
+            for note in &stats.notes {
+                out.note(note.clone());
+            }
+            let secs = stats.elapsed.as_secs_f64();
+            out.done(json!({ "local": local, "path": path, "via": stats.via, "bytes": stats.size, "seconds": secs }), || {
+                format!("{} bytes via {} in {secs:.1}s ({})", stats.size, stats.via, mb_per_s(stats.size, secs))
             });
         }
         Command::Tail { path, lines, follow } => {
@@ -987,11 +1008,17 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         Command::Status => {
             let fatal = client.fatal().await?;
             let status = client.status().await?;
-            let text = client::describe_status(&status);
+            let mut text = client::describe_status(&status);
+            let usb_desc = usb::describe();
+            if let Some(usb) = &usb_desc {
+                text.push('\n');
+                text.push_str(usb);
+            }
             out.done(
                 json!({
                     "fatal": fatal, "uptime_ms": status.uptime_ms, "unlocking_ms": status.unlocking_ms, "keep_awake_s": status.keep_awake_s,
-                    "application": status.application.as_ref().map(out::app), "applet": status.applet.as_ref().map(out::app), "text": text,
+                    "application": status.application.as_ref().map(out::app), "applet": status.applet.as_ref().map(out::app),
+                    "usb": usb_desc.is_some(), "text": text,
                 }),
                 || match &fatal {
                     Some(fatal) => format!("{fatal}\n{text}"),
