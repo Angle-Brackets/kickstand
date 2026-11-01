@@ -432,8 +432,14 @@ enum MacroCmd {
         #[arg(long, default_value_t = 300)]
         seconds: u32,
     },
-    /// Replay macro NAME.
+    /// Replay macro NAME (Ctrl-C stops it and lets go of everything).
     Play { name: String },
+    /// Pause the macro playing now, whoever plays it: everything is let go until `resume` (or `stop`).
+    Pause,
+    /// Carry on with a paused macro from where it was.
+    Resume,
+    /// Stop the macro playing now, whoever plays it, and let go of everything.
+    Stop,
     /// List the saved macros.
     List,
     /// Delete macro NAME.
@@ -801,11 +807,21 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 });
             }
             MacroCmd::Play { name } => {
-                let (data, took) = macros::play(&client, &name).await?;
-                out.done(json!({ "name": name, "ms": data.ms, "took_ms": took.as_millis() as u64 }), || {
-                    format!("played {name:?} ({} in {:.1} s)", macros::length(data.ms), took.as_secs_f64())
-                });
+                let play = macros::play(&client, &name);
+                tokio::pin!(play);
+                let replayed = tokio::select! {
+                    replayed = &mut play => replayed?,
+                    _ = tokio::signal::ctrl_c() => {
+                        // `play` holds the connection; it returns as soon as the console stops.
+                        client.another().playback(proto::PlaybackAction::Stop).await?;
+                        play.await?
+                    }
+                };
+                out.done(replayed.json(), || replayed.summary());
             }
+            MacroCmd::Pause => control_macro(&out, &client, proto::PlaybackAction::Pause).await?,
+            MacroCmd::Resume => control_macro(&out, &client, proto::PlaybackAction::Resume).await?,
+            MacroCmd::Stop => control_macro(&out, &client, proto::PlaybackAction::Stop).await?,
             MacroCmd::List => {
                 let all = macros::list()?;
                 let value: Vec<_> = all.iter().map(|m| json!({ "name": m.name, "recorded": m.data.recorded, "ms": m.data.ms, "note": m.data.note, "steps": m.data.steps })).collect();
@@ -1240,6 +1256,15 @@ fn parse_region(text: &str) -> Result<(u32, u32, u32, u32)> {
 /// "1.23 MB/s" for `bytes` moved in `secs`.
 fn mb_per_s(bytes: u64, secs: f64) -> String {
     format!("{:.2} MB/s", bytes as f64 / 1e6 / secs.max(1e-6))
+}
+
+/// `kickstand macro pause|resume|stop`.
+async fn control_macro(out: &out::Out, client: &Client, action: proto::PlaybackAction) -> Result<()> {
+    let was = client.playback(action).await?;
+    let acted = macros::acted(&was, action);
+    let by = was.app.as_deref().map(|a| macros::player(Some(a)));
+    out.done(json!({ "acted": acted, "playing": was.playing, "paused": was.paused, "by": by }), || macros::control_text(&was, action));
+    Ok(())
 }
 
 /// Saves a run's screenshot (a crash or hang) to `--out`, if both exist; where it went.

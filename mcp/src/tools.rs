@@ -392,6 +392,12 @@ pub struct PlayMacroArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ControlMacroArgs {
+    /// "pause", "resume" or "stop".
+    pub action: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct TypeTextArgs {
     /// What to type: printable ASCII, tabs and newlines, up to 250 characters (US keyboard layout).
     pub text: String,
@@ -910,18 +916,37 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Replay a saved macro (see macros) on a virtual controller, with its recorded timing, e.g. to get back to the same place in a game for a test. Start it from where it was recorded (its note says where); timing can drift a little over a long one, so check where it ended (then: \"still\" returns the screen) and fix up with press or input_until.")]
+    #[tool(description = "Replay a saved macro (see macros) on a virtual controller, with its recorded timing, e.g. to get back to the same place in a game for a test. Start it from where it was recorded (its note says where); timing can drift a little over a long one, so check where it ended (then: \"still\" returns the screen) and fix up with press or input_until. The user (or control_macro) can pause or stop it part way; the result says if it was stopped.")]
     async fn play_macro(&self, Parameters(args): Parameters<PlayMacroArgs>) -> CallToolResult {
         let result = async {
             let then = args.then.as_deref().map(parse_until).transpose()?;
-            let (data, took) = crate::macros::play(&self.client, &args.name).await?;
-            let done = format!("played {:?} ({} in {:.1} s)", args.name, crate::macros::length(data.ms), took.as_secs_f64());
+            let replayed = crate::macros::play(&self.client, &args.name).await?;
+            let mut done = replayed.summary();
+            if replayed.stopped {
+                done.push_str(". If you didn't stop it with control_macro, the user did (in Kickstand's desktop app or a terminal): ask them before playing it again.");
+            }
             match then {
                 Some(until) => anyhow::Ok(self.look_after(&done, until, args.width).await),
                 None => Ok(vec![ContentBlock::text(done)]),
             }
         };
         result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Pause, resume or stop the macro playing on the console now (from play_macro, the user's desktop app or a terminal, whoever plays it). Paused, nothing is held and the macro's clock stops until resumed; a pause over 10 minutes stops it. Stopping lets go of everything.")]
+    async fn control_macro(&self, Parameters(args): Parameters<ControlMacroArgs>) -> CallToolResult {
+        let result = async {
+            let action = match args.action.as_str() {
+                "pause" => proto::PlaybackAction::Pause,
+                "resume" => proto::PlaybackAction::Resume,
+                "stop" => proto::PlaybackAction::Stop,
+                other => anyhow::bail!("action is \"pause\", \"resume\" or \"stop\", not {other:?}"),
+            };
+            // A connection of its own: this agent's play_macro may be holding the usual one.
+            let was = self.client.another().playback(action).await?;
+            anyhow::Ok(crate::macros::control_text(&was, action))
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Type text on a virtual USB keyboard: into the software keyboard (naming a save, a profile, a search) or anything that reads a keyboard. Printable ASCII, tabs and newlines, up to 250 characters a call, at about 14 characters a second; enter: true presses Enter after. Open the keyboard first (with press) and check it took the text with screenshot.")]
@@ -1113,6 +1138,12 @@ impl Tools {
             let others = self.client.agents().await?.map(|r| crate::client::other_agents(&r.agents, false)).unwrap_or_default();
             if !others.is_empty() {
                 write!(text, "\nother agents: {} (launching, closing, input and restarts aren't coordinated between agents)", others.join("; "))?;
+            }
+            // Older consoles can't say.
+            if let Ok(was) = self.client.playback(proto::PlaybackAction::Query).await
+                && was.playing
+            {
+                write!(text, "\n{} (control_macro pauses or stops it)", crate::macros::control_text(&was, proto::PlaybackAction::Query))?;
             }
             let mut shot = None;
             if args.screenshot.unwrap_or(true) && fatal.is_none() {
@@ -1684,6 +1715,7 @@ const CONTENTIOUS: &[&str] = &[
     "input",
     "input_until",
     "play_macro",
+    "control_macro",
     "type_text",
     "quit_app",
     "force_quit_app",

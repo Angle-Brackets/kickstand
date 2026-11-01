@@ -39,6 +39,14 @@ struct Conn {
     info: DaemonInfo,
 }
 
+/// How a [`Client::play`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Played {
+    Finished,
+    /// Stopped with [`Client::playback`] (by anyone), or paused longer than [`proto::MAX_PAUSE_MS`].
+    Stopped,
+}
+
 #[derive(Debug)]
 pub struct UploadStats {
     pub size: u64,
@@ -372,16 +380,19 @@ impl Client {
 
     /// Plays `chunks` back to back on a held controller (see [`Request::Play`]), sending each next one
     /// while the previous plays so nothing is let go between them, then lets go.
-    pub async fn play(&self, chunks: Vec<Vec<proto::InputStep>>) -> Result<()> {
+    pub async fn play(&self, chunks: Vec<Vec<proto::InputStep>>) -> Result<Played> {
         /// How long the last step of a chunk is held while the next one is on its way.
         const LEASE_MS: u32 = 3_000;
+        // A paused macro's chunk is answered once resumed.
+        let wait = REPLY_TIMEOUT + Duration::from_millis(u64::from(proto::MAX_PAUSE_MS));
         let mut guard = self.conn.lock().await;
         let result = async {
             let conn = self.connected(&mut guard).await?;
             let mut chunks = chunks.into_iter();
             let mut in_flight = 0;
+            let mut played = Played::Finished;
             loop {
-                while in_flight < 2 {
+                while in_flight < 2 && played == Played::Finished {
                     let Some(steps) = chunks.next() else { break };
                     send(conn, &Request::Play { steps, lease_ms: LEASE_MS }).await?;
                     in_flight += 1;
@@ -389,12 +400,17 @@ impl Client {
                 if in_flight == 0 {
                     break;
                 }
-                match recv(conn).await? {
+                // After a stop, the chunk still on its way is refused at once.
+                match recv_within(conn, wait).await? {
                     Response::Ok => in_flight -= 1,
+                    Response::Playback(_) => {
+                        in_flight -= 1;
+                        played = Played::Stopped;
+                    }
                     other => return Err(too_old(other, "replaying recordings")),
                 }
             }
-            anyhow::Ok(())
+            anyhow::Ok(played)
         }
         .await;
         if result.is_err() {
@@ -405,6 +421,16 @@ impl Client {
         // Let go whether it played or not.
         let _ = self.hold(proto::InputStep::default()).await;
         result
+    }
+
+    /// Pauses, resumes or stops the macro playing on the console, whoever plays it (or just asks, with
+    /// `Query`), and returns how things were before. [`Client::play`] holds the connection while it plays,
+    /// so control a macro this client plays from [`Client::another`].
+    pub async fn playback(&self, action: proto::PlaybackAction) -> Result<proto::Playback> {
+        match self.request(Request::Playback { action }).await? {
+            Response::Playback(state) => Ok(state),
+            other => Err(too_old_for(other, "pausing and stopping macros", 27)),
+        }
     }
 
     /// Starts recording the physical controllers for at most `max_ms`.
@@ -833,6 +859,10 @@ async fn send(conn: &mut Conn, req: &Request) -> Result<()> {
 
 /// Reads the next response. Responses arrive in request order.
 async fn recv(conn: &mut Conn) -> Result<Response> {
+    recv_within(conn, REPLY_TIMEOUT).await
+}
+
+async fn recv_within(conn: &mut Conn, wait: Duration) -> Result<Response> {
     let io = async {
         let mut prefix = [0u8; 4];
         conn.stream.read_exact(&mut prefix).await?;
@@ -843,7 +873,7 @@ async fn recv(conn: &mut Conn) -> Result<Response> {
         // Only a reply appended after this client's version would fail here.
         anyhow::Ok(reply.with_context(|| format!("couldn't read the daemon's reply (daemon protocol {}, this client {PROTOCOL_VERSION}): update the MCP server", conn.info.protocol))?)
     };
-    timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon did not reply within {REPLY_TIMEOUT:?}"))?
+    timeout(wait, io).await.map_err(|_| anyhow!("daemon did not reply within {wait:?}"))?
 }
 
 fn is_reset(e: &anyhow::Error) -> bool {
@@ -863,9 +893,13 @@ fn expect_ok(resp: Response) -> Result<()> {
 
 /// [`unexpected`], but a request the daemon doesn't know (from before protocol 26) says to update it.
 fn too_old(resp: Response, what: &str) -> anyhow::Error {
+    too_old_for(resp, what, 26)
+}
+
+fn too_old_for(resp: Response, what: &str, protocol: u32) -> anyhow::Error {
     match resp {
         Response::Error(e) if e.kind == proto::ErrorKind::Unsupported && e.message.contains("doesn't know that request") => {
-            anyhow!("Kickstand on the console predates {what} (protocol 26): update it (`kickstand update --switch`, or `kickstand sysmodule install`)")
+            anyhow!("Kickstand on the console predates {what} (protocol {protocol}): update it (`kickstand update --switch`, or `kickstand sysmodule install`)")
         }
         other => unexpected(other),
     }

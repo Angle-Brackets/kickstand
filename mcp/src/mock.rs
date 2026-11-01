@@ -23,6 +23,16 @@ pub struct Console {
     activity: Mutex<Activity>,
     /// A running application, for tests of closing one (none unless a test sets it).
     pub app: Mutex<MockApp>,
+    playback: Mutex<MockPlayback>,
+}
+
+/// Like the daemon's `playback` module: Plays take their steps' time, and can be paused and stopped.
+#[derive(Default)]
+struct MockPlayback {
+    generation: u32,
+    paused: bool,
+    /// The connection whose Plays run.
+    player: Option<u64>,
 }
 
 #[derive(Default)]
@@ -60,7 +70,7 @@ struct MockClient {
 
 impl Console {
     pub fn new(root: PathBuf, tokens: Vec<String>, pair_code: Option<String>) -> Self {
-        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default(), app: Mutex::default() }
+        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default(), app: Mutex::default(), playback: Mutex::default() }
     }
 
     fn connected(&self, from: SocketAddr) -> u64 {
@@ -77,6 +87,7 @@ impl Console {
     }
 
     fn disconnected(&self, id: u64) {
+        self.end_playing(id);
         self.activity.lock().unwrap().clients.retain(|(c, _)| *c != id);
     }
 
@@ -222,6 +233,57 @@ struct Upload {
     size: u64,
 }
 
+impl Console {
+    fn end_playing(&self, id: u64) {
+        let mut playback = self.playback.lock().unwrap();
+        if playback.player == Some(id) {
+            playback.player = None;
+            playback.paused = false;
+        }
+    }
+
+    fn control(&self, action: proto::PlaybackAction) -> proto::Playback {
+        let mut playback = self.playback.lock().unwrap();
+        let app = playback.player.and_then(|p| self.activity.lock().unwrap().clients.iter().find(|(c, _)| *c == p).and_then(|(_, c)| c.app.clone()));
+        let was = proto::Playback { playing: playback.player.is_some(), paused: playback.paused, app };
+        if was.playing {
+            match action {
+                proto::PlaybackAction::Query => {}
+                proto::PlaybackAction::Pause => playback.paused = true,
+                proto::PlaybackAction::Resume => playback.paused = false,
+                proto::PlaybackAction::Stop => {
+                    playback.generation += 1;
+                    playback.player = None;
+                    playback.paused = false;
+                }
+            }
+        }
+        was
+    }
+
+    /// Takes the steps' time (paused time not counted); false if stopped.
+    async fn play(&self, steps: &[proto::InputStep], generation: u32) -> bool {
+        const CHECK: std::time::Duration = std::time::Duration::from_millis(10);
+        let mut left: std::time::Duration = steps.iter().map(|s| std::time::Duration::from_millis(u64::from(s.ms))).sum();
+        loop {
+            let (stopped, paused) = {
+                let playback = self.playback.lock().unwrap();
+                (playback.generation != generation, playback.paused)
+            };
+            if stopped {
+                return false;
+            }
+            if left.is_zero() {
+                return true;
+            }
+            tokio::time::sleep(CHECK.min(left)).await;
+            if !paused {
+                left = left.saturating_sub(CHECK);
+            }
+        }
+    }
+}
+
 async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()> {
     let root = console.root.as_path();
     let mut authed = false;
@@ -229,6 +291,8 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
     let mut session_token = None;
     let mut upload: Option<Upload> = None;
     let mut memory = mock_memory();
+    // While this connection's Plays run back to back: the generation they started at.
+    let mut playing: Option<u32> = None;
     loop {
         let mut prefix = [0u8; 4];
         stream.read_exact(&mut prefix).await?;
@@ -240,8 +304,17 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             stream.write_all(&proto::encode(&Response::error(ErrorKind::Unsupported, "unknown request"))?).await?;
             continue;
         };
-        if authed && !matches!(req, Request::Activity | Request::Agents | Request::Introduce { .. }) {
+        let passive = matches!(
+            req,
+            Request::Activity | Request::Agents | Request::Introduce { .. } | Request::Playback { action: proto::PlaybackAction::Query }
+        );
+        if authed && !passive {
             console.request(id, &req);
+        }
+        if !matches!(req, Request::Play { .. } | Request::Playback { .. } | Request::Activity | Request::Agents | Request::Introduce { .. })
+            && playing.take().is_some()
+        {
+            console.end_playing(id);
         }
         let resp = match req {
             Request::Hello { version, token: t } => {
@@ -351,9 +424,18 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             }
             Request::CloseApp => Response::App(console.app.lock().unwrap().running.take()),
             Request::AppStatus => Response::App(console.app.lock().unwrap().running.clone()),
+            Request::Play { steps, .. } => {
+                let generation = *playing.get_or_insert_with(|| {
+                    let mut playback = console.playback.lock().unwrap();
+                    playback.player = Some(id);
+                    playback.paused = false;
+                    playback.generation
+                });
+                if console.play(&steps, generation).await { Response::Ok } else { Response::Playback(proto::Playback::default()) }
+            }
+            Request::Playback { action } => Response::Playback(console.control(action)),
             Request::Press { .. }
             | Request::Hold { .. }
-            | Request::Play { .. }
             | Request::TypeText { .. }
             | Request::RecordStart { .. }
             | Request::HblOverride { .. }

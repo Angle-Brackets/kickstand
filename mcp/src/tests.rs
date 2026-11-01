@@ -507,3 +507,43 @@ async fn quitting_asks_first_and_forcing_doesnt() {
     let (_, how) = close_running(&client, Mode::Full, How::Force).await.unwrap().unwrap();
     assert_eq!(how, Closed::Terminated);
 }
+
+#[tokio::test]
+async fn macros_pause_resume_and_stop_from_another_connection() {
+    use proto::PlaybackAction::*;
+    use std::time::{Duration, Instant};
+    let (client, _root) = start("tok").await;
+    let client = Arc::new(Arc::try_unwrap(client).ok().unwrap().named("agent"));
+    let other = client.another();
+    assert!(!other.playback(Query).await.unwrap().playing);
+    assert!(!other.playback(Stop).await.unwrap().playing, "stopping nothing does nothing");
+
+    // Two chunks of 300 ms: the second is queued while the first plays.
+    let step = |ms| proto::InputStep { ms, ..Default::default() };
+    let player = client.clone();
+    let start = Instant::now();
+    let play = tokio::spawn(async move { player.play(vec![vec![step(300)], vec![step(300)]]).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let was = other.playback(Pause).await.unwrap();
+    assert!(was.playing && !was.paused);
+    assert_eq!(was.app.as_deref().map(|a| crate::client::split_introduction(a).0), Some("agent"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(other.playback(Query).await.unwrap().paused);
+    assert!(!play.is_finished(), "a paused macro waits");
+    assert!(other.playback(Resume).await.unwrap().paused);
+    let played = play.await.unwrap();
+    assert_eq!(played, crate::client::Played::Finished);
+    assert!(start.elapsed() >= Duration::from_millis(1000), "the pause didn't count: {:?}", start.elapsed());
+    assert!(!other.playback(Query).await.unwrap().playing, "the run ended with the release");
+
+    // Stopped part way: the queued chunk is refused and the call returns at once.
+    let player = client.clone();
+    let start = Instant::now();
+    let play = tokio::spawn(async move { player.play(vec![vec![step(2000)], vec![step(2000)], vec![step(2000)]]).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(other.playback(Stop).await.unwrap().playing);
+    assert_eq!(play.await.unwrap(), crate::client::Played::Stopped);
+    assert!(start.elapsed() < Duration::from_millis(1000), "{:?}", start.elapsed());
+    // The connection is still good, and the next macro plays.
+    assert_eq!(client.play(vec![vec![step(10)]]).await.unwrap(), crate::client::Played::Finished);
+}

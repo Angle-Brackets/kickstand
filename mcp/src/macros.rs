@@ -157,13 +157,80 @@ pub fn chunks(steps: Vec<InputStep>) -> Vec<Vec<InputStep>> {
     chunks
 }
 
-/// Plays macro `name`; returns how long it took.
-pub async fn play(client: &Client, name: &str) -> Result<(Macro, Duration)> {
+/// A macro played (or stopped part way).
+pub struct Replayed {
+    pub name: String,
+    pub data: Macro,
+    /// Pauses included.
+    pub took: Duration,
+    pub stopped: bool,
+}
+
+impl Replayed {
+    /// "played "x" (1m 05s in 65.2 s)", or "stopped "x" after 12.0 s (of 1m 05s)".
+    pub fn summary(&self) -> String {
+        let (name, length, took) = (&self.name, length(self.data.ms), self.took.as_secs_f64());
+        if self.stopped {
+            format!("stopped {name:?} after {took:.1} s (of {length}): everything was let go")
+        } else {
+            format!("played {name:?} ({length} in {took:.1} s)")
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "name": self.name, "ms": self.data.ms, "took_ms": self.took.as_millis() as u64, "stopped": self.stopped })
+    }
+}
+
+/// Plays macro `name` (holding `client`'s connection until it's done: see [`Client::playback`] to pause
+/// or stop it meanwhile).
+pub async fn play(client: &Client, name: &str) -> Result<Replayed> {
     let data = load(name)?;
     let steps = crate::client::parse_steps(&data.steps).with_context(|| format!("macro {name:?}'s steps"))?;
     let start = std::time::Instant::now();
-    client.play(chunks(steps)).await?;
-    Ok((data, start.elapsed()))
+    let played = client.play(chunks(steps)).await?;
+    Ok(Replayed { name: name.to_string(), data, took: start.elapsed(), stopped: played == crate::client::Played::Stopped })
+}
+
+/// Who plays a macro, from what its client introduced itself as.
+pub fn player(app: Option<&str>) -> String {
+    match app.map(crate::client::split_introduction) {
+        Some((crate::client::TERMINAL, _)) => "kickstand in a terminal".into(),
+        Some((crate::client::DESKTOP, _)) => "Kickstand's desktop app".into(),
+        Some((name, _)) => name.to_string(),
+        None => "a client that didn't say who it is".into(),
+    }
+}
+
+/// Whether [`Client::playback`] changed anything, from how things were before (`was`).
+pub fn acted(was: &proto::Playback, action: proto::PlaybackAction) -> bool {
+    use proto::PlaybackAction::*;
+    was.playing
+        && match action {
+            Query => false,
+            Pause => !was.paused,
+            Resume => was.paused,
+            Stop => true,
+        }
+}
+
+/// What [`Client::playback`] did, from how things were before (`was`).
+pub fn control_text(was: &proto::Playback, action: proto::PlaybackAction) -> String {
+    use proto::PlaybackAction::*;
+    if !was.playing {
+        return "no macro is playing".into();
+    }
+    let who = player(was.app.as_deref());
+    let pause_limit = proto::MAX_PAUSE_MS / 60_000;
+    match action {
+        Query if was.paused => format!("a macro is paused (played by {who})"),
+        Query => format!("a macro is playing (played by {who})"),
+        Pause if was.paused => format!("the macro was already paused (played by {who})"),
+        Pause => format!("paused the macro (played by {who}): nothing is held until it's resumed, and a pause over {pause_limit} minutes stops it"),
+        Resume if !was.paused => format!("the macro wasn't paused (played by {who})"),
+        Resume => format!("resumed the macro from where it was (played by {who})"),
+        Stop => format!("stopped the macro (played by {who}) and let go of everything"),
+    }
 }
 
 /// "1m 05s" or "12.3 s".

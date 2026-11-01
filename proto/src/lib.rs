@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -278,7 +278,34 @@ pub enum Request {
     /// if it's a folder (files over [`MAX_GREP_FILE`] skipped), at most `max` ([`MAX_GREP`]). Answers
     /// [`Response::Matches`].
     Grep { path: String, needle: String, ignore_case: bool, max: u32 },
+    /// (27) Pauses, resumes or stops the [`Request::Play`]s running on any connection (a macro another
+    /// client is replaying), or just asks. Pausing lets go of everything and stops the clock until resumed;
+    /// a pause longer than [`MAX_PAUSE_MS`] stops the macro. A stopped Play answers [`Response::Playback`]
+    /// at once instead of [`Response::Ok`], and so does every Play after it on that connection until
+    /// another request. Answers [`Response::Playback`] with how things were when it arrived.
+    Playback { action: PlaybackAction },
 }
+
+/// What [`Request::Playback`] does.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackAction {
+    Query,
+    Pause,
+    Resume,
+    Stop,
+}
+
+/// Whether a macro is playing ([`Response::Playback`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Playback {
+    pub playing: bool,
+    pub paused: bool,
+    /// What the playing client introduced itself as ([`Request::Introduce`]), if it did.
+    pub app: Option<String>,
+}
+
+/// Longest a macro stays paused before it's stopped (the playing client waits for its reply meanwhile).
+pub const MAX_PAUSE_MS: u32 = 10 * 60_000;
 
 /// Most steps in one [`Request::Play`].
 pub const MAX_PLAY_STEPS: usize = 256;
@@ -354,6 +381,7 @@ impl Request {
             | Request::TypeText { .. } => "pressing buttons",
             Request::RecordStart { .. } | Request::RecordStop | Request::RecordRead { .. } => "recording the controller",
             Request::Find { .. } | Request::Grep { .. } => "reading files",
+            Request::Playback { .. } => "controlling a macro",
             Request::KeepAwake { .. } => "keeping the screen on",
             Request::IndicatorPosition { .. } => "placing the indicator",
             Request::Screenshot | Request::ScreenshotRead { .. } => "looking at the screen",
@@ -558,6 +586,8 @@ pub enum Response {
     Found { entries: Vec<DirEntry>, truncated: bool },
     /// (26) Answer to [`Request::Grep`].
     Matches { matches: Vec<GrepMatch>, files: u32, truncated: bool },
+    /// (27) Answer to [`Request::Playback`], and to a [`Request::Play`] that was stopped.
+    Playback(Playback),
 }
 
 /// Answer to [`Request::Activity`].
@@ -920,6 +950,7 @@ mod tests {
                 Request::TypeText { .. } => 47,
                 Request::Find { .. } => 48,
                 Request::Grep { .. } => 49,
+                Request::Playback { .. } => 50,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -949,6 +980,7 @@ mod tests {
                 Response::Recorded { .. } => 22,
                 Response::Found { .. } => 23,
                 Response::Matches { .. } => 24,
+                Response::Playback(_) => 25,
             }
         }
         let s = || String::from("/a");
@@ -1003,6 +1035,7 @@ mod tests {
             Request::TypeText { text: s() },
             Request::Find { dir: s(), name: s(), max: 0 },
             Request::Grep { path: s(), needle: s(), ignore_case: false, max: 0 },
+            Request::Playback { action: PlaybackAction::Query },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -1034,6 +1067,7 @@ mod tests {
             Response::Recorded { inputs: Vec::new() },
             Response::Found { entries: Vec::new(), truncated: false },
             Response::Matches { matches: Vec::new(), files: 0, truncated: false },
+            Response::Playback(Playback::default()),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

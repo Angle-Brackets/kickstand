@@ -52,8 +52,13 @@ pub enum Cmd {
     /// Stop recording and throw it away.
     RecordCancel,
     PlayMacro { name: String },
+    /// Pause, resume or stop the macro playing, whoever plays it.
+    Playback(proto::PlaybackAction),
     DeleteMacro { name: String },
 }
+
+/// [`Model::busy`] while this app plays a macro.
+pub const PLAYING: &str = "Playing the macro";
 
 /// The longest recording the desktop app starts.
 pub const RECORD_MAX_S: u32 = 300;
@@ -107,6 +112,11 @@ pub struct Labels {
 impl Labels {
     pub fn get(&self, id: u32) -> Option<&str> {
         self.by_id.get(&id).map(|(_, label)| label.as_str())
+    }
+
+    /// The label of the agent that introduced itself as `intro`, if it has one yet.
+    pub fn of(&self, intro: &str) -> Option<&str> {
+        self.by_id.values().find(|(was, _)| was.as_deref() == Some(intro)).map(|(_, label)| label.as_str())
     }
 
     /// Labels the agents and events of `report` not seen yet (ids from older consoles, 0, aren't real).
@@ -185,6 +195,8 @@ pub struct Live {
     /// `None` from a console older than protocol 22 (both).
     pub activity: Option<ActivityReport>,
     pub agents: Option<AgentsReport>,
+    /// Whether a macro is playing (`None` from a console older than protocol 27).
+    pub playback: Option<proto::Playback>,
     pub at: Instant,
 }
 
@@ -294,7 +306,8 @@ impl Worker {
             let info = client.hello().await?;
             let activity = client.activity().await?;
             let agents = client.agents().await?;
-            anyhow::Ok(Live { info, activity, agents, at: Instant::now() })
+            let playback = if info.protocol >= 27 { Some(client.playback(proto::PlaybackAction::Query).await?) } else { None };
+            anyhow::Ok(Live { info, activity, agents, playback, at: Instant::now() })
         }
         .await;
         self.update(|m| {
@@ -450,10 +463,27 @@ impl Worker {
                 }
                 self.update(|m| m.recording = None);
             }
-            Cmd::PlayMacro { name } => self.button("Playing the macro", move |client| async move {
-                let (data, _) = crate::macros::play(&client, &name).await?;
-                Ok(format!("Played {name} ({})", crate::macros::length(data.ms)))
+            Cmd::PlayMacro { name } => self.button(PLAYING, move |client| async move {
+                // On a connection of its own, so watching (and Pause and Stop) carry on meanwhile.
+                let replayed = crate::macros::play(&client.another(), &name).await?;
+                Ok(capitalize(&replayed.summary()))
             }),
+            Cmd::Playback(action) => {
+                let Some(client) = self.client.clone() else { return };
+                let result = client.playback(action).await;
+                let now = client.playback(proto::PlaybackAction::Query).await.ok();
+                self.update(|m| {
+                    if let Reach::Connected(live) = &mut m.reach
+                        && now.is_some()
+                    {
+                        live.playback = now;
+                    }
+                    m.notice = Some(match result {
+                        Ok(was) => (capitalize(&crate::macros::control_text(&was, action)), false),
+                        Err(e) => (format!("{e:#}"), true),
+                    });
+                });
+            }
             Cmd::DeleteMacro { name } => {
                 let result = crate::macros::delete(&name);
                 self.update(|m| {

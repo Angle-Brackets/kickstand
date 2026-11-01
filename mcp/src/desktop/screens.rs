@@ -523,6 +523,7 @@ fn agent(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             theme::heading(ui, &heading, 46.0);
         });
     });
+    playback(app, ui, model);
 
     match (&model.reach, live) {
         (Reach::Unreachable(error), _) => {
@@ -818,6 +819,52 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     }
 }
 
+/// While a macro plays, from here or for an agent: who plays it, with Pause or Resume, and Stop. Returns
+/// whether one plays.
+fn playback(app: &mut Kickstand, ui: &mut Ui, model: &Model) -> bool {
+    let live = model.reach.live();
+    let state = live.and_then(|l| l.playback.as_ref()).filter(|p| p.playing);
+    // Until the next look at the console says so.
+    let ours = model.busy == Some(super::worker::PLAYING);
+    let (paused, app_name) = match state {
+        Some(p) => (p.paused, p.app.clone()),
+        None if ours => (false, Some(crate::client::DESKTOP.to_string())),
+        None => return false,
+    };
+    let here = app_name.as_deref().is_some_and(|a| crate::client::split_introduction(a).0 == crate::client::DESKTOP);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        theme::status(ui, if paused { "MACRO PAUSED" } else { "MACRO PLAYING" }, RED);
+        let who = match app_name.as_deref() {
+            _ if here => "Playing from this app.".to_string(),
+            Some(intro) if crate::client::split_introduction(intro).0 == crate::client::TERMINAL => "Playing from a terminal.".to_string(),
+            Some(intro) if let Some(label) = model.labels.of(intro) => format!("{label} is playing it."),
+            other => format!("{} is playing it.", capitalize(&crate::macros::player(other))),
+        };
+        let what = if paused {
+            format!("{who} Nothing is held until you resume it; after {} minutes paused it stops.", proto::MAX_PAUSE_MS / 60_000)
+        } else {
+            who
+        };
+        theme::text(ui, &what, Face::Regular, 16.0, body());
+        if live.is_some_and(|l| l.playback.is_none()) {
+            theme::text(ui, "Update Kickstand on the Switch to pause or stop it.", Face::Regular, 14.0, muted());
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            let (label, action) = if paused { ("Resume", proto::PlaybackAction::Resume) } else { ("Pause", proto::PlaybackAction::Pause) };
+            if theme::button(ui, label, Kind::Primary, false, true).clicked() {
+                app.send(Cmd::Playback(action));
+            }
+            if theme::link(ui, "Stop", 15.0, Face::Semi).on_hover_text("Stop it and let go of everything").clicked() {
+                app.send(Cmd::Playback(proto::PlaybackAction::Stop));
+            }
+        });
+    });
+    true
+}
+
 /// Recording and replaying macros: input the user plays once, for agents to replay.
 pub fn macros(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     page(ui, 44.0, |ui| {
@@ -847,6 +894,11 @@ fn record(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         17.0,
         body(),
     );
+    // Not recording over a macro (and the window doesn't scroll to make room for both).
+    if playback(app, ui, model) {
+        notice(ui, model);
+        return;
+    }
     let connected = model.reach.live().is_some();
     if let Some(started) = model.recording {
         let secs = started.elapsed().as_secs();
@@ -903,7 +955,8 @@ fn saved_macros(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         theme::text(ui, "None yet.", Face::Regular, 16.0, body());
         return;
     }
-    let ready = model.reach.live().is_some() && model.busy.is_none() && model.recording.is_none();
+    let playing = model.reach.live().and_then(|l| l.playback.as_ref()).is_some_and(|p| p.playing);
+    let ready = model.reach.live().is_some() && model.busy.is_none() && model.recording.is_none() && !playing;
     let mut action = None;
     egui::ScrollArea::vertical().id_salt("macros").auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
         for m in &model.macros {

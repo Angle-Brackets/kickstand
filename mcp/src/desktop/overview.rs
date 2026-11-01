@@ -42,6 +42,7 @@ const TOOLS: &[Area] = &[
             ("macros", "The macros you recorded"),
             ("record_macro", "Record you playing, to replay later"),
             ("play_macro", "Replay a macro, e.g. back to the same spot in a game"),
+            ("control_macro", "Pause, resume or stop the macro playing"),
             ("type_text", "Type on a virtual keyboard"),
         ],
     ),

@@ -8,7 +8,7 @@ description = "MCP server that drives the kickstand daemon on a Nintendo Switch"
 [dependencies]
 proto = { package = "kickstand-proto", path = "../proto" }
 rmcp = { version = "3.7", features = ["server", "transport-io", "macros", "elicitation"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "io-std", "time", "fs", "sync", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "io-std", "time", "fs", "sync", "process", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "1"

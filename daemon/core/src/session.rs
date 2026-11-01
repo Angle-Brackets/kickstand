@@ -11,7 +11,7 @@ use nx::fs::FileAccessor;
 use proto::path::{self, PathError};
 use proto::{
     App, AppEntry, Button, DaemonKind, ErrorKind, HekateTarget, InputStep, MAX_CHUNK, MAX_INPUT_MS, MAX_INPUT_STEPS, MAX_MEMORY_REGIONS, MemoryMap,
-    MemoryRegion, PROTOCOL_VERSION, STICK_MAX, Request,
+    MemoryRegion, PROTOCOL_VERSION, Playback, PlaybackAction, STICK_MAX, Request,
     Response, SysmoduleStatus, crc32,
 };
 use services::power::MAX_PAYLOAD_SIZE;
@@ -44,6 +44,8 @@ pub struct Session {
     who: core::net::Ipv4Addr,
     /// The token it connected with, for [`Request::Unpair`].
     token: Option<String>,
+    /// While its [`Request::Play`]s run back to back: the [`crate::playback`] generation they started at.
+    playing: Option<u32>,
 }
 
 /// Something to do once the current reply has been sent.
@@ -61,7 +63,7 @@ impl Session {
     /// [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
     pub fn new(kind: DaemonKind, slot: usize, who: core::net::Ipv4Addr) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None, token: None }
+        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None, token: None, playing: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -81,6 +83,8 @@ impl Session {
                 crate::activity::introduce(self.slot, app);
                 Response::Ok
             }
+            // Passive too: the desktop app asks every few seconds.
+            Request::Playback { action: PlaybackAction::Query } => Response::Playback(crate::playback::control(PlaybackAction::Query)),
             req => {
                 crate::activity::request(self.slot, &req);
                 // Any request means an agent is working: keep the screen on a while. (Not KeepAwake, which
@@ -94,6 +98,9 @@ impl Session {
     }
 
     fn handle_authed(&mut self, req: Request) -> Response {
+        if !matches!(req, Request::Play { .. } | Request::Playback { .. }) {
+            self.end_playing();
+        }
         match req {
             Request::Hello { .. } | Request::Pair { .. } | Request::Activity | Request::Agents | Request::Introduce { .. } => {
                 unreachable!("handled above")
@@ -125,7 +132,8 @@ impl Session {
             Request::Press { buttons, times, hold_ms } => press(&buttons, times, hold_ms),
             Request::Input { steps } => input(&steps),
             Request::Hold { step } => hold(&step),
-            Request::Play { steps, lease_ms } => play(&steps, lease_ms),
+            Request::Play { steps, lease_ms } => self.play(&steps, lease_ms),
+            Request::Playback { action } => Response::Playback(crate::playback::control(action)),
             Request::RecordStart { max_ms } => record_start(max_ms),
             Request::RecordStop => record_stop(),
             Request::RecordRead { from } => Response::Recorded { inputs: crate::record::read(from as usize, proto::MAX_RECORD_PAGE) },
@@ -462,6 +470,36 @@ impl Session {
         }
     }
 
+    fn end_playing(&mut self) {
+        if self.playing.take().is_some() {
+            crate::playback::end(self.slot);
+        }
+    }
+
+    fn play(&mut self, steps: &[InputStep], lease_ms: u32) -> Response {
+        let total: u64 = steps.iter().map(|s| u64::from(s.ms)).sum();
+        if steps.is_empty() || steps.len() > proto::MAX_PLAY_STEPS || total > u64::from(MAX_INPUT_MS) || lease_ms > proto::MAX_HOLD_LEASE_MS {
+            let msg = format!(
+                "need 1-{} steps lasting at most {MAX_INPUT_MS} ms in all, and a lease of at most {} ms",
+                proto::MAX_PLAY_STEPS,
+                proto::MAX_HOLD_LEASE_MS
+            );
+            return Response::error(ErrorKind::BadRequest, msg);
+        }
+        let slot = self.slot;
+        let generation = *self.playing.get_or_insert_with(|| crate::playback::begin(slot));
+        if crate::playback::stopped(generation) {
+            return Response::Playback(Playback::default());
+        }
+        let steps: Vec<services::hid::Step> = steps.iter().map(to_hid_step).collect();
+        let played = services::hid::play_held(&steps, || crate::playback::go(generation), || crate::uptime_ms() + u64::from(lease_ms));
+        match played {
+            Ok(true) => Response::Ok,
+            Ok(false) => Response::Playback(Playback::default()),
+            Err(rc) => system_error("playing input (hid:dbg)", rc),
+        }
+    }
+
     fn abort_upload(&mut self) {
         if self.upload.take().is_some() {
             let _ = sd::remove_if_exists(&self.staging);
@@ -471,6 +509,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.end_playing();
         self.abort_upload();
     }
 }
@@ -536,23 +575,6 @@ fn hold(step: &InputStep) -> Response {
     match services::hid::hold(&to_hid_step(step), until) {
         Ok(()) => Response::Ok,
         Err(rc) => system_error("holding buttons (hid:dbg)", rc),
-    }
-}
-
-fn play(steps: &[InputStep], lease_ms: u32) -> Response {
-    let total: u64 = steps.iter().map(|s| u64::from(s.ms)).sum();
-    if steps.is_empty() || steps.len() > proto::MAX_PLAY_STEPS || total > u64::from(MAX_INPUT_MS) || lease_ms > proto::MAX_HOLD_LEASE_MS {
-        let msg = format!(
-            "need 1-{} steps lasting at most {MAX_INPUT_MS} ms in all, and a lease of at most {} ms",
-            proto::MAX_PLAY_STEPS,
-            proto::MAX_HOLD_LEASE_MS
-        );
-        return Response::error(ErrorKind::BadRequest, msg);
-    }
-    let steps: Vec<services::hid::Step> = steps.iter().map(to_hid_step).collect();
-    match services::hid::play_held(&steps, || crate::uptime_ms() + u64::from(lease_ms)) {
-        Ok(()) => Response::Ok,
-        Err(rc) => system_error("playing input (hid:dbg)", rc),
     }
 }
 

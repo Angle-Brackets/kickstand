@@ -50,6 +50,9 @@ it, so look before you act and leave it how you found it.
 - **Macros** get you back to the same place in a game. `macros` lists what the user recorded, with notes
   saying where each one starts. `play_macro` from that place with `then: "still"`, then check where it ended
   and fix up with `press` or `input_until`: timing can drift over a long one.
+- The user can pause or stop a macro while it plays (in the desktop app or a terminal). If `play_macro` says
+  it was stopped and you didn't stop it, ask before playing it again. `control_macro` pauses, resumes or
+  stops one; `status` shows one playing.
 - To record a new one, the user has to be at the console: `record_macro` start, tell them exactly what to
   play and to put the controller down when done, then stop with a clear name and a note on where it starts.
 

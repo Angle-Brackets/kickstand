@@ -364,10 +364,25 @@ pub fn press(buttons: u64, times: u32, hold_ms: u32) -> Result<()> {
     })
 }
 
+/// What a replay should do now ([`play_held`] asks every [`CHECK_NS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Go {
+    Play,
+    /// Let go of everything and wait, the clock stopped.
+    Pause,
+    /// Let go of everything and return.
+    Stop,
+}
+
+/// How often a replay checks whether to pause or stop.
+const CHECK_NS: i64 = 10_000_000;
+
 /// Like [`play`], but on the held controller (attached and settled first if there's none), and then it
 /// keeps holding the last step until `lease_end()` (uptime ms, asked once the steps have played) instead
-/// of letting go: the next call carries on with nothing released in between.
-pub fn play_held(steps: &[Step], lease_end: impl FnOnce() -> u64) -> Result<()> {
+/// of letting go: the next call carries on with nothing released in between. `go` is asked between and
+/// during steps: paused, nothing is held and the step carries on where it was once resumed. Returns
+/// whether every step played (false: stopped, with everything let go).
+pub fn play_held(steps: &[Step], go: impl Fn() -> Go, lease_end: impl FnOnce() -> u64) -> Result<bool> {
     let mut held = PAD.lock();
     if held.is_none() {
         let pad = VirtualController::attach()?;
@@ -377,12 +392,52 @@ pub fn play_held(steps: &[Step], lease_end: impl FnOnce() -> u64) -> Result<()> 
     }
     let Some(held) = held.as_mut() else { unreachable!("attached above") };
     for step in steps {
+        if !wait_for_play(&mut held.pad, &go)? {
+            return stopped(held);
+        }
         apply(&mut held.pad, step)?;
-        let _ = svc::sleep_thread(i64::from(step.ms) * 1_000_000);
+        let mut left = i64::from(step.ms) * 1_000_000;
+        while left > 0 {
+            let _ = svc::sleep_thread(left.min(CHECK_NS));
+            left -= CHECK_NS;
+            if left > 0 && go() != Go::Play {
+                if !wait_for_play(&mut held.pad, &go)? {
+                    return stopped(held);
+                }
+                apply(&mut held.pad, step)?;
+            }
+        }
     }
     held.step = steps.last().copied().unwrap_or_default();
     held.until_ms = lease_end();
-    Ok(())
+    Ok(true)
+}
+
+/// Waits out a pause with nothing held; false if it's to stop instead.
+fn wait_for_play(pad: &mut VirtualController, go: &impl Fn() -> Go) -> Result<bool> {
+    let mut released = false;
+    loop {
+        match go() {
+            Go::Play => return Ok(true),
+            Go::Stop => return Ok(false),
+            Go::Pause => {
+                if !released {
+                    pad.set_touch(None)?;
+                    pad.set_state(&Step::default())?;
+                    released = true;
+                }
+                let _ = svc::sleep_thread(CHECK_NS);
+            }
+        }
+    }
+}
+
+/// Lets go of everything; [`expire_hold`] detaches the controller soon after.
+fn stopped(held: &mut Held) -> Result<bool> {
+    release(&mut held.pad);
+    held.step = Step::default();
+    held.until_ms = 0;
+    Ok(false)
 }
 
 /// How long a key stays down, and the gap after it: long enough for an app reading once a frame.

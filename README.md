@@ -16,7 +16,7 @@
 
 **Kickstand** lets AI agents and developers autonomously build, deploy, run, play, and debug homebrew on a real Nintendo Switch running Atmosphère — with nobody holding the console.
 
-> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 44 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
+> **Full Tool & CLI Reference:** See [**`TOOLS.md`**](TOOLS.md) for complete documentation of all 45 MCP tools, their parameters, and matching CLI commands (every CLI command takes `--json` for scripts).
 
 ---
 
@@ -26,7 +26,7 @@
 - **Full-Memory Homebrew Execution (`run_nro`):** Uploads and launches NROs via `nxlink`/NetLoader using Atmosphère's host-title override for full RAM access by default (no physical button hold required), or runs lightweight utilities in `applet` mode while streaming live `stdout`/`stderr`.
 - **Screen Vision & Visual Waiting (`screenshot`, `wait_screen`, `record_gif`):** Captures JPEG screenshots (downscaled or cropped to save context tokens, with optional 100px coordinate grids), records GIFs with contact sheets, and blocks until the screen changes, settles, or matches a visual template from an earlier frame.
 - **Controller & Touch Automation (`press`, `input`, `input_until`):** Simulates controller buttons, dual analog sticks, and touch gestures across timed steps, or holds/mashes/replays input while watching the screen until a visual condition triggers (e.g., *"hold right until the doorway appears"*).
-- **Macros (`record_macro`, `play_macro`, `type_text`):** Record controller input once while you play (from the desktop app's Macros page, `kickstand macro record`, or an agent asking you) and let agents replay it to get back to the same spot in a game before each test; type into the software keyboard on a virtual USB keyboard.
+- **Macros (`record_macro`, `play_macro`, `control_macro`, `type_text`):** Record controller input once while you play (from the desktop app's Macros page, `kickstand macro record`, or an agent asking you) and let agents replay it to get back to the same spot in a game before each test. Pause, resume or stop a macro while it plays, from the desktop app, `kickstand macro pause|resume|stop` (or Ctrl-C), or an agent. Type into the software keyboard on a virtual USB keyboard.
 - **Live Debugging & Crash Analysis (`threads`, `symbolize`, `crash_report`, `read_memory`, `write_memory`):** Symbolizes live output and thread backtraces with source file/line numbers via `addr2line`, decodes Atmosphère crash dumps and fatal error records, inspects process memory maps, and evaluates symbolic pointer chains (`main+0x1234`, `[sym+0x10]+0x8`).
 - **SD Card File & Log Management (`list_dir`, `read_file`, `tail_file`, `find`, `grep`, `upload`, `download`, `delete`):** Transfers files, tails growing log files, and finds or greps files on the console itself, on the SD card with interactive folder permission prompts and system path guardrails.
 - **Self-Updating Daemon & Recovery (`status`, `sysmodule`, `reboot`, `keep_awake`):** Hot-reloads the background sysmodule in ~11 seconds without rebooting, monitors system RAM/temp/battery, keeps the console awake during active sessions, and performs warm reboots into Hekate entries or USB Mass Storage (UMS).
@@ -153,13 +153,13 @@ Use the `projects` MCP tool (or `kickstand projects`) to inspect configured proj
 
 ## MCP Tools Overview
 
-Kickstand provides **44 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
+Kickstand provides **45 MCP tools** across 6 categories. For full parameter tables, syntax guides, and CLI equivalents, see [**`TOOLS.md`**](TOOLS.md).
 
 | Category | Tools | Highlights |
 | :--- | :--- | :--- |
 | **[Develop & Run](TOOLS.md#1-develop--run-homebrew)** | `test_build`, `projects`, `run_nro`, `nro_output`, `supervise`, `open_hbmenu`, `quit_app`, `force_quit_app`, `list_apps`, `launch_title` | Build, verify NRO/ELF match, deploy, launch with full memory via Atmosphère title takeover (or `applet` mode), stream stdout, and supervise until exit, crash, or hang. |
 | **[See (Screen Vision)](TOOLS.md#2-screen-vision--capture)** | `screenshot`, `wait_screen`, `record_gif` | Downscaled/cropped screenshots to save tokens, 100px coordinate overlays (`grid`), shot numbering, GIF contact sheets, and visual condition waiting. |
-| **[Play (Input)](TOOLS.md#3-controller-keyboard--macros)** | `press`, `input`, `input_until`, `type_text`, `macros`, `record_macro`, `play_macro` | Single presses, multi-step button/stick/touch sequences, closed-loop input (`input_until`) that holds, mashes, or replays actions until a screen region changes, settles, or matches an earlier shot, typing on a virtual keyboard, and macros: controller input you record once (in the desktop app or `kickstand macro record`) that agents replay to get back to the same place in a game. |
+| **[Play (Input)](TOOLS.md#3-controller-keyboard--macros)** | `press`, `input`, `input_until`, `type_text`, `macros`, `record_macro`, `play_macro`, `control_macro` | Single presses, multi-step button/stick/touch sequences, closed-loop input (`input_until`) that holds, mashes, or replays actions until a screen region changes, settles, or matches an earlier shot, typing on a virtual keyboard, and macros: controller input you record once (in the desktop app or `kickstand macro record`) that agents replay to get back to the same place in a game, and pause, resume or stop while it plays. |
 | **[Debug & Memory](TOOLS.md#4-debugging-crash-analysis--memory)** | `crash_reports`, `crash_report`, `symbolize`, `threads`, `memory_map`, `read_memory`, `write_memory` | Decoded Atmosphère crash reports, live `addr2line` symbolization, all-thread stack traces with source lines, and symbolic memory reads/writes (`main+0x1234`, `[sym+0x10]+0x8`). |
 | **[SD Card Files](TOOLS.md#5-sd-card-files--logs)** | `list_dir`, `stat`, `read_file`, `tail_file`, `find`, `grep`, `upload`, `download`, `delete`, `answer_access` | Browse, inspect, upload, download, delete, live-tail SD card logs (`tail_file` can block until a target string appears), and find files or grep them on the console without downloading. |
 | **[Console & Daemon](TOOLS.md#6-console--daemon-management)** | `status`, `ping`, `resources`, `keep_awake`, `sysmodule`, `hekate_entries`, `reboot` | Check running app/fatal/lock-screen state, monitor RAM/SoC temp/battery, hot-swap the sysmodule in ~11s, and warm-reboot into Hekate entries or UMS. |

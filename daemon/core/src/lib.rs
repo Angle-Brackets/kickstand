@@ -12,6 +12,7 @@ pub mod fatal;
 pub mod hbl;
 pub mod log;
 pub mod pairing;
+pub mod playback;
 pub mod record;
 pub mod sd;
 pub mod search;
