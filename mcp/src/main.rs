@@ -485,7 +485,9 @@ enum SysmoduleCmd {
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
     let command = cli.command.take().unwrap_or(if stdin_is_pipe() { Command::Serve { app: None } } else { Command::Desktop });
+    update::clean_up();
     if let Command::Desktop = command {
+        hide_own_console();
         return desktop::run();
     }
     let json = cli.json;
@@ -495,6 +497,21 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
         other => other,
+    }
+}
+
+/// Windows: opened from Explorer, the program gets a console window of its own, empty behind the desktop
+/// app's. It goes when this is the only process using it (a terminal's console is left alone).
+fn hide_own_console() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+        let mut processes = [0u32; 2];
+        // SAFETY: the buffer holds the 2 ids it's told about.
+        if unsafe { GetConsoleProcessList(processes.as_mut_ptr(), 2) } == 1 {
+            // SAFETY: nothing else in this process uses the console (the desktop app doesn't print).
+            unsafe { FreeConsole() };
+        }
     }
 }
 

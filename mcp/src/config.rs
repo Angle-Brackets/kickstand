@@ -14,6 +14,10 @@ pub fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir).join("kickstand"));
     }
+    if cfg!(windows) {
+        let appdata = std::env::var_os("APPDATA").filter(|d| !d.is_empty()).context("APPDATA is not set")?;
+        return Ok(PathBuf::from(appdata).join("kickstand"));
+    }
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home).join(".config/kickstand"))
 }

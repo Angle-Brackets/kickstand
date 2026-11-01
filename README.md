@@ -51,6 +51,22 @@ Kickstand is written 100% in Rust across three workspace components:
 
 ---
 
+## Download
+
+Get the [latest release](https://github.com/Angle-Brackets/kickstand/releases/latest):
+
+| Platform | File |
+| :--- | :--- |
+| Windows (x86_64) | `kickstand-<version>-x86_64-pc-windows-msvc.zip` (`kickstand.exe`) |
+| macOS (Apple Silicon) | `kickstand-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `kickstand-<version>-x86_64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `kickstand-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Switch | `kickstand.nro` (the hbmenu app) and `sys-kickstand.nsp` (the background service) |
+
+Every file is listed in the signed `SHA256SUMS`. Once installed, Kickstand updates itself (see [Updating](#updating)). Settings live in `~/.config/kickstand/` (`%APPDATA%\kickstand\` on Windows).
+
+---
+
 ## Building from Source
 
 ```sh
@@ -104,6 +120,7 @@ To add Kickstand to your OS application launcher (Linux & macOS):
 ```sh
 kickstand install            # Install desktop entry and icon (--remove to uninstall)
 ```
+On Windows, make a shortcut to `kickstand.exe` (opened without arguments, it starts the desktop app).
 
 ### Option B: Command Line Setup
 
@@ -208,6 +225,6 @@ Kickstand is designed so an AI agent can iterate autonomously without risking co
 ## Releasing
 
 1. `scripts/bump-version.sh 0.1.0` sets the PC and Switch versions (committing if they change) and tags `v0.1.0`.
-2. `git push && git push origin v0.1.0`. The `release` workflow builds the PC app (Linux x86_64, macOS arm64 and x86_64), the sysmodule and the NRO, signs `SHA256SUMS` with the `KICKSTAND_SIGNING_KEY` secret and publishes the release; installed copies offer it from then on.
+2. `git push && git push origin v0.1.0`. The `release` workflow builds the PC app (Linux x86_64, macOS arm64 and x86_64, Windows x86_64), the sysmodule and the NRO, signs `SHA256SUMS` with the `KICKSTAND_SIGNING_KEY` secret and publishes the release; installed copies offer it from then on.
 
 The key was made once with `cargo run -p kickstand-release -- keygen` (its public half is `PUBLIC_KEY` in `mcp/src/update.rs`) and stored with `gh secret set KICKSTAND_SIGNING_KEY < ~/.config/kickstand-release/signing.key`. Keep that file backed up: GitHub never shows a secret again, and without the key installed copies can't take new releases.

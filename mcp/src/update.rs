@@ -142,6 +142,8 @@ fn pc_target() -> Option<&'static str> {
         Some("aarch64-apple-darwin")
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         Some("x86_64-apple-darwin")
+    } else if cfg!(all(windows, target_arch = "x86_64")) {
+        Some("x86_64-pc-windows-msvc")
     } else {
         None
     }
@@ -161,7 +163,7 @@ pub fn update_pc(release: &Release) -> Result<PathBuf> {
     }
     let target = pc_target().ok_or_else(|| anyhow!("there's no ready-made Kickstand for this computer yet: build it from source"))?;
     let sums = release.sums()?;
-    let archive = release.file(&sums, &format!("kickstand-{}-{target}.tar.gz", release.version))?;
+    let archive = release.file(&sums, &format!("kickstand-{}-{target}.{ARCHIVE}", release.version))?;
     let binary = extract(&archive)?;
     // Not needed for the PC; if it fails, the new copy downloads them when it updates the Switch.
     let _ = cache_switch_files(release, &sums, &release.version.to_string());
@@ -173,6 +175,18 @@ pub fn update_pc(release: &Release) -> Result<PathBuf> {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+        }
+        // Windows can't replace a running program's file, but can rename it: out of the way it goes, and
+        // the new copy deletes it when it starts ([`clean_up`]).
+        if cfg!(windows) {
+            let old = old_copy(&exe);
+            let _ = std::fs::remove_file(&old);
+            std::fs::rename(&exe, &old)?;
+            if let Err(e) = std::fs::rename(&staged, &exe) {
+                let _ = std::fs::rename(&old, &exe);
+                return Err(e);
+            }
+            return Ok(());
         }
         // Atomic, and the running program keeps its old file open meanwhile.
         std::fs::rename(&staged, &exe)
@@ -187,23 +201,58 @@ pub fn update_pc(release: &Release) -> Result<PathBuf> {
     Ok(exe)
 }
 
-/// The `kickstand` program inside a release's `.tar.gz`.
+/// What a release's PC builds come in: `.zip` for Windows, `.tar.gz` for the rest.
+const ARCHIVE: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
+
+/// Where [`update_pc`] puts the program it replaced on Windows.
+fn old_copy(exe: &std::path::Path) -> PathBuf {
+    exe.with_extension("old.exe")
+}
+
+/// Deletes the copy an update replaced on Windows, once the new one runs (nothing elsewhere).
+pub fn clean_up() {
+    if cfg!(windows)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = std::fs::remove_file(old_copy(&exe));
+    }
+}
+
+/// The `kickstand` program inside a release's archive (`kickstand.exe` in a `.zip` on Windows).
 fn extract(archive: &[u8]) -> Result<Vec<u8>> {
+    if cfg!(windows) { from_zip(archive, "kickstand.exe") } else { from_tar_gz(archive, "kickstand") }
+}
+
+fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        if file.is_file() && file.enclosed_name().is_some_and(|p| p.file_name().is_some_and(|n| n == name)) {
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)?;
+            return Ok(data);
+        }
+    }
+    bail!("the release's archive has no {name} in it")
+}
+
+fn from_tar_gz(archive: &[u8], name: &str) -> Result<Vec<u8>> {
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
     for entry in tar.entries()? {
         let mut entry = entry?;
-        if entry.header().entry_type().is_file() && entry.path()?.file_name().is_some_and(|n| n == "kickstand") {
+        if entry.header().entry_type().is_file() && entry.path()?.file_name().is_some_and(|n| n == name) {
             let mut data = Vec::new();
             entry.read_to_end(&mut data)?;
             return Ok(data);
         }
     }
-    bail!("the release's archive has no kickstand program in it")
+    bail!("the release's archive has no {name} program in it")
 }
 
 fn cache_dir(version: &str) -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir),
+        None if cfg!(windows) => PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?),
         None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".cache"),
     };
     Ok(base.join("kickstand/switch").join(version))
@@ -276,6 +325,31 @@ pub async fn update_switch(client: &Client) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
+
+    #[test]
+    fn programs_come_out_of_both_kinds_of_archive() {
+        use std::io::Write;
+        // A Windows release's zip, as the workflow packs it: a folder with the program, licence and readme.
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("kickstand-0.1.0-x86_64-pc-windows-msvc/README.md", options).unwrap();
+        zip.write_all(b"readme").unwrap();
+        zip.start_file("kickstand-0.1.0-x86_64-pc-windows-msvc/kickstand.exe", options).unwrap();
+        zip.write_all(b"MZ program").unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+        assert_eq!(from_zip(&zip, "kickstand.exe").unwrap(), b"MZ program");
+        assert!(from_zip(&zip, "kickstand").is_err());
+
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(10);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "kickstand-0.1.0-x86_64-unknown-linux-gnu/kickstand", &b"ELF progra"[..]).unwrap();
+        let tar = tar.into_inner().unwrap().finish().unwrap();
+        assert_eq!(from_tar_gz(&tar, "kickstand").unwrap(), b"ELF progra");
+        assert_eq!(old_copy(std::path::Path::new("C:/Kickstand/kickstand.exe")), std::path::Path::new("C:/Kickstand/kickstand.old.exe"));
+    }
 
     #[test]
     fn reads_sha256sums() {

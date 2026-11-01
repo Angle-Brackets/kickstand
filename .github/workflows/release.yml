@@ -1,5 +1,5 @@
-# Releases a version when its tag (v1.2.3) is pushed: builds the PC app for each platform and the Switch's
-# sysmodule and NRO, writes SHA256SUMS over all of them, signs it with the KICKSTAND_SIGNING_KEY secret
+# Releases a version when its tag (v1.2.3) is pushed: builds the PC app for each platform (Linux, macOS,
+# Windows) and the Switch's sysmodule and NRO, writes SHA256SUMS over all of them, signs it with the KICKSTAND_SIGNING_KEY secret
 # (installed copies only take releases signed with it) and publishes the release.
 name: release
 
@@ -77,6 +77,7 @@ jobs:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { os: macos-14, target: aarch64-apple-darwin }
           - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -92,11 +93,21 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p kickstand --target ${{ matrix.target }}
       - name: Package
+        if: runner.os != 'Windows'
         run: |
           name="kickstand-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "pkg/$name" dist
           cp "target/${{ matrix.target }}/release/kickstand" LICENSE README.md "pkg/$name/"
           tar -C pkg -czf "dist/$name.tar.gz" "$name"
+      # A .zip of kickstand.exe for Windows (the updater looks for kickstand.exe in it).
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "kickstand-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "pkg/$name", dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/kickstand.exe", LICENSE, README.md "pkg/$name/"
+          Compress-Archive -Path "pkg/$name" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: pc-${{ matrix.target }}
