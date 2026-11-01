@@ -299,7 +299,8 @@ impl Kickstand {
                         ui.add_space(18.0);
                         let text = format!("UPDATE TO {}", release.version);
                         if crate::update::from_source() {
-                            theme::label(ui, &format!("{} IS OUT", release.version), false, 12.0, ink()).on_hover_text("This copy was built from source: update it with git pull and cargo build");
+                            theme::label(ui, &format!("{} IS OUT · BUILT FROM SOURCE: GIT PULL", release.version), false, 12.0, ink())
+                                .on_hover_text("This copy was built from source, so it doesn't update itself: git pull and cargo build --release, then open it again");
                         } else if theme::link(ui, &text, 12.0, Face::Mono).clicked() && model.busy.is_none() {
                             self.ask(Confirm::UpdatePc);
                         }
