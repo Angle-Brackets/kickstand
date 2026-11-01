@@ -328,7 +328,8 @@ pub enum How {
 pub enum Closed {
     /// It exited when HOME was pressed (the Album).
     Exited,
-    /// It exited when the home menu asked it to.
+    /// It ended after Close software on the home menu: it was asked to exit, and the system ends a program
+    /// that doesn't hold off exiting (libnx's appletLockExit) straight away, hung or not (seen on hardware).
     Quit,
     /// It was terminated (an application).
     Terminated,
@@ -354,6 +355,8 @@ pub async fn close(client: &Client, mode: Mode, app: &App, how: How) -> Result<C
         return Ok(Closed::Exited);
     }
     if how != How::Force {
+        // Seen on hardware: hbmenu, PaperBoat (SDL) and a hung NRO all end within ~3 s, with no error, and
+        // hbloader ends the process rather than going back to hbmenu.
         // HOME shows the home menu with the running software's tile selected (it's the first tile, and HOME
         // on the home menu selects the first tile); X there is Close software, and A confirms.
         let steps = vec![step(&[Button::Home], 100), step(&[], 1500), step(&[Button::X], 100), step(&[], 900), step(&[Button::A], 100)];
@@ -389,7 +392,7 @@ pub async fn close_running(client: &Client, mode: Mode, how: How) -> Result<Opti
 pub fn describe_closed(how: Closed) -> &'static str {
     match how {
         Closed::Exited => "it exited on HOME",
-        Closed::Quit => "it quit when the home menu asked",
+        Closed::Quit => "closed from the home menu: it was asked to exit, so it could save first",
         Closed::Terminated => "force-quit: terminated at once",
         Closed::TerminatedAfterQuit => "it didn't quit when the home menu asked, so it was terminated",
     }
@@ -814,6 +817,8 @@ mod tests {
             sock.flush().await.unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if reset {
+                // A zero linger resets the connection on drop, without blocking (what the deprecation warns of).
+                #[allow(deprecated)]
                 sock.set_linger(Some(std::time::Duration::ZERO)).unwrap();
             }
             drop(sock);

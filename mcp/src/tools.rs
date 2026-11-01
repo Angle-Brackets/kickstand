@@ -1129,7 +1129,7 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Quit homebrew or a game the way a person does: for the application (a game, or an NRO or hbmenu with full memory), HOME, then Close software from the home menu, so the program is asked to exit and can save and flush its output first (no error message). Waits up to 12 s for it to end; if it doesn't (hung), says so: then force_quit_app. The applet (hbmenu or an NRO in the Album) is closed with HOME. By default the applet if hbloader runs there, otherwise the application; target picks one. Only quit a game the user isn't playing.")]
+    #[tool(description = "Quit homebrew or a game the way a person does: for the application (a game, or an NRO or hbmenu with full memory), HOME, then Close software from the home menu, so the program is asked to exit and can save and flush its output first (no error message). A hung program is ended this way too (no error). Waits up to 12 s for it to end; if it doesn't (say the home menu couldn't be reached), says so: then force_quit_app. The applet (hbmenu or an NRO in the Album) is closed with HOME. By default the applet if hbloader runs there, otherwise the application; target picks one. Only quit a game the user isn't playing.")]
     async fn quit_app(&self, Parameters(args): Parameters<QuitAppArgs>) -> CallToolResult {
         let result = async {
             let applet = match args.target.as_deref() {
@@ -1148,7 +1148,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Force-quit the application (a game, or an NRO or hbmenu with full memory): terminate it at once, whatever state it's in, like kill -9. It can't save or flush anything, and the home menu shows an error that the software closed. For when quit_app didn't work (a hang, a stuck screen); prefer quit_app. Never for the applet (killing the Album crashes the home menu): quit_app closes it.")]
+    #[tool(description = "Force-quit the application (a game, or an NRO or hbmenu with full memory): terminate it at once, whatever state it's in, like kill -9. It can't save or flush anything, and the home menu shows an error that the software closed. Only for when quit_app didn't work (it says so): quit_app ends hung programs too, without the error. Never for the applet (killing the Album crashes the home menu): quit_app closes it.")]
     async fn force_quit_app(&self) -> CallToolResult {
         let result = async {
             anyhow::Ok(match crate::launch::close_running(&self.client, crate::launch::Mode::Full, crate::launch::How::Force).await? {

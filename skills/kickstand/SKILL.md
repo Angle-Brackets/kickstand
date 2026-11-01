@@ -27,7 +27,8 @@ it, so look before you act and leave it how you found it.
 - Games and ports need **full memory**, which is the default. `mode: "applet"` is only for small tools; never
   run a game in it.
 - To stop a program, `quit_app` (it's asked to exit, as from the home menu, so it can save and flush its
-  output). `force_quit_app` kills it at once: only for a hang, when `quit_app` says it didn't exit.
+  output). It ends hung programs too.
+  `force_quit_app` kills it at once: only when `quit_app` says it didn't work.
 - On a crash: `crash_reports`, then `crash_report` with the `elf`, which turns offsets into function names and
   source lines. For a hang: `threads` with the `elf` gives every thread's stack.
 - Logs on the SD card: `tail_file` (it can follow and stop at a line), `grep` and `find`. Both run on the

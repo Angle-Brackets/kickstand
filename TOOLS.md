@@ -110,7 +110,7 @@ Open the Homebrew Menu (`hbmenu`).
 
 ### `quit_app`
 Quit the running homebrew or game the way a person does, so it can save and flush its output first.
-- **`"application"`** (a game, or hbmenu or an NRO with full memory): presses `HOME`, then **Close software** (`X`, then `A`) on the home menu. The system asks the program to exit: an SDL port gets `SDL_QUIT`, and libnx's `appletMainLoop()` returns `false`. No error message is shown. Waits up to 12 s for it to end; if it's still running (hung), says so and suggests [`force_quit_app`](#force_quit_app).
+- **`"application"`** (a game, or hbmenu or an NRO with full memory): presses `HOME`, then **Close software** (`X`, then `A`) on the home menu. The system asks the program to exit: an SDL port gets `SDL_QUIT`, and libnx's `appletMainLoop()` returns `false`. No error message is shown. A hung program is ended this way too, without the error (the system ends a program that isn't holding off its exit). Waits up to 12 s for it to end; if it's still running (say the home menu couldn't be reached), says so and suggests [`force_quit_app`](#force_quit_app). Tested on hardware with hbmenu, PaperBoat and a hung NRO.
 - **`"applet"`:** closes the Album with `HOME` (it's never terminated: that would crash the home menu).
 
 When `run_nro`, `test_build`, `open_hbmenu` or `launch_title` replace what's running, they quit it the same way first, and only terminate it if it doesn't exit.
@@ -122,7 +122,7 @@ When `run_nro`, `test_build`, `open_hbmenu` or `launch_title` replace what's run
 ---
 
 ### `force_quit_app`
-Terminate the running application at once, whatever state it's in (like `kill -9`). It can't save or flush anything, and the home menu reports that the software closed because of an error. For a hang or a stuck screen, when [`quit_app`](#quit_app) didn't work. Never used on the Album. No parameters.
+Terminate the running application at once, whatever state it's in (like `kill -9`). It can't save or flush anything, and the home menu reports that the software closed because of an error. Only for when [`quit_app`](#quit_app) didn't work, which it says. Never used on the Album. No parameters.
 
 ---
 
