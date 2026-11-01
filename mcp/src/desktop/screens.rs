@@ -648,11 +648,20 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
     // Agents connected now, by the app they're in.
     let running = |which: App| -> usize {
         let Some(report) = model.reach.live().and_then(|live| live.agents.as_ref()) else { return 0 };
-        report
+        // One per agent (session), not per connection: an agent may have two open.
+        let mut sessions: Vec<&str> = report
             .agents
             .iter()
-            .filter(|a| !a.you && a.app.as_deref().and_then(|name| App::identify(name, |app| super::worker::linked(&model.links, app))) == Some(which))
-            .count()
+            .filter(|a| !a.you)
+            .filter_map(|a| a.app.as_deref())
+            .filter(|intro| {
+                let name = crate::client::split_introduction(intro).0;
+                App::identify(name, |app| super::worker::linked(&model.links, app)) == Some(which)
+            })
+            .collect();
+        sessions.sort_unstable();
+        sessions.dedup();
+        sessions.len()
     };
     if linked.is_empty() {
         ui.add_space(14.0);

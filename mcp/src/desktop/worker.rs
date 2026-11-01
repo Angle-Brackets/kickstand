@@ -93,10 +93,14 @@ pub struct Model {
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
+/// One agent is one MCP server process (its session tag), however often it reconnects; a terminal command
+/// is "Terminal", unnumbered.
 #[derive(Default)]
 pub struct Labels {
-    /// By connection id: the app name it was given for, and its label.
+    /// By connection id: what it introduced itself as, and its label.
     by_id: HashMap<u32, (Option<String>, String)>,
+    /// By app name and session tag: the label given to that agent.
+    by_session: HashMap<(String, String), String>,
     counts: HashMap<String, u32>,
 }
 
@@ -110,23 +114,47 @@ impl Labels {
         let mut seen: Vec<(u32, Option<&str>)> = report.agents.iter().filter(|a| !a.you).map(|a| (a.id, a.app.as_deref())).collect();
         seen.extend(report.recent.iter().map(|e| (e.id, e.app.as_deref())));
         seen.sort_by_key(|(id, _)| *id);
-        for (id, app) in seen {
+        for (id, intro) in seen {
             // The same id for another app: the console restarted and counts from 1 again.
-            if id == 0 || self.by_id.get(&id).is_some_and(|(was, _)| was.as_deref() == app) {
+            if id == 0 || self.by_id.get(&id).is_some_and(|(was, _)| was.as_deref() == intro) {
                 continue;
             }
-            let base = match app {
-                Some(name) => match App::identify(name, |app| linked(links, app)) {
-                    Some(app) if app.maker() == link::Maker::Custom => format!("{} Agent", app.name()),
-                    Some(app) => format!("{} Agent", app.maker().name()),
-                    None => format!("{} Agent", capitalize(name)),
-                },
-                None => "Agent".to_string(),
+            let (name, session) = match intro.map(crate::client::split_introduction) {
+                Some((name, session)) => (Some(name), session),
+                None => (None, None),
             };
-            let count = self.counts.entry(base.clone()).or_default();
-            *count += 1;
-            self.by_id.insert(id, (app.map(String::from), format!("{base} #{count}")));
+            let label = match (name, session) {
+                (Some(crate::client::TERMINAL), _) => "Terminal".to_string(),
+                (Some(crate::client::DESKTOP), _) => "Desktop app".to_string(),
+                (Some(name), Some(session)) => match self.by_session.get(&(name.to_string(), session.to_string())) {
+                    Some(label) => label.clone(),
+                    None => {
+                        let label = self.next(base(name, links));
+                        self.by_session.insert((name.to_string(), session.to_string()), label.clone());
+                        label
+                    }
+                },
+                (Some(name), None) => self.next(base(name, links)),
+                (None, _) => self.next("Agent".to_string()),
+            };
+            self.by_id.insert(id, (intro.map(String::from), label));
         }
+    }
+
+    /// "<base> #n", the next number for `base`.
+    fn next(&mut self, base: String) -> String {
+        let count = self.counts.entry(base.clone()).or_default();
+        *count += 1;
+        format!("{base} #{count}")
+    }
+}
+
+/// "Claude Agent" for an agent in `name` (an MCP client's name, or a `link` slug).
+fn base(name: &str, links: &[(App, link::State)]) -> String {
+    match App::identify(name, |app| linked(links, app)) {
+        Some(app) if app.maker() == link::Maker::Custom => format!("{} Agent", app.name()),
+        Some(app) => format!("{} Agent", app.maker().name()),
+        None => format!("{} Agent", capitalize(name)),
     }
 }
 
@@ -508,7 +536,7 @@ impl Worker {
 
 fn connect_to(host: &str) -> Option<Arc<Client>> {
     let token = config::load_token().ok()?;
-    Some(Arc::new(Client::new(format!("{host}:{}", proto::DEFAULT_PORT), token)))
+    Some(Arc::new(Client::new(format!("{host}:{}", proto::DEFAULT_PORT), token).named(crate::client::DESKTOP)))
 }
 
 pub fn capitalize(text: &str) -> String {
@@ -528,4 +556,36 @@ fn open_file(path: &std::path::Path) {
         std::process::Command::new("xdg-open")
     };
     let _ = command.arg(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: u32, app: &str) -> proto::AgentInfo {
+        proto::AgentInfo {
+            id,
+            ip: [192, 168, 1, 9],
+            you: false,
+            app: Some(app.into()),
+            connected_ms: 0,
+            requests: 1,
+            doing: "checking on the console".into(),
+            idle_ms: 0,
+            change: None,
+        }
+    }
+
+    #[test]
+    fn one_agent_keeps_its_label_across_reconnections() {
+        let mut labels = Labels::default();
+        let report = |agents| AgentsReport { agents, recent: Vec::new() };
+        labels.assign(&report(vec![agent(1, "code\u{1f}aaaaaa"), agent(2, "kickstand-cli\u{1f}cccccc")]), &[]);
+        // The first agent reconnected (new connection id, same session); a second session started.
+        labels.assign(&report(vec![agent(5, "code\u{1f}aaaaaa"), agent(6, "code\u{1f}bbbbbb"), agent(7, "kickstand-cli\u{1f}dddddd")]), &[]);
+        assert_eq!(labels.get(1), labels.get(5));
+        assert!(labels.get(5).unwrap().ends_with("Agent #1"), "{:?}", labels.get(5));
+        assert!(labels.get(6).unwrap().ends_with("Agent #2"), "{:?}", labels.get(6));
+        assert_eq!((labels.get(2), labels.get(7)), (Some("Terminal"), Some("Terminal")));
+    }
 }

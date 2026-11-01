@@ -462,12 +462,14 @@ async fn agents_name_their_app() {
     late.set_app("antigravity-client").await;
     late.ping().await.unwrap();
     let report = Client::new(agent.addr().to_string(), "tok".into()).agents().await.unwrap().unwrap();
-    let apps: Vec<_> = report.agents.iter().filter(|a| !a.you).map(|a| a.app.as_deref()).collect();
-    assert_eq!(apps, [Some("code"), Some("code"), Some("antigravity-client")]);
+    let apps: Vec<_> = report.agents.iter().filter(|a| !a.you).map(|a| a.app.as_deref().map(crate::client::split_introduction)).collect();
+    let tag = Some(crate::client::session_tag());
+    assert_eq!(apps, [Some(("code", tag)), Some(("code", tag)), Some(("antigravity-client", tag))]);
     let ids: Vec<u32> = report.agents.iter().map(|a| a.id).collect();
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
     let event = &report.recent[0];
-    assert_eq!((event.what.as_str(), event.app.as_deref(), event.id), ("pressing buttons", Some("code"), report.agents[1].id));
+    let app = event.app.as_deref().map(|text| crate::client::split_introduction(text).0);
+    assert_eq!((event.what.as_str(), app, event.id), ("pressing buttons", Some("code"), report.agents[1].id));
 }
 
 /// A mock with an application running (hbloader with full memory); `hung`: it ignores Close software.

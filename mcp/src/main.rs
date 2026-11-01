@@ -660,7 +660,9 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
     }
 
     let host = config::host(cli.host)?;
-    let client = Arc::new(Client::new(format!("{host}:{}", cli.port), config::load_token()?));
+    let client = Client::new(format!("{host}:{}", cli.port), config::load_token()?);
+    // A person's command (or a script's), not an agent: the MCP server names itself below.
+    let client = Arc::new(if matches!(command, Command::Serve { .. }) { client } else { client.named(client::TERMINAL) });
 
     match command {
         Command::Desktop => unreachable!("opened before the runtime starts"),
@@ -1210,7 +1212,7 @@ async fn update(out: &out::Out, host: Option<String>, port: u16, check: bool, sw
         out.done(json!({ "pc": pc, "switch": null }), String::new);
         return Ok(());
     };
-    let client = Client::new(format!("{host}:{port}"), config::load_token()?);
+    let client = Client::new(format!("{host}:{port}"), config::load_token()?).named(client::TERMINAL);
     let info = client.hello().await.with_context(|| format!("reaching the Switch at {host}"))?;
     let behind = update::switch_behind(&info.version);
     if !behind {

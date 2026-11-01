@@ -45,6 +45,47 @@ pub struct UploadStats {
     pub elapsed: Duration,
 }
 
+/// Who a connection is for, as [`Request::Introduce`] tells the console: the AI app's name, then a tag for
+/// this process ([`session_tag`]), so the desktop app can tell one agent's reconnections from a new agent.
+/// The console keeps the text as it is ([`proto::MAX_APP_NAME`] bytes at most).
+const SESSION_SEP: char = '\u{1f}';
+/// What `kickstand <command>` in a terminal (or a script) introduces itself as.
+pub const TERMINAL: &str = "kickstand-cli";
+/// What Kickstand's desktop app introduces itself as.
+pub const DESKTOP: &str = "kickstand-desktop";
+
+/// This process's tag: the same for every connection it makes, different for every process.
+pub fn session_tag() -> &'static str {
+    static TAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        format!("{:06x}", (std::process::id() ^ nanos.rotate_left(13)) & 0xFF_FFFF)
+    })
+}
+
+/// `app` with this process's tag, cut to fit.
+pub fn introduction(app: &str) -> String {
+    let tag = session_tag();
+    let mut end = app.len().min(proto::MAX_APP_NAME - tag.len() - SESSION_SEP.len_utf8());
+    while !app.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{SESSION_SEP}{tag}", &app[..end])
+}
+
+/// An introduction's app name and session tag (none from Kickstand before session tags).
+pub fn split_introduction(text: &str) -> (&str, Option<&str>) {
+    match text.split_once(SESSION_SEP) {
+        Some((app, tag)) => (app, Some(tag)),
+        None => (text, None),
+    }
+}
+
+/// Whether an introduction is a person's (a terminal command, or the desktop app), not an agent's.
+pub fn is_person(text: &str) -> bool {
+    matches!(split_introduction(text).0, TERMINAL | DESKTOP)
+}
+
 /// What an unreachable console most likely means.
 const ASLEEP: &str = "the console doesn't answer on the network: it's most likely asleep (it can't be woken remotely), \
     turned off, or off Wi-Fi. Ask the user to wake and unlock it rather than retrying in a loop";
@@ -66,6 +107,12 @@ impl Client {
         other
     }
 
+    /// This client, introducing itself as `app` on every connection (for clients named before they connect).
+    pub fn named(self, app: &str) -> Self {
+        *self.app.lock().unwrap() = Some(app.to_string());
+        self
+    }
+
     pub fn app(&self) -> Option<String> {
         self.app.lock().unwrap().clone()
     }
@@ -78,7 +125,7 @@ impl Client {
         }
         if let Some(conn) = self.conn.lock().await.as_mut() {
             // An older console doesn't know the request; nothing to do about it.
-            round_trip(conn, &Request::Introduce { app: app.to_string() }).await.ok();
+            round_trip(conn, &Request::Introduce { app: introduction(app) }).await.ok();
         }
     }
 
@@ -710,7 +757,7 @@ impl Client {
     async fn connect(&self) -> Result<Conn> {
         let mut conn = self.connect_with(Request::Hello { version: PROTOCOL_VERSION, token: self.token.clone() }).await?;
         if let Some(app) = self.app() {
-            round_trip(&mut conn, &Request::Introduce { app }).await.ok();
+            round_trip(&mut conn, &Request::Introduce { app: introduction(&app) }).await.ok();
         }
         Ok(conn)
     }
@@ -979,10 +1026,12 @@ pub fn other_agents(agents: &[proto::AgentInfo], changing: bool) -> Vec<String> 
         .iter()
         .filter(|a| !a.you)
         .filter_map(|a| {
-            let app = a.app.as_deref().map(|name| crate::link::App::identify(name, |_| false).map_or(name, |app| app.name()));
+            let name = a.app.as_deref().map(|text| split_introduction(text).0);
             let place = if Some(a.ip) == mine { "on this PC".to_string() } else { format!("at {}", std::net::Ipv4Addr::from(a.ip)) };
-            let who = match app {
-                Some(app) => format!("an agent in {app} {place}"),
+            let who = match name {
+                Some(TERMINAL) => format!("someone using kickstand in a terminal {place}"),
+                Some(DESKTOP) => format!("someone in Kickstand's desktop app {place}"),
+                Some(name) => format!("an agent in {} {place}", crate::link::App::identify(name, |_| false).map_or(name, |app| app.name())),
                 None => format!("an agent {place}"),
             };
             match &a.change {

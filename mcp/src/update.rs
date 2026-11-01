@@ -254,7 +254,7 @@ pub async fn switch_busy(client: &Client) -> Result<Option<String>> {
         return Ok(Some("software is running on the Switch: close it first".into()));
     }
     if let Some(report) = client.agents().await?
-        && report.agents.iter().any(|a| !a.you && a.app.is_some() && a.idle_ms < AGENT_RECENT_MS)
+        && report.agents.iter().any(|a| !a.you && a.app.as_deref().is_some_and(|app| !crate::client::is_person(app)) && a.idle_ms < AGENT_RECENT_MS)
     {
         return Ok(Some("an agent is using the Switch: try again once it's done".into()));
     }
