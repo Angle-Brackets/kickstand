@@ -91,11 +91,16 @@ fn stop_thread() {
 }
 
 fn run(max_ms: u32) {
+    // Exactly what Atmosphère's pm asks hid for (libstratosphere `hid_api.cpp`: NpadStandard | SystemExt,
+    // players 1-8 and handheld; facts, no code). Every sysmodule shares one applet resource user id, so this
+    // replaces pm's settings: without SystemExt, pm reads no buttons, and holding R to open hbmenu through a
+    // game stops working until a reboot.
     let styles = hid::NpadStyleTag::FullKey()
         | hid::NpadStyleTag::Handheld()
         | hid::NpadStyleTag::JoyDual()
         | hid::NpadStyleTag::JoyLeft()
-        | hid::NpadStyleTag::JoyRight();
+        | hid::NpadStyleTag::JoyRight()
+        | hid::NpadStyleTag::SystemExt();
     let ctx = match input::Context::new(styles, 8) {
         Ok(ctx) => ctx,
         Err(rc) => {
