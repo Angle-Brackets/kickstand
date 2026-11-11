@@ -477,11 +477,11 @@ Upload a file from the PC to the Switch's SD card over Wi-Fi. Streamed from disk
 ---
 
 ### `usb_upload`
-Upload a file from the PC to the Switch's SD card over USB, streaming directly from disk without loading the file into memory. Preferred over [`upload`](#upload) for large files like ROMs, ISOs, or `.o2r` archives whenever the Switch is connected via USB ([`status`](#status) reports when USB is connected).
-- **Mounted SD card** (Hekate USB Mass Storage, an SD card reader, or `$KICKSTAND_USB_MOUNT`): streams in 1 MiB chunks to `/kickstand/staging/` on the card and atomically renames the file into place.
-- **Horizon OS USB MTP** (`/switch/haze.nro`, shipped with Atmosphère): when the Switch is plugged into USB (`057e:2000` or `057e:201d`), launches `/switch/haze.nro` with **full memory** (`Mode::Full`, never applet mode) if it isn't already running, waits for the desktop's GVFS MTP mount (`gio mount` fallback if auto-mount is off), streams the file over USB bulk endpoints via `gio copy` (~15–20 MB/s), verifies the uploaded size on the SD card through the daemon, and presses `+` to exit `haze.nro` cleanly back to full-memory `hbmenu`.
-- Over MTP, a file already at `remote_path` is deleted before the copy (MTP can't overwrite one), so if the transfer fails the old copy is gone too. Through a mounted SD card the old file is only replaced once the new one is complete.
-- Enforces the same path and folder permission rules as [`upload`](#upload).
+Upload a file from the PC to the Switch's SD card over a USB cable, streamed from disk. Preferred over [`upload`](#upload) for large files like ROMs, ISOs or `.o2r` archives whenever [`status`](#status) reports a USB cable.
+- **Kickstand's own USB interface:** for the transfer, the sysmodule presents a USB device on the console's USB-C port (`057e:3000`, named "Kickstand"), and the PC talks Kickstand's usual protocol over it with [nusb](https://github.com/kevinmehall/nusb), the same on Linux, macOS and Windows. It's the same upload as over Wi-Fi (staged, CRC-32 checked before it replaces the old file), so nothing is opened or closed on the console and a running game keeps running. The interface goes away when the upload ends (or after a minute without requests); while it's up, other USB homebrew (haze, DBI, Goldleaf) can't use the port. The cable has to go straight to the console, not through the dock.
+- **A mounted SD card** (hekate's USB mass storage, a card reader, or `$KICKSTAND_USB_MOUNT`): copied straight to the card, staged in `/kickstand/staging/` and renamed into place.
+- One-time setup on the PC: on Linux a udev rule, so your user may open the device; on Windows the WinUSB driver for it. The error says exactly what to do; see [USB transfers](README.md#usb-transfers).
+- Same path and folder permission rules as [`upload`](#upload).
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -651,7 +651,7 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | | `kickstand cat <path>` | Print a file from the SD card. |
 | | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
 | | `kickstand put [--usb] <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified over Wi-Fi, or `--usb` over USB). |
-| | `kickstand usb-put <local> <remote>` | Upload a file from the PC to the SD card over USB (`haze.nro` MTP or mounted SD card; ~15–20 MB/s for large files). |
+| | `kickstand usb-put <local> <remote>` | Upload a file from the PC to the SD card over a USB cable (Kickstand's own USB interface, or a mounted SD card), for large files. |
 | | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
 | | `kickstand find <dir> [name] [--max <n>]` | Find files and folders by name, searched on the console. |
 | | `kickstand grep [-i] <text> <path> [--max <n>]` | Print matching lines of a file or of every file under a folder, searched on the console. |

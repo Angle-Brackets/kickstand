@@ -3,6 +3,7 @@
 //! following along, and a few CLI commands for using the daemon by hand.
 
 mod access;
+mod audio;
 mod capture;
 mod client;
 mod config;
@@ -13,12 +14,15 @@ mod launch;
 mod link;
 mod macros;
 mod memory;
+mod modalities;
 mod mock;
 mod nxlink;
 mod out;
 mod pairing;
+mod profile;
 mod project;
 mod questions;
+mod reload;
 mod symbolize;
 mod tail;
 mod tools;
@@ -118,12 +122,13 @@ enum Command {
     Put {
         local: PathBuf,
         path: String,
-        /// Transfer over USB (Atmosphère's haze.nro MTP or a mounted SD card) instead of Wi-Fi.
+        /// Copy over a USB cable (Kickstand's own USB interface, or a mounted SD card) instead of Wi-Fi.
         #[arg(long)]
         usb: bool,
     },
-    /// Upload a file to the SD card over USB (Atmosphère's haze.nro MTP or a mounted SD card; ~15-20 MB/s
-    /// for large files like ROMs or .o2r archives).
+    /// Upload a file to the SD card over a USB cable, for large files like ROMs or .o2r archives: through
+    /// Kickstand's own USB interface (whatever runs on the console keeps running), or straight to its SD card
+    /// when that's mounted on this PC.
     UsbPut { local: PathBuf, path: String },
     /// Print the last lines of a file on the SD card, such as a log; with -f, keep printing what's added.
     Tail {
@@ -265,6 +270,56 @@ enum Command {
         /// The NRO's arguments, after `--`.
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Hot-reload an NRO into hbmenu's NetLoader without a full Home Menu round-trip, and stream its stdout.
+    Reload {
+        nro: String,
+        #[arg(long)]
+        applet: bool,
+        /// Where a local NRO goes on the SD card (default /switch/kickstand/<file name>).
+        #[arg(long)]
+        dest: Option<String>,
+        /// Prefer USB transfer when a cable or SD mount is present (default true; pass --no-usb for Wi-Fi).
+        #[arg(long)]
+        no_usb: bool,
+        /// Graceful in-app exit button sequence (e.g. "plus") to try before falling back to hbmenu re-entry.
+        #[arg(long)]
+        exit_buttons: Option<String>,
+        /// Saved macro name to replay automatically after reload completes.
+        #[arg(long)]
+        replay_macro: Option<String>,
+        /// The NRO's ELF, to symbolize `<module>+0x...` backtrace addresses in its output.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        /// The module name its backtraces use (default: the ELF's file stem).
+        #[arg(long)]
+        module: Option<String>,
+        /// The NRO's arguments, after `--`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Sample the running application's call stacks (50-100 Hz), generate a `.folded` stack file and `.svg`
+    /// flamegraph, and print a hotspot report.
+    Profile {
+        #[arg(long, default_value_t = 3.0)]
+        seconds: f64,
+        #[arg(long, default_value_t = 60)]
+        hz: u32,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long)]
+        svg: Option<PathBuf>,
+    },
+    /// Capture and analyze console audio (`replay`, `record`), or inspect/set system audio volume (`status`, `control`).
+    Audio {
+        #[command(subcommand)]
+        action: AudioCmd,
     },
     /// Symbolize `<module>+0x<offset>` addresses in TEXT (or stdin) against ELF.
     Symbolize {
@@ -430,6 +485,35 @@ enum Command {
         /// The console's name, as discovery reports it.
         #[arg(long, default_value = "Mock Switch")]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AudioCmd {
+    /// Save the last N seconds (up to 5.0 s) of console audio from the ring buffer and run DSP analysis.
+    Replay {
+        #[arg(long, default_value_t = 5.0)]
+        seconds: f64,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        reference: Option<PathBuf>,
+    },
+    /// Record live console audio for N seconds (up to 30.0 s) and run DSP analysis.
+    Record {
+        #[arg(long, default_value_t = 3.0)]
+        seconds: f64,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        reference: Option<PathBuf>,
+    },
+    /// Query or modify system audio output volume (0-100) and mute state.
+    Control {
+        #[arg(long)]
+        volume: Option<u8>,
+        #[arg(long)]
+        muted: Option<bool>,
     },
 }
 
@@ -791,9 +875,6 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let path = check_path(&path, true)?;
             typed_or_allowed(&path, access::Need::Write, false)?;
             let stats = usb::upload(&client, &local, &path).await?;
-            for note in &stats.notes {
-                out.note(note.clone());
-            }
             let secs = stats.elapsed.as_secs_f64();
             out.done(json!({ "local": local, "path": path, "via": stats.via, "bytes": stats.size, "seconds": secs }), || {
                 format!("{} bytes via {} in {secs:.1}s ({})", stats.size, stats.via, mb_per_s(stats.size, secs))
@@ -1203,6 +1284,172 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 }
             }
         }
+        Command::Reload { nro, applet, dest, no_usb, exit_buttons, replay_macro, elf, module, args } => {
+            let program = match nro.strip_prefix("sdmc:") {
+                Some(path) => {
+                    let path = check_path(path, false)?;
+                    typed_or_allowed(&path, access::Need::Read, false)?;
+                    launch::Program::Sd(path)
+                }
+                None => {
+                    let local_path = PathBuf::from(&nro);
+                    let name = local_path.file_name().context("NRO has no file name")?.to_string_lossy();
+                    let dest = check_path(&dest.unwrap_or_else(|| format!("/switch/kickstand/{name}")), true)?;
+                    typed_or_allowed(&dest, access::Need::Write, false)?;
+                    let bytes = std::fs::read(&local_path).with_context(|| format!("reading {nro}"))?;
+                    launch::Program::Local { nro: bytes, dest }
+                }
+            };
+            let symbols = elf.map(|e| symbolize::Symbolizer::new(&e, module.as_deref()).map(symbolize::Symbolizer::shared)).transpose()?;
+            let mode = if applet { launch::Mode::Applet } else { launch::Mode::Full };
+            let exit_buttons = exit_buttons.as_deref().map(client::parse_buttons).transpose()?;
+            let reloaded = reload::hot_reload(
+                &client,
+                reload::ReloadOptions {
+                    program,
+                    args,
+                    mode,
+                    use_usb: !no_usb,
+                    exit_buttons,
+                    replay_macro,
+                },
+            )
+            .await?;
+            let summary = format!(
+                "reloaded ({}) in {:.1}s",
+                if reloaded.hot { "hot in-process" } else { "full relaunch" },
+                reloaded.elapsed.as_secs_f64()
+            );
+            if out.json() {
+                out.note(summary);
+                reloaded.started.notes.iter().for_each(|n| out.note(n.clone()));
+                out.event(json!({ "reloaded": true, "hot": reloaded.hot, "pid": reloaded.started.pid, "stdout": reloaded.started.output.is_some() }));
+            } else {
+                eprintln!("{summary}");
+                for note in &reloaded.started.notes {
+                    eprintln!("{note}");
+                }
+            }
+            if let Some(output) = reloaded.started.output {
+                use std::io::Write as _;
+                let begun = std::time::Instant::now();
+                let mut lines = launch::Lines::new(output, symbols);
+                while let Some(line) = lines.next().await {
+                    if out.json() {
+                        out.event(json!({ "at": begun.elapsed().as_secs_f64(), "line": line.trim_end_matches('\n') }));
+                    } else {
+                        print!("{line}");
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                let end = lines.end().cloned().unwrap_or(launch::End::Closed);
+                if out.json() {
+                    let dropped = match &end {
+                        launch::End::Dropped(e) => Some(e.clone()),
+                        launch::End::Closed => None,
+                    };
+                    out.event(json!({ "closed": true, "dropped": dropped, "at": begun.elapsed().as_secs_f64() }));
+                } else {
+                    eprintln!("({})", end.describe());
+                }
+            }
+        }
+        Command::Profile { seconds, hz, thread_id, elf, module, focus: _, svg } => {
+            let elf = memory::Elf::load(elf.as_deref(), module.as_deref())?;
+            let thread_id = match thread_id.as_deref() {
+                Some(s) => {
+                    let s = s.trim();
+                    let val = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                        Some(hex) => u64::from_str_radix(hex, 16),
+                        None => s.parse::<u64>(),
+                    }
+                    .with_context(|| format!("invalid thread_id {s:?}"))?;
+                    Some(val)
+                }
+                None => None,
+            };
+            let duration_ms = (seconds.clamp(0.1, 15.0) * 1000.0).round() as u32;
+            let interval_ms = (1000 / hz.clamp(5, 100)).clamp(10, 200);
+            let res = profile::run(
+                &client,
+                &elf,
+                &profile::ProfileOptions {
+                    duration_ms,
+                    interval_ms,
+                    thread_id,
+                    out: svg,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            out.done(json!({ "report": res.text, "svg": res.svg_path }), || res.text.clone());
+        }
+        Command::Audio { action } => match action {
+            AudioCmd::Replay { seconds, out: wav_out, reference } => {
+                let samples = client.audio_replay(seconds).await?;
+                let wav_path = match wav_out {
+                    Some(p) => p,
+                    None => tools::default_capture_path("wav")?,
+                };
+                let (analysis, saved, _) = audio::format_audio_output(
+                    &samples,
+                    audio::DEFAULT_SAMPLE_RATE,
+                    audio::DEFAULT_CHANNELS,
+                    &wav_path,
+                    reference.as_deref(),
+                    modalities::Modalities::IMAGE,
+                )?;
+                let spec_path = saved.with_extension("spectrogram.png");
+                let spec_png = audio::render_spectrogram_png(&samples, audio::DEFAULT_SAMPLE_RATE, audio::DEFAULT_CHANNELS)?;
+                std::fs::write(&spec_path, &spec_png)?;
+                let summary = format!("{}\nspectrogram: {}", analysis.summary_text(Some(&saved)).trim_end(), spec_path.display());
+                out.done(json!({ "path": saved, "spectrogram": spec_path, "analysis": analysis, "summary": summary }), || summary.clone());
+            }
+            AudioCmd::Record { seconds, out: wav_out, reference } => {
+                let samples = client.record_audio(seconds).await?;
+                let wav_path = match wav_out {
+                    Some(p) => p,
+                    None => tools::default_capture_path("wav")?,
+                };
+                let (analysis, saved, _) = audio::format_audio_output(
+                    &samples,
+                    audio::DEFAULT_SAMPLE_RATE,
+                    audio::DEFAULT_CHANNELS,
+                    &wav_path,
+                    reference.as_deref(),
+                    modalities::Modalities::IMAGE,
+                )?;
+                let spec_path = saved.with_extension("spectrogram.png");
+                let spec_png = audio::render_spectrogram_png(&samples, audio::DEFAULT_SAMPLE_RATE, audio::DEFAULT_CHANNELS)?;
+                std::fs::write(&spec_path, &spec_png)?;
+                let summary = format!("{}\nspectrogram: {}", analysis.summary_text(Some(&saved)).trim_end(), spec_path.display());
+                out.done(json!({ "path": saved, "spectrogram": spec_path, "analysis": analysis, "summary": summary }), || summary.clone());
+            }
+            AudioCmd::Control { volume, muted } => {
+                let status = client.audio_control(volume, muted).await?;
+                out.done(
+                    json!({
+                        "target": status.target,
+                        "sample_rate": status.sample_rate,
+                        "channels": status.channels,
+                        "volume_pct": status.volume_pct,
+                        "muted": status.muted,
+                        "output_active": status.output_active,
+                    }),
+                    || {
+                        format!(
+                            "audio output: target={}, {} Hz {}ch, volume={}%{}, active={}",
+                            status.target,
+                            status.sample_rate,
+                            status.channels,
+                            status.volume_pct,
+                            if status.muted { " (muted)" } else { "" },
+                            status.output_active
+                        )
+                    },
+                );
+            }
+        },
         Command::Screenshot { local } => {
             let jpeg = client.screenshot().await?;
             std::fs::write(&local, &jpeg)?;
@@ -1210,10 +1457,18 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Gif { local, seconds, fps, width } => {
             let shots = capture::record(&client, seconds, fps).await?;
-            let gif = tokio::task::spawn_blocking(move || capture::gif(&shots, width).map(|g| (g, shots.len())));
-            let (gif, frames) = gif.await??;
+            let sheet_path = local.with_extension("contact_sheet.jpg");
+            let sheet_path_clone = sheet_path.clone();
+            let (gif, frames, sheet_res) = tokio::task::spawn_blocking(move || -> Result<_> {
+                let g = capture::gif(&shots, width)?;
+                let s = capture::export_clip(&shots, width, modalities::VisualFormat::ContactSheet, Some(sheet_path_clone))?;
+                Ok((g, shots.len(), s))
+            }).await??;
             std::fs::write(&local, &gif)?;
-            out.done(json!({ "path": local, "frames": frames, "bytes": gif.len() }), || format!("saved {} ({frames} frames, {} bytes)", local.display(), gif.len()));
+            out.done(
+                json!({ "path": local, "contact_sheet": sheet_path, "frames": frames, "bytes": gif.len() }),
+                || format!("saved {} ({frames} frames, {} bytes)\n{}", local.display(), gif.len(), sheet_res.summary),
+            );
         }
         Command::IndicatorAt { x, y } => {
             client.indicator_position(x, y).await?;
@@ -1297,7 +1552,7 @@ async fn update(out: &out::Out, host: Option<String>, port: u16, check: bool, sw
     };
     let client = Client::new(format!("{host}:{port}"), config::load_token()?).named(client::TERMINAL);
     let info = client.hello().await.with_context(|| format!("reaching the Switch at {host}"))?;
-    let behind = update::switch_behind(&info.version);
+    let behind = update::switch_behind(&info.version) || info.protocol < proto::PROTOCOL_VERSION;
     if !behind {
         out.note(format!("the Switch has Kickstand {} already", info.version));
     } else if check {

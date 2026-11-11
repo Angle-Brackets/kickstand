@@ -572,3 +572,50 @@ async fn a_cancelled_upload_leaves_the_connection_usable() {
     client.upload("/switch/small.bin", b"hello").await.unwrap();
     assert_eq!(std::fs::read(root.join("switch/small.bin")).unwrap(), b"hello");
 }
+
+#[tokio::test]
+async fn profile_and_audio_suite_round_trip() {
+    let (client, root) = start("tok").await;
+
+    // 1. CPU profiler end-to-end against mock console
+    let elf = crate::memory::Elf::load(None, None).unwrap();
+    let svg_path = root.join("profile.svg");
+    let out = crate::profile::run(
+        &client,
+        &elf,
+        &crate::profile::ProfileOptions {
+            duration_ms: 200,
+            interval_ms: 20,
+            thread_id: None,
+            out: Some(svg_path.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out.analysis.total_samples >= 5);
+    assert!(out.text.contains("Top Exclusive (Self-Time) Hotspots:"));
+    assert!(svg_path.exists());
+
+    // 2. Audio replay, proactive record_audio, and audio_control end-to-end
+    let status = client.audio_control(Some(60), Some(false)).await.unwrap();
+    assert_eq!(status.sample_rate, 48_000);
+    assert_eq!(status.channels, 2);
+    assert_eq!(status.volume_pct, 60);
+    assert!(!status.muted);
+
+    let replay_samples = client.audio_replay(0.5).await.unwrap();
+    assert_eq!(replay_samples.len(), 24_000 * 2);
+    let analysis = crate::audio::analyze_pcm(&replay_samples, 48_000, 2, None);
+    assert!(!analysis.silent);
+    assert!((analysis.dominant_freq_hz - 440.0).abs() < 5.0);
+
+    let rec_samples = client.record_audio(0.2).await.unwrap();
+    assert_eq!(rec_samples.len(), 9_600 * 2);
+
+    let muted_status = client.audio_control(None, Some(true)).await.unwrap();
+    assert!(muted_status.muted);
+    let muted_samples = client.record_audio(0.2).await.unwrap();
+    let muted_analysis = crate::audio::analyze_pcm(&muted_samples, 48_000, 2, None);
+    assert!(muted_analysis.silent);
+}

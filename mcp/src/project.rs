@@ -58,12 +58,12 @@ pub fn get(name: &str) -> Result<Project> {
 }
 
 impl Project {
-    fn module(&self) -> String {
+    pub fn module(&self) -> String {
         self.module.clone().unwrap_or_else(|| self.elf.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
     }
 
     /// Runs the build command; on failure, the error carries the end of its output.
-    async fn build(&self) -> Result<String> {
+    pub async fn build(&self) -> Result<String> {
         let Some(command) = &self.build else { return Ok("no build command: using the files as they are".into()) };
         let start = Instant::now();
         let out = tokio::process::Command::new("sh")

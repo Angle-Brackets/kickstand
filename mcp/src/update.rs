@@ -272,11 +272,52 @@ fn cache_switch_files(release: &Release, sums: &HashMap<String, [u8; 32]>, versi
     Ok(files)
 }
 
-/// This PC's version of the Switch's sysmodule and NRO: from the cache, else from this version's release.
+const LOCAL_SWITCH_DIR: &str = "daemon/target/aarch64-nintendo-switch-freestanding/release";
+
+/// Reads `sys-kickstand.nsp` and `kickstand.nro` from a local `cargo nx build --release` tree under `roots`,
+/// if any of them has both files.
+fn local_switch_files_in(roots: impl IntoIterator<Item = PathBuf>) -> Option<SwitchFiles> {
+    for root in roots {
+        let dir = root.join(LOCAL_SWITCH_DIR);
+        if let (Ok(nsp), Ok(nro)) = (std::fs::read(dir.join(NSP)), std::fs::read(dir.join(NRO))) {
+            return Some(SwitchFiles { nsp, nro });
+        }
+    }
+    None
+}
+
+fn local_build_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().skip(1).map(std::path::Path::to_path_buf));
+        if let Ok(canon) = exe.canonicalize() {
+            roots.extend(canon.ancestors().skip(1).map(std::path::Path::to_path_buf));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(cwd.ancestors().map(std::path::Path::to_path_buf));
+    }
+    if let Some(repo) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        roots.push(repo.to_path_buf());
+    }
+    roots
+}
+
+/// This PC's version of the Switch's sysmodule and NRO: from a local build when built from source, else from
+/// the cache, else from a local build if present, else from this version's release.
 pub fn switch_files() -> Result<SwitchFiles> {
-    let dir = cache_dir(VERSION)?;
-    if let (Ok(nsp), Ok(nro)) = (std::fs::read(dir.join(NSP)), std::fs::read(dir.join(NRO))) {
+    if from_source()
+        && let Some(files) = local_switch_files_in(local_build_roots())
+    {
+        return Ok(files);
+    }
+    if let Ok(dir) = cache_dir(VERSION)
+        && let (Ok(nsp), Ok(nro)) = (std::fs::read(dir.join(NSP)), std::fs::read(dir.join(NRO)))
+    {
         return Ok(SwitchFiles { nsp, nro });
+    }
+    if let Some(files) = local_switch_files_in(local_build_roots()) {
+        return Ok(files);
     }
     let release = fetch_release(&format!("releases/tags/v{VERSION}"))?.ok_or_else(|| {
         anyhow!("there's no release of Kickstand {VERSION} to update the Switch from; a copy built from source installs its own build with `kickstand sysmodule install`")
@@ -372,8 +413,34 @@ mod tests {
     #[test]
     fn compares_versions() {
         assert!(switch_behind("0.0.1"));
+        assert!(switch_behind("0.1.1"));
         assert!(!switch_behind(VERSION));
         assert!(!switch_behind("99.0.0"));
         assert!(!switch_behind("mock"));
+    }
+
+    #[test]
+    fn finds_local_switch_build_artifacts() {
+        let root = std::env::temp_dir().join(format!("kickstand-local-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release_dir = root.join(LOCAL_SWITCH_DIR);
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let fake_exe = root.join("target/release/kickstand");
+        let ancestors = || fake_exe.ancestors().skip(1).map(std::path::Path::to_path_buf);
+
+        // Neither file yet.
+        assert!(local_switch_files_in(ancestors()).is_none());
+
+        // Only the NSP: still not enough without the NRO.
+        std::fs::write(release_dir.join(NSP), b"fake-nsp").unwrap();
+        assert!(local_switch_files_in(ancestors()).is_none());
+
+        // Both present: found relative to `target/release/kickstand`.
+        std::fs::write(release_dir.join(NRO), b"fake-nro").unwrap();
+        let files = local_switch_files_in(ancestors()).expect("local build artifacts");
+        assert_eq!(files.nsp, b"fake-nsp");
+        assert_eq!(files.nro, b"fake-nro");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

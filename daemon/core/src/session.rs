@@ -176,6 +176,40 @@ impl Session {
             Request::Exit => Response::error(ErrorKind::Unsupported, "the sysmodule doesn't exit on request"),
             Request::Handover => self.handover(),
             Request::Unpair => self.unpair(),
+            Request::UsbOpen => crate::usb::open(),
+            Request::UsbClose => crate::usb::close(),
+            Request::Profile { duration_ms, interval_ms, thread_id } => {
+                match crate::profile::sample(self.memory_applet, duration_ms, interval_ms, thread_id) {
+                    Ok(data) => Response::Profile {
+                        app: data.app,
+                        elapsed_ms: data.elapsed_ms,
+                        ticks: data.ticks,
+                        samples: data
+                            .samples
+                            .into_iter()
+                            .map(|s| proto::ProfileSample { thread_id: s.thread_id, pc: s.pc, lr: s.lr, frames: s.frames })
+                            .collect(),
+                    },
+                    Err(resp) => resp,
+                }
+            }
+            Request::AudioReplay { duration_ms } => crate::audio::replay_begin(duration_ms),
+            Request::AudioRead { offset, len } => crate::audio::replay_read(offset, len),
+            Request::AudioStreamChunk { duration_ms } => crate::audio::stream_chunk(duration_ms),
+            Request::AudioControl { volume, muted } => {
+                let vol_f32 = volume.map(|v| f32::from(v.min(100)) / 100.0);
+                match crate::audio::configure(vol_f32, muted) {
+                    Ok(st) => Response::AudioStatus(proto::AudioOutStatus {
+                        sample_rate: st.sample_rate,
+                        channels: st.channels,
+                        target: String::from(st.target.name()),
+                        volume_pct: ((st.master_volume.clamp(0.0, 1.0) * 100.0) + 0.5) as u8,
+                        muted: st.muted,
+                        output_active: st.output_active,
+                    }),
+                    Err(rc) => system_error("configuring audio output (audctl)", rc),
+                }
+            }
         }
     }
 

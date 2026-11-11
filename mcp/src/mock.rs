@@ -292,6 +292,9 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
     let mut session_token = None;
     let mut upload: Option<Upload> = None;
     let mut memory = mock_memory();
+    let mut audio_replay_buf: Vec<u8> = Vec::new();
+    let mut audio_volume: u8 = 80;
+    let mut audio_muted: bool = false;
     // While this connection's Plays run back to back: the generation they started at.
     let mut playing: Option<u32> = None;
     loop {
@@ -358,6 +361,8 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Response::Ok
             }
             Request::Ping { nonce } => Response::Pong { nonce, uptime_ms: 1 },
+            Request::UsbOpen => Response::error(ErrorKind::Unsupported, "the mock console has no USB port"),
+            Request::UsbClose => Response::Ok,
             Request::ListDir { path } => match path::check_read(&path) {
                 Ok(p) => list(&root.join(&p[1..])),
                 Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
@@ -525,6 +530,53 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 Ok(p) => delete(&root.join(&p[1..]), p, recursive),
                 Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
             },
+            Request::Profile { duration_ms, interval_ms, thread_id } => {
+                let step = interval_ms.clamp(10, 100);
+                let ticks = (duration_ms.clamp(50, 10_000) / step).clamp(1, 50);
+                let tid = thread_id.unwrap_or(0x5a);
+                let samples = (0..ticks)
+                    .map(|_| proto::ProfileSample {
+                        thread_id: tid,
+                        pc: MOCK_NRO + 0x100,
+                        lr: MOCK_NRO + 0x204,
+                        frames: vec![MOCK_NRO + 0x204, 0x1234],
+                    })
+                    .collect();
+                Response::Profile { app: MOCK_APP, elapsed_ms: duration_ms, ticks, samples }
+            }
+            Request::AudioReplay { duration_ms } => {
+                audio_replay_buf = mock_pcm_bytes(duration_ms.clamp(100, 5_000), audio_volume, audio_muted);
+                Response::Data { data: Vec::new(), file_size: audio_replay_buf.len() as u64 }
+            }
+            Request::AudioRead { offset, len } => {
+                let start = (offset as usize).min(audio_replay_buf.len());
+                let end = (start + (len as usize).min(proto::MAX_CHUNK)).min(audio_replay_buf.len());
+                Response::Data { data: audio_replay_buf[start..end].to_vec(), file_size: audio_replay_buf.len() as u64 }
+            }
+            Request::AudioStreamChunk { duration_ms } => {
+                let data = mock_pcm_bytes(duration_ms.clamp(50, 1_000), audio_volume, audio_muted);
+                let file_size = data.len() as u64;
+                Response::Data { data, file_size }
+            }
+            Request::AudioControl { volume, muted } => {
+                if let Some(v) = volume {
+                    audio_volume = v.min(100);
+                    if v > 0 && muted.is_none() {
+                        audio_muted = false;
+                    }
+                }
+                if let Some(m) = muted {
+                    audio_muted = m;
+                }
+                Response::AudioStatus(proto::AudioOutStatus {
+                    sample_rate: 48_000,
+                    channels: 2,
+                    target: "BuiltInSpeaker".into(),
+                    volume_pct: if audio_muted { 0 } else { audio_volume },
+                    muted: audio_muted,
+                    output_active: !audio_muted && audio_volume > 0,
+                })
+            }
         };
         stream.write_all(&proto::encode(&resp)?).await?;
     }
@@ -537,6 +589,19 @@ const MOCK_RECORDING: [proto::RecordedInput; 5] = [
     proto::RecordedInput { at_ms: 500, buttons: 0, left: (0, proto::STICK_MAX), right: (0, 0) },
     proto::RecordedInput { at_ms: 1500, buttons: 0, left: (0, 0), right: (0, 0) },
 ];
+
+fn mock_pcm_bytes(duration_ms: u32, volume: u8, muted: bool) -> Vec<u8> {
+    let frames = (duration_ms as usize) * 48;
+    let mut out = Vec::with_capacity(frames * 4);
+    let amp = if muted || volume == 0 { 0.0 } else { 12_000.0 * (f64::from(volume) / 100.0) };
+    for n in 0..frames {
+        let t = (n as f64) / 48_000.0;
+        let s = (amp * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as i16;
+        out.extend_from_slice(&s.to_le_bytes());
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
 
 /// [`Request::Find`] over the mock's folder: entries under `sd_dir` (an SD path) whose name contains
 /// `needle`, one more than `max` at most.

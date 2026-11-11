@@ -29,7 +29,7 @@ use crate::{config, nxlink};
 /// The pid of the hbloader process last seen showing hbmenu (0: none known): set when [`open_hbmenu`]
 /// opens it or an NRO [`run_nro`] started closes its stdout (it exited, back to hbmenu), cleared when an NRO
 /// is sent. Lets [`run_nro`] press Y straight away instead of reopening hbmenu.
-static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
 
 /// Shortest wait for the home menu to come back after an application closes.
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
@@ -74,7 +74,7 @@ impl Mode {
 }
 
 /// The process hbmenu runs in for `mode`: the Album's, or the application's.
-async fn status(client: &Client, mode: Mode) -> Result<Option<App>> {
+pub(crate) async fn status(client: &Client, mode: Mode) -> Result<Option<App>> {
     match mode {
         Mode::Applet => client.applet_status().await,
         Mode::Full => client.app_status().await,
@@ -421,14 +421,15 @@ async fn gone(client: &Client, mode: Mode, app: &App, wait: Duration) -> Result<
 }
 
 /// The Kickstand NRO, whose launcher mode opens an NRO already on the SD card.
-const LAUNCHER: &str = "/switch/kickstand/kickstand.nro";
+pub(crate) const LAUNCHER: &str = "/switch/kickstand/kickstand.nro";
 /// How long NetLoader gets to start listening after Y.
-const NETLOADER_WAIT: Duration = Duration::from_secs(15);
+pub(crate) const NETLOADER_WAIT: Duration = Duration::from_secs(15);
 /// The same when hbmenu should already be up.
-const NETLOADER_FAST_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const NETLOADER_FAST_WAIT: Duration = Duration::from_secs(5);
 /// How long the NRO gets to connect its stdout after it's sent.
-const OUTPUT_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const OUTPUT_WAIT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Debug)]
 pub enum Program {
     /// An NRO on this PC, sent to `dest` on the SD card (inside the write roots, under `/switch/`).
     Local { nro: Vec<u8>, dest: String },
@@ -436,6 +437,7 @@ pub enum Program {
     Sd(String),
 }
 
+#[derive(Debug)]
 pub struct Started {
     pub notes: Vec<String>,
     /// The hbloader process running the NRO; it shows hbmenu again once the NRO exits.
@@ -447,16 +449,6 @@ pub struct Started {
 /// Starts an NRO with `args` from a fresh hbmenu in `mode`: an NRO already running there is closed first
 /// (and in full-memory mode, any game).
 pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode) -> Result<Started> {
-    send_nro(client, program, args, mode, true).await
-}
-
-/// Starts an NRO already on the SD card with full memory (`Mode::Full`) without waiting for nxlink stdout,
-/// for utilities such as `/switch/haze.nro`.
-pub async fn start_full_tool(client: &Client, sd_path: &str) -> Result<Started> {
-    send_nro(client, Program::Sd(sd_path.into()), Vec::new(), Mode::Full, false).await
-}
-
-async fn send_nro(client: &Client, program: Program, args: Vec<String>, mode: Mode, listen_stdout: bool) -> Result<Started> {
     let target = match &program {
         Program::Local { dest, .. } => dest,
         Program::Sd(path) => path,
@@ -494,7 +486,7 @@ async fn send_nro(client: &Client, program: Program, args: Vec<String>, mode: Mo
     };
 
     let mut notes = Vec::new();
-    let output = if listen_stdout { Some(nxlink::OutputListener::bind().await?) } else { None };
+    let output = nxlink::OutputListener::bind().await?;
     // hbmenu can't be told apart from an NRO, so only a process known to show hbmenu is used as is.
     let current = status(client, mode).await?;
     let mut sock = None;
@@ -538,16 +530,10 @@ async fn send_nro(client: &Client, program: Program, args: Vec<String>, mode: Mo
         None => format!("sent {} bytes as sdmc:/switch/{dest}", nro.len()),
     });
     let pid = status(client, mode).await?.map_or(0, |a| a.pid);
-    let output = match output {
-        Some(listener) => {
-            let stream = listener.accept(OUTPUT_WAIT).await?;
-            if stream.is_none() {
-                notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
-            }
-            stream
-        }
-        None => None,
-    };
+    let output = output.accept(OUTPUT_WAIT).await?;
+    if output.is_none() {
+        notes.push("the NRO didn't connect its stdout (it may not use nxlink stdio)".into());
+    }
     Ok(Started { notes, pid, output })
 }
 
@@ -607,7 +593,7 @@ pub fn nro_exited(pid: u64) {
 }
 
 /// Presses Y in hbmenu until NetLoader accepts a connection (hbmenu may still be loading at first).
-async fn start_netloader(client: &Client, wait: Duration) -> Result<TcpStream> {
+pub(crate) async fn start_netloader(client: &Client, wait: Duration) -> Result<TcpStream> {
     let start = tokio::time::Instant::now();
     let mut pressed_at = None;
     loop {

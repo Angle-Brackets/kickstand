@@ -34,10 +34,10 @@ it, so look before you act and leave it how you found it.
 - Logs on the SD card: `tail_file` (it can follow and stop at a line), `grep` and `find`. Both run on the
   console, so nothing large crosses Wi-Fi.
 - Sending files to the SD card: use `upload` for small files (configs, `.nro` builds), and prefer `usb_upload`
-  whenever the Switch is connected via USB (`status` says when it is) for large files like ROMs, ISOs, or
-  `.o2r` asset archives (~15–20 MB/s over USB MTP vs ~1.5 MB/s over Wi-Fi, streamed directly from disk without
-  loading the file into memory; launches `/switch/haze.nro` with full memory if needed and exits back to
-  `hbmenu`).
+  for large files like ROMs, ISOs or `.o2r` asset archives whenever `status` reports a USB cable. It goes
+  through Kickstand's own USB interface, so nothing on the console is opened or closed. If it says the PC
+  needs a one-time setup (a udev rule, or a driver on Windows), pass that on to the user rather than trying
+  to do it.
 
 ## Seeing the screen
 

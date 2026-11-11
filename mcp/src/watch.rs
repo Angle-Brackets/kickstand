@@ -1,29 +1,36 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `kickstand watch`: a web page on this PC showing the console's screen live (an MJPEG stream of
-//! screenshots) and what's running, so a person can follow what an agent does.
+//! screenshots) and what's running, so a person can follow what an agent does, while maintaining a
+//! rolling PC-side [`VideoRingBuffer`] of recent frames.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+use crate::capture::{Shot, VideoRingBuffer, motion_text_summary};
 use crate::client::Client;
 
 const PAGE: &str = include_str!("watch.html");
 
-/// The newest frame, shared by every viewer; captured only while someone watches.
+/// The newest frame, shared by every viewer; captured only while someone watches, plus a PC-side
+/// rolling frame ring buffer holding the last ~10 s of streamed frames.
 struct Frames {
     latest: watch::Sender<Option<Arc<Vec<u8>>>>,
+    ring: Mutex<VideoRingBuffer>,
 }
 
 pub async fn serve(client: Arc<Client>, bind: &str, port: u16, fps: u32) -> Result<()> {
     let listener = TcpListener::bind((bind, port)).await?;
     eprintln!("watching the console at http://{}:{port}/ (Ctrl-C to stop)", if bind == "0.0.0.0" { "<this PC>" } else { bind });
     let (latest, _) = watch::channel(None);
-    let frames = Arc::new(Frames { latest });
+    let frames = Arc::new(Frames {
+        latest,
+        ring: Mutex::new(VideoRingBuffer::new()),
+    });
     tokio::spawn(capture(client.clone(), frames.clone(), fps.clamp(1, 10)));
     loop {
         let (sock, _) = listener.accept().await?;
@@ -34,17 +41,23 @@ pub async fn serve(client: Arc<Client>, bind: &str, port: u16, fps: u32) -> Resu
     }
 }
 
-/// Takes screenshots while anyone is subscribed to the stream.
+/// Takes screenshots while anyone is subscribed to the stream and pushes them to the PC ring buffer.
 async fn capture(client: Arc<Client>, frames: Arc<Frames>, fps: u32) {
     let period = Duration::from_millis(1000 / u64::from(fps));
+    let stream_start = Instant::now();
     loop {
         if frames.latest.receiver_count() == 0 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         }
         let started = tokio::time::Instant::now();
+        let at = stream_start.elapsed();
         match client.screenshot().await {
             Ok(jpeg) => {
+                frames.ring.lock().unwrap().push(Shot {
+                    at,
+                    jpeg: jpeg.clone(),
+                });
                 frames.latest.send_replace(Some(Arc::new(jpeg)));
             }
             Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
@@ -79,8 +92,27 @@ async fn handle(mut sock: TcpStream, client: &Client, frames: &Frames) -> Result
                 }
                 Err(e) => (format!("console not answering: {e:#}"), String::new()),
             };
-            let body = serde_json::json!({ "app": app, "awake": awake }).to_string();
+            let (buffered_frames, buffered_bytes) = {
+                let ring = frames.ring.lock().unwrap();
+                (ring.len(), ring.total_bytes())
+            };
+            let body = serde_json::json!({
+                "app": app,
+                "awake": awake,
+                "ring_frames": buffered_frames,
+                "ring_bytes": buffered_bytes,
+            })
+            .to_string();
             respond(&mut sock, "application/json", body.as_bytes()).await
+        }
+        "/clip-summary" => {
+            let shots = frames.ring.lock().unwrap().shots();
+            let summary = if shots.is_empty() {
+                "no frames buffered yet".to_string()
+            } else {
+                motion_text_summary(&shots).unwrap_or_else(|e| format!("summary error: {e:#}"))
+            };
+            respond(&mut sock, "text/plain; charset=utf-8", summary.as_bytes()).await
         }
         "/stream" => stream(&mut sock, frames).await,
         _ => {

@@ -558,7 +558,12 @@ fn activity(ui: &mut Ui, model: &Model, live: &Live, busiest: Option<&proto::Age
         return;
     };
     let me = report.agents.iter().find(|c| c.you).map(|c| c.ip);
-    let who = |ip: [u8; 4]| if Some(ip) == me { "This computer".to_string() } else { std::net::Ipv4Addr::from(ip).to_string() };
+    // A USB client has no address (0.0.0.0).
+    let who = |ip: [u8; 4]| match ip {
+        [0, 0, 0, 0] => "USB cable".to_string(),
+        _ if Some(ip) == me => "This computer".to_string(),
+        _ => std::net::Ipv4Addr::from(ip).to_string(),
+    };
     let meta = match busiest {
         Some(c) => {
             let label = model.labels.get(c.id).map(|l| format!("{l} · ")).unwrap_or_default();
@@ -748,7 +753,7 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
             app.ask(Confirm::Unpair);
         }
         if let Some(live) = model.reach.live()
-            && crate::update::switch_behind(&live.info.version)
+            && (crate::update::switch_behind(&live.info.version) || live.info.protocol < proto::PROTOCOL_VERSION)
         {
             ui.add_space(18.0);
             let update = theme::link(ui, "Update", 13.0, Face::Mono).on_hover_text(format!("Put Kickstand {} on this Switch", crate::update::VERSION));
@@ -1028,6 +1033,9 @@ pub fn confirm_words(what: Confirm, model: &Model) -> (String, String) {
         }
         Confirm::UpdateSwitch => {
             let from = match &model.reach {
+                Reach::Connected(live) if live.info.version == crate::update::VERSION && live.info.protocol < proto::PROTOCOL_VERSION => {
+                    format!("{} (protocol {})", live.info.version, live.info.protocol)
+                }
                 Reach::Connected(live) => live.info.version.clone(),
                 _ => "its version".into(),
             };

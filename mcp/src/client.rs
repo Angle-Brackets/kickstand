@@ -29,18 +29,25 @@ pub struct DaemonInfo {
 pub struct Client {
     addr: String,
     token: String,
+    /// Talk over the console's USB interface with this serial number ([`Client::over_usb`]) instead of TCP.
+    usb: Option<String>,
     /// The AI app this client works for, told to the console on each connection ([`Request::Introduce`]).
     app: std::sync::Mutex<Option<String>>,
     conn: Mutex<Option<Conn>>,
 }
 
 struct Conn {
-    stream: TcpStream,
+    stream: Stream,
     info: DaemonInfo,
     /// Requests sent (or being sent) whose replies haven't been read in full. Above 0 between calls, a
     /// call was cancelled part way (an agent cancelling a tool mid-upload): a frame may be half sent and
     /// replies are queued, so the connection is out of step and [`Client::connected`] replaces it.
     pending: u32,
+}
+
+enum Stream {
+    Tcp(TcpStream),
+    Usb(Box<crate::usb::UsbLink>),
 }
 
 /// How a [`Client::play`] ended.
@@ -104,7 +111,36 @@ const ASLEEP: &str = "the console doesn't answer on the network: it's most likel
 
 impl Client {
     pub fn new(addr: String, token: String) -> Self {
-        Client { addr, token, app: std::sync::Mutex::new(None), conn: Mutex::new(None) }
+        Client { addr, token, usb: None, app: std::sync::Mutex::new(None), conn: Mutex::new(None) }
+    }
+
+    /// A client for the same console over its USB interface (serial number from [`Client::usb_open`]).
+    pub fn over_usb(&self, serial: String) -> Client {
+        let mut other = self.another();
+        other.usb = Some(serial);
+        other
+    }
+
+    /// Asks the console to present its USB interface ([`Request::UsbOpen`]); returns its serial number.
+    pub async fn usb_open(&self) -> Result<String> {
+        match self.request(Request::UsbOpen).await? {
+            Response::UsbOpened { serial } => Ok(serial),
+            other => Err(too_old_for(other, "USB transfers", 28)),
+        }
+    }
+
+    /// Ends the console's USB interface ([`Request::UsbClose`]), ignoring failures; a client over USB drops
+    /// its connection too.
+    pub async fn usb_close(&self) {
+        let mut guard = self.conn.lock().await;
+        if let Some(conn) = guard.as_mut() {
+            let _ = round_trip(conn, &Request::UsbClose).await;
+        } else if self.usb.is_none() {
+            let _ = self.request_locked(&mut guard, Request::UsbClose).await;
+        }
+        if self.usb.is_some() {
+            *guard = None;
+        }
     }
 
     pub fn addr(&self) -> &str {
@@ -114,7 +150,8 @@ impl Client {
     /// A client for the same console with a connection of its own, for work alongside this one's (frames
     /// captured while this one holds buttons).
     pub fn another(&self) -> Client {
-        let other = Client::new(self.addr.clone(), self.token.clone());
+        let mut other = Client::new(self.addr.clone(), self.token.clone());
+        other.usb = self.usb.clone();
         *other.app.lock().unwrap() = self.app();
         other
     }
@@ -778,6 +815,62 @@ impl Client {
         }
     }
 
+    /// Samples the running application's (or applet's) call stacks every `interval_ms` for `duration_ms`.
+    pub async fn profile(&self, duration_ms: u32, interval_ms: u32, thread_id: Option<u64>) -> Result<Option<crate::profile::RawProfile>> {
+        match self.request(Request::Profile { duration_ms, interval_ms, thread_id }).await? {
+            Response::Profile { app, elapsed_ms, ticks, samples } => {
+                let samples = samples
+                    .into_iter()
+                    .map(|s| crate::profile::Sample { thread_id: s.thread_id, pc: s.pc, lr: s.lr, frames: s.frames })
+                    .collect();
+                Ok(Some(crate::profile::RawProfile { app, elapsed_ms, ticks, samples }))
+            }
+            Response::Error(e) if e.kind == proto::ErrorKind::Unsupported => Ok(None),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Fetches the last `seconds` (up to 5.0 s) of 48 kHz 16-bit stereo PCM samples from the daemon's
+    /// rolling audio ring buffer.
+    pub async fn audio_replay(&self, seconds: f64) -> Result<Vec<i16>> {
+        let duration_ms = ((seconds.clamp(0.1, 5.0) * 1000.0).round() as u32).clamp(100, 5_000);
+        let (raw, _) = self
+            .read_chunks(
+                Request::AudioReplay { duration_ms },
+                |offset, len| Request::AudioRead { offset, len: len as u32 },
+                0,
+                u64::MAX,
+                "the audio replay buffer",
+            )
+            .await?;
+        Ok(raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect())
+    }
+
+    /// Streams `seconds` (up to 30.0 s) of live 48 kHz 16-bit stereo PCM samples from the daemon in chunks.
+    pub async fn record_audio(&self, seconds: f64) -> Result<Vec<i16>> {
+        let total_ms = ((seconds.clamp(0.1, 30.0) * 1000.0).round() as u32).clamp(100, 30_000);
+        let mut remaining_ms = total_ms;
+        let mut samples = Vec::new();
+        while remaining_ms > 0 {
+            let chunk_ms = remaining_ms.min(500);
+            let data = match self.request(Request::AudioStreamChunk { duration_ms: chunk_ms }).await? {
+                Response::Data { data, .. } => data,
+                other => return Err(too_old_for(other, "record_audio", 29)),
+            };
+            samples.extend(data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));
+            remaining_ms = remaining_ms.saturating_sub(chunk_ms);
+        }
+        Ok(samples)
+    }
+
+    /// Queries or modifies system audio output volume (`0..=100`) and mute state.
+    pub async fn audio_control(&self, volume: Option<u8>, muted: Option<bool>) -> Result<proto::AudioOutStatus> {
+        match self.request(Request::AudioControl { volume, muted }).await? {
+            Response::AudioStatus(status) => Ok(status),
+            other => return Err(too_old_for(other, "audio_control", 29)),
+        }
+    }
+
     /// Sends one request, reconnecting and retrying once if the connection had gone stale.
     async fn request(&self, req: Request) -> Result<Response> {
         let mut guard = self.conn.lock().await;
@@ -867,6 +960,9 @@ impl Client {
 
     /// Connects and sends `first` (Hello or Pair), which the daemon answers with its Hello.
     async fn connect_with(&self, first: Request) -> Result<Conn> {
+        if let Some(serial) = &self.usb {
+            return connect_usb(serial, first).await;
+        }
         let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&self.addr))
             .await
             .map_err(|_| anyhow!("timed out connecting to the daemon at {}: {ASLEEP}", self.addr))?
@@ -882,19 +978,50 @@ impl Client {
                 if hint.is_empty() { e } else { e.context(hint) }
             })?;
         stream.set_nodelay(true)?;
-        let mut conn = Conn { stream, info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro }, pending: 0 };
-        match round_trip(&mut conn, &first).await? {
-            Response::Hello { version, .. } if !proto::compatible(version) => Err(anyhow!(
-                "the daemon speaks protocol {version}, older than {} (the oldest this client talks to): install a newer sysmodule",
-                proto::MIN_COMPATIBLE_VERSION
-            )),
-            Response::Hello { version, daemon_version, kind } => {
-                conn.info = DaemonInfo { version: daemon_version, protocol: version, kind };
-                Ok(conn)
-            }
-            other => Err(unexpected(other)),
+        let mut conn = Conn { stream: Stream::Tcp(stream), info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Nro }, pending: 0 };
+        let hello = round_trip(&mut conn, &first).await?;
+        greeted(conn, hello)
+    }
+}
+
+/// `conn` once the daemon answered its first request with `hello`.
+fn greeted(mut conn: Conn, hello: Response) -> Result<Conn> {
+    match hello {
+        Response::Hello { version, .. } if !proto::compatible(version) => Err(anyhow!(
+            "the daemon speaks protocol {version}, older than {} (the oldest this client talks to): install a newer sysmodule",
+            proto::MIN_COMPATIBLE_VERSION
+        )),
+        Response::Hello { version, daemon_version, kind } => {
+            conn.info = DaemonInfo { version: daemon_version, protocol: version, kind };
+            Ok(conn)
+        }
+        other => Err(unexpected(other)),
+    }
+}
+
+/// Opens the console's USB interface and sends `first` (Hello or Pair). Unlike a TCP connection, the link
+/// may carry replies to an earlier connection's requests (one cancelled part way), so a Ping with a fresh
+/// nonce follows `first`, and replies are read and dropped until its Pong: the one before is `first`'s.
+async fn connect_usb(serial: &str, first: Request) -> Result<Conn> {
+    let link = crate::usb::UsbLink::open(serial).await?;
+    let mut conn = Conn { stream: Stream::Usb(Box::new(link)), info: DaemonInfo { version: String::new(), protocol: 0, kind: DaemonKind::Sysmodule }, pending: 0 };
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|e| anyhow!("getrandom: {e}"))?;
+    let nonce = u64::from_le_bytes(nonce);
+    send(&mut conn, &first).await?;
+    send(&mut conn, &Request::Ping { nonce }).await?;
+    let mut previous = None;
+    loop {
+        match recv_within(&mut conn, CONNECT_TIMEOUT).await.context("starting the USB connection")? {
+            Response::Pong { nonce: n, .. } if n == nonce => break,
+            // The Ping's answer when `first` was refused.
+            Response::Error(e) if e.kind == proto::ErrorKind::Unauthorized && previous.is_some() => break,
+            other => previous = Some(other),
         }
     }
+    conn.pending = 0;
+    let hello = previous.ok_or_else(|| anyhow!("the Switch didn't answer over USB"))?;
+    greeted(conn, hello)
 }
 
 async fn round_trip(conn: &mut Conn, req: &Request) -> Result<Response> {
@@ -905,7 +1032,12 @@ async fn round_trip(conn: &mut Conn, req: &Request) -> Result<Response> {
 async fn send(conn: &mut Conn, req: &Request) -> Result<()> {
     let frame = proto::encode(req)?;
     conn.pending += 1;
-    let io = conn.stream.write_all(&frame);
+    let io = async {
+        match &mut conn.stream {
+            Stream::Tcp(stream) => stream.write_all(&frame).await.map_err(anyhow::Error::from),
+            Stream::Usb(link) => link.send(&frame).await,
+        }
+    };
     timeout(REPLY_TIMEOUT, io).await.map_err(|_| anyhow!("daemon stopped reading for {REPLY_TIMEOUT:?}"))??;
     Ok(())
 }
@@ -917,11 +1049,17 @@ async fn recv(conn: &mut Conn) -> Result<Response> {
 
 async fn recv_within(conn: &mut Conn, wait: Duration) -> Result<Response> {
     let io = async {
-        let mut prefix = [0u8; 4];
-        conn.stream.read_exact(&mut prefix).await?;
-        let len = proto::frame_len(prefix).ok_or_else(|| anyhow!("daemon sent an oversized frame"))?;
-        let mut body = vec![0u8; len];
-        conn.stream.read_exact(&mut body).await?;
+        let body = match &mut conn.stream {
+            Stream::Tcp(stream) => {
+                let mut prefix = [0u8; 4];
+                stream.read_exact(&mut prefix).await?;
+                let len = proto::frame_len(prefix).ok_or_else(|| anyhow!("daemon sent an oversized frame"))?;
+                let mut body = vec![0u8; len];
+                stream.read_exact(&mut body).await?;
+                body
+            }
+            Stream::Usb(link) => link.recv().await?,
+        };
         conn.pending = conn.pending.saturating_sub(1);
         let reply = proto::decode::<Response>(&body);
         // Only a reply appended after this client's version would fail here.
@@ -1115,7 +1253,12 @@ pub fn other_agents(agents: &[proto::AgentInfo], changing: bool) -> Vec<String> 
         .filter(|a| !a.you)
         .filter_map(|a| {
             let name = a.app.as_deref().map(|text| split_introduction(text).0);
-            let place = if Some(a.ip) == mine { "on this PC".to_string() } else { format!("at {}", std::net::Ipv4Addr::from(a.ip)) };
+            // A USB client has no address (0.0.0.0).
+            let place = match a.ip {
+                [0, 0, 0, 0] => "over USB".to_string(),
+                ip if Some(ip) == mine => "on this PC".to_string(),
+                ip => format!("at {}", std::net::Ipv4Addr::from(ip)),
+            };
             let who = match name {
                 Some(TERMINAL) => format!("someone using kickstand in a terminal {place}"),
                 Some(DESKTOP) => format!("someone in Kickstand's desktop app {place}"),

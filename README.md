@@ -32,7 +32,7 @@
 - **Controller & Touch Automation (`press`, `input`, `input_until`):** Simulates controller buttons, dual analog sticks, and touch gestures across timed steps, or holds/mashes/replays input while watching the screen until a visual condition triggers (e.g., *"hold right until the doorway appears"*).
 - **Macros (`record_macro`, `save_macro`, `play_macro`, `control_macro`, `type_text`):** Record controller input once while you play (from the desktop app's Macros page, `kickstand macro record`, or an agent asking you), or let an agent write one from input steps it worked out, and let agents replay it to get back to the same spot in a game before each test. Pause, resume or stop a macro while it plays, from the desktop app, `kickstand macro pause|resume|stop` (or Ctrl-C), or an agent. Type into the software keyboard on a virtual USB keyboard.
 - **Live Debugging & Crash Analysis (`threads`, `symbolize`, `crash_report`, `read_memory`, `write_memory`):** Symbolizes live output and thread backtraces with source file/line numbers via `addr2line`, decodes Atmosphère crash dumps and fatal error records, inspects process memory maps, and evaluates symbolic pointer chains (`main+0x1234`, `[sym+0x10]+0x8`).
-- **SD Card File & Log Management (`list_dir`, `read_file`, `tail_file`, `find`, `grep`, `upload`, `usb_upload`, `download`, `delete`):** Transfers files over Wi-Fi or high-speed USB (`usb_upload` via Atmosphère's `haze.nro` MTP or a mounted SD card for large ROMs and `.o2r` archives), tails growing log files, and finds or greps files on the console itself, on the SD card with interactive folder permission prompts and system path guardrails.
+- **SD Card File & Log Management (`list_dir`, `read_file`, `tail_file`, `find`, `grep`, `upload`, `usb_upload`, `download`, `delete`):** Transfers files over Wi-Fi or high-speed USB (`usb_upload` through Kickstand's own USB interface, or a mounted SD card, for large ROMs and `.o2r` archives), tails growing log files, and finds or greps files on the console itself, on the SD card with interactive folder permission prompts and system path guardrails.
 - **Self-Updating Daemon & Recovery (`status`, `sysmodule`, `reboot`, `keep_awake`):** Hot-reloads the background sysmodule in ~11 seconds without rebooting, monitors system RAM/temp/battery, keeps the console awake during active sessions, and performs warm reboots into Hekate entries or USB Mass Storage (UMS).
 
 ---
@@ -141,6 +141,21 @@ target/release/kickstand link code
 ```
 
 > **Note on Boot Autostart:** Enabling the sysmodule at console boot (`boot2.flag`) is an explicit user choice via `kickstand sysmodule enable` (or `disable`). MCP tools exposed to AI agents cannot toggle boot autostart.
+
+### USB Transfers
+
+`usb_upload` (and `kickstand usb-put`) send large files over a USB-C cable from the PC straight to the console (not through the dock). The sysmodule presents its own USB device only for the transfer, so whatever runs on the Switch keeps running. The PC needs a one-time setup to be allowed to open that device:
+
+- **Linux:** add a udev rule (needs sudo), then unplug and replug the cable:
+  ```sh
+  echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="3000", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
+    | sudo tee /etc/udev/rules.d/71-kickstand.rules
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
+- **Windows:** install the WinUSB driver for the device once with [Zadig](https://zadig.akeo.ie): start a USB upload so the console's "Kickstand" device is showing, then in Zadig choose *Options → List All Devices*, pick **Kickstand**, select **WinUSB** and click *Install Driver*.
+- **macOS:** nothing to set up.
+
+If the SD card is mounted on the PC instead (hekate's USB mass storage, which `reboot` can start, or a card reader), `usb_upload` copies straight to it.
 
 ### Multi-Agent Tracking & Live Browser View
 

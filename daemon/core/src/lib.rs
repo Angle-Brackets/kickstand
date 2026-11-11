@@ -7,12 +7,14 @@
 extern crate alloc;
 
 pub mod activity;
+pub mod audio;
 pub mod awake;
 pub mod fatal;
 pub mod hbl;
 pub mod log;
 pub mod pairing;
 pub mod playback;
+pub mod profile;
 pub mod record;
 pub mod sd;
 pub mod search;
@@ -20,6 +22,7 @@ pub mod server;
 pub mod session;
 pub mod tokens;
 pub mod tray;
+pub mod usb;
 
 pub use proto::DaemonKind;
 

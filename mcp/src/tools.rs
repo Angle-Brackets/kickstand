@@ -16,6 +16,7 @@ use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_r
 use serde::Deserialize;
 
 use crate::access::{self, Access, AllowFor, Approval, Need};
+use crate::modalities::{Modalities, ModelRegistry, PingArgs, VisualFormat};
 use crate::questions::Answer;
 use crate::client::{Client, check_path};
 
@@ -39,6 +40,10 @@ pub struct Tools {
     asking: Arc<std::sync::Mutex<Vec<Asking>>>,
     /// Paths the user allowed just once from the chat ([`Tools::answer_access`]), until they're used.
     once: Arc<std::sync::Mutex<Vec<(String, Need)>>>,
+    /// Per-session AI model and modality registry populated by `ping`.
+    models: ModelRegistry,
+    /// Rolling in-memory video frame ring buffer.
+    video_ring: Arc<std::sync::Mutex<crate::capture::VideoRingBuffer>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -534,6 +539,87 @@ pub struct WriteMemoryArgs {
     pub module: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ReloadNroArgs {
+    /// Project name in ~/.config/kickstand/projects.json (optional if local_path or sd_path is given).
+    pub project: Option<String>,
+    /// Local NRO on this PC to upload and hot-reload.
+    pub local_path: Option<String>,
+    /// Destination on the SD card when uploading local_path (default: project's dest or /switch/kickstand/<name>).
+    pub dest: Option<String>,
+    /// NRO already on the SD card to hot-reload.
+    pub sd_path: Option<String>,
+    /// Arguments for the NRO (argv[1..]; default: project's args if project is set).
+    pub args: Option<Vec<String>>,
+    /// Run the project's build command before reloading when project is set (default false).
+    pub build: Option<bool>,
+    /// Upload local_path over USB instead of Wi-Fi when a USB cable or SD mount is present (default true).
+    pub prefer_usb: Option<bool>,
+    /// Graceful in-app exit button sequence (e.g. "plus") to try before falling back to hbmenu re-entry.
+    pub exit_buttons: Option<String>,
+    /// Optional saved macro name to replay automatically after reload completes to return to a test state.
+    pub replay_macro: Option<String>,
+    /// Seconds to collect stdout before returning (default 5, max 60).
+    pub wait_seconds: Option<u32>,
+    /// ELF path for symbolizing backtraces and subsequent memory/profile calls.
+    pub elf: Option<String>,
+    /// Module name for `<module>+0x<offset>` backtraces.
+    pub module: Option<String>,
+    /// "full" (default) or "applet".
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProfileArgs {
+    /// Sampling duration in seconds (default 3.0, range 0.1..=15.0).
+    pub seconds: Option<f64>,
+    /// Sampling rate in Hz (default 50, range 5..=100).
+    pub hz: Option<u32>,
+    /// Optional specific thread ID (`0x...` or decimal) to sample; omit to sample all application threads.
+    pub thread_id: Option<String>,
+    /// Path to the unstripped `.elf` on this PC for DWARF function/file:line symbolization (defaults to the
+    /// last ELF passed to `run_nro`, `test_build`, or a memory tool).
+    pub elf: Option<String>,
+    /// Module name for `<module>+0x...` (default: ELF file stem).
+    pub module: Option<String>,
+    /// Minimum inclusive percentage to display a node in the AI call tree (default 2.0%).
+    pub min_tree_pct: Option<f64>,
+    /// Maximum exclusive hotspots to list in the AI summary (default 15).
+    pub max_hotspots: Option<usize>,
+    /// Where to save the interactive `.svg` flamegraph on this PC (default:
+    /// `~/Pictures/kickstand/svg-<unix time>.svg`).
+    pub svg_path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AudioReplayArgs {
+    /// Seconds of recent audio to pull from the 5-second rolling ring buffer (0.1 to 5.0, default 5.0).
+    pub seconds: Option<f64>,
+    /// Where to save the `.wav` file on this PC (default: `~/Pictures/kickstand/wav-<unix time>.wav`).
+    pub local_path: Option<String>,
+    /// Optional path to a reference `.wav` file on this PC (e.g. an expected SFX) to cross-correlate
+    /// against the captured audio.
+    pub reference_wav: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecordAudioArgs {
+    /// Seconds of live audio to record (0.1 to 30.0, default 3.0).
+    pub seconds: Option<f64>,
+    /// Where to save the `.wav` file on this PC (default: `~/Pictures/kickstand/wav-<unix time>.wav`).
+    pub local_path: Option<String>,
+    /// Optional path to a reference `.wav` file on this PC to cross-correlate against the recording.
+    pub reference_wav: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AudioControlArgs {
+    /// Set system output volume percentage (0 to 100). Omit to leave unchanged and only query status.
+    pub volume: Option<u8>,
+    /// Mute (`true`) or unmute (`false`) system audio output. Omit to leave unchanged.
+    pub muted: Option<bool>,
+}
+
 /// `~/Pictures/kickstand/<ext>-<unix time>.<ext>`, creating the folder: where captures go when the agent
 /// doesn't say, so the user knows where to look.
 pub(crate) fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathBuf> {
@@ -548,6 +634,20 @@ pub(crate) fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathB
 const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
 impl Tools {
+    fn session_key(&self, context: &RequestContext<RoleServer>) -> String {
+        context
+            .peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .or_else(|| context.meta.client_info().map(|info| info.name))
+            .or_else(|| self.client.app())
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub(crate) fn session_modalities(&self, context: &RequestContext<RoleServer>) -> Modalities {
+        self.models.modalities_or_default(&self.session_key(context))
+    }
+
     /// The ELF to use: `elf` (remembered for next time) or the last one given.
     fn elf(&self, elf: Option<String>, module: Option<String>) -> anyhow::Result<crate::memory::Elf> {
         let mut last = self.elf.lock().unwrap();
@@ -719,6 +819,8 @@ impl Tools {
             access: Default::default(),
             asking: Default::default(),
             once: Default::default(),
+            models: Default::default(),
+            video_ring: Default::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -1039,12 +1141,24 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Check the daemon on the Switch is reachable. Reports round-trip time, console uptime, daemon version and whether it runs as the sysmodule or the test NRO.")]
-    async fn ping(&self) -> CallToolResult {
+    #[tool(description = "Check the daemon on the Switch is reachable, and optionally register this AI session's model name and supported input modalities (image, video, audio; text is always baseline). Reports round-trip time, console uptime, daemon version, whether it runs as the sysmodule or the test NRO, and the registered model/modalities.")]
+    async fn ping(&self, Parameters(args): Parameters<PingArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
+            let key = self.session_key(&context);
+            let app = context
+                .peer
+                .peer_info()
+                .map(|info| info.client_info.name.clone())
+                .or_else(|| self.client.app())
+                .unwrap_or_else(|| key.clone());
+            let registered = if args.model.is_some() || args.modalities.is_some() {
+                Some(self.models.register_ping(&key, &args, &app)?)
+            } else {
+                self.models.get(&key)
+            };
             let info = self.client.hello().await?;
             let (rtt, uptime) = self.client.ping().await?;
-            anyhow::Ok(format!(
+            let mut out = format!(
                 "daemon {} ({:?}, protocol {}) at {}: rtt {:.1} ms, console uptime {}s",
                 info.version,
                 info.kind,
@@ -1052,7 +1166,11 @@ impl Tools {
                 self.client.addr(),
                 rtt.as_secs_f64() * 1000.0,
                 uptime.as_secs()
-            ))
+            );
+            if let Some(m) = registered {
+                write!(out, "; model {} (modalities: {})", m.id, m.modalities)?;
+            }
+            anyhow::Ok(out)
         };
         result.await.map_or_else(fail, ok)
     }
@@ -1495,26 +1613,75 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Record the Switch's screen as a looping GIF (from repeated screenshots, a few frames a second) saved on this PC (by default in ~/Pictures/kickstand/), e.g. to show the user an animation or a bug. Returns a contact sheet of up to 6 evenly spaced frames so you can see the motion yourself.")]
-    async fn record_gif(&self, Parameters(args): Parameters<RecordGifArgs>) -> CallToolResult {
+    #[tool(description = "Record the Switch's screen (from repeated screenshots, a few frames a second) saved on this PC (by default in ~/Pictures/kickstand/), e.g. to inspect an animation or bug. Adapts to the modalities registered in ping: video-capable sessions receive an encoded clip (MP4/GIF), image-capable sessions receive a contact sheet of up to 6 evenly spaced frames, and text-only sessions receive a frame/motion summary.")]
+    async fn record_gif(&self, Parameters(args): Parameters<RecordGifArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let seconds = args.seconds.unwrap_or(3.0);
             let width = args.width.unwrap_or(640).clamp(64, 1280);
             let shots = crate::capture::record(&self.client, seconds, args.fps.unwrap_or(5)).await?;
+            {
+                let mut ring = self.video_ring.lock().unwrap();
+                for s in &shots {
+                    ring.push_jpeg(s.at, s.jpeg.clone());
+                }
+            }
             let span = shots.last().map_or(0.0, |s| s.at.as_secs_f64());
             let frames = shots.len();
-            let (gif, sheet) = tokio::task::spawn_blocking(move || {
-                anyhow::Ok((crate::capture::gif(&shots, width)?, crate::capture::contact_sheet(&shots, 6)?))
-            })
-            .await??;
+            let pref = self.session_modalities(&context).preferred_visual();
             let path = match args.local_path {
                 Some(p) => std::path::PathBuf::from(p),
                 None => default_capture_path("gif")?,
             };
+            let shots_for_gif = shots.clone();
+            let (gif, sheet) = tokio::task::spawn_blocking(move || {
+                anyhow::Ok((crate::capture::gif(&shots_for_gif, width)?, crate::capture::contact_sheet(&shots_for_gif, 6)?))
+            })
+            .await??;
             tokio::fs::write(&path, &gif).await?;
             let fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
-            let text = format!("saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below", path.display(), gif.len() / 1024);
-            anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&sheet)])
+            match pref {
+                VisualFormat::Video => {
+                    let clip_path = path.with_extension("mp4");
+                    let clip = tokio::task::spawn_blocking(move || {
+                        crate::capture::export_clip(&shots, width, VisualFormat::Video, Some(clip_path))
+                    })
+                    .await??;
+                    let saved = clip.path.as_ref().unwrap_or(&path);
+                    let text = format!(
+                        "saved {} ({frames} frames, {fps:.1} fps, {} KB; video modality clip at {})",
+                        path.display(),
+                        gif.len() / 1024,
+                        saved.display()
+                    );
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&clip.bytes);
+                    anyhow::Ok(vec![
+                        ContentBlock::text(text),
+                        ContentBlock::image(b64, clip.mime_type),
+                        jpeg_block(&sheet),
+                    ])
+                }
+                VisualFormat::ContactSheet => {
+                    let text = format!(
+                        "saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below",
+                        path.display(),
+                        gif.len() / 1024
+                    );
+                    anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&sheet)])
+                }
+                VisualFormat::TextSummary => {
+                    let clip = tokio::task::spawn_blocking(move || {
+                        crate::capture::export_clip(&shots, width, VisualFormat::TextSummary, None)
+                    })
+                    .await??;
+                    let text = format!(
+                        "saved {} ({frames} frames, {fps:.1} fps, {} KB); {}",
+                        path.display(),
+                        gif.len() / 1024,
+                        clip.summary
+                    );
+                    anyhow::Ok(vec![ContentBlock::text(text)])
+                }
+            }
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
@@ -1626,7 +1793,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card over Wi-Fi, e.g. a fresh .nro build. Streamed in chunks and verified with CRC-32 before it replaces the old file. For large files (ROMs, ISOs, .o2r archives, multi-MB assets), prefer usb_upload when the Switch is connected via USB (~15-20 MB/s vs ~1.5 MB/s over Wi-Fi). Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card over Wi-Fi, e.g. a fresh .nro build. Streamed in chunks and verified with CRC-32 before it replaces the old file. For large files (ROMs, ISOs, .o2r archives, multi-MB assets), prefer usb_upload whenever status reports a USB cable (much faster). Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
     async fn upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
@@ -1643,23 +1810,20 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card over USB (~15-20 MB/s via Atmosphère's haze.nro MTP or a mounted SD card), streaming directly from disk without loading the file into memory. Preferred over upload for large files like ROMs, ISOs, or .o2r archives whenever the Switch is connected via USB (status reports when USB is connected). If haze.nro isn't already open, launches it with full memory (closing any running application first) for the transfer and exits back to hbmenu afterwards. Same path and permission rules as upload.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card over a USB cable, streamed from disk. Preferred over upload for large files (ROMs, ISOs, .o2r archives) whenever status reports a USB cable. Goes through Kickstand's own USB interface, the same CRC-checked upload as over Wi-Fi: nothing on the console is opened or closed and a running game keeps running (other USB homebrew like haze can't use the port meanwhile). If the SD card is mounted on this PC instead, copies straight to it. If it fails asking for a one-time setup on this PC (a udev rule on Linux, a driver on Windows), tell the user what it says; don't try to do it. Same path and permission rules as upload.")]
     async fn usb_upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
             self.permit(&context.peer, &remote, Need::Write, false, &format!("write {remote}")).await?;
             let stats = crate::usb::upload(&self.client, std::path::Path::new(&args.local_path), &remote).await?;
             let secs = stats.elapsed.as_secs_f64();
-            let mut out = format!(
+            let out = format!(
                 "uploaded {} -> {remote} via {}: {} bytes in {secs:.1}s ({:.2} MB/s)",
                 args.local_path,
                 stats.via,
                 stats.size,
                 stats.size as f64 / 1e6 / secs.max(1e-6)
             );
-            if !stats.notes.is_empty() {
-                write!(out, "\n{}", stats.notes.join("\n"))?;
-            }
             anyhow::Ok(out)
         };
         result.await.map_or_else(fail, ok)
@@ -1723,6 +1887,207 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
+    #[tool(description = "Hot-reload a homebrew NRO without a full Home Menu round-trip: optionally builds a project, uploads the NRO (preferring USB when connected), exits the running NRO back into hbmenu's NetLoader, streams the new NRO, and optionally replays a saved macro to return to the exact in-game state. Much faster than run_nro for iterative edit-compile-test loops.")]
+    async fn reload_nro(&self, Parameters(args): Parameters<ReloadNroArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let mut build_note = None;
+            let (local_path, sd_path, dest, nro_args, elf_path, module_name, default_mode) = if let Some(proj_name) = &args.project {
+                let project = crate::project::get(proj_name)?;
+                if args.build.unwrap_or(false) {
+                    build_note = Some(project.build().await?);
+                }
+                let local = args.local_path.clone().or_else(|| Some(project.dir.join(&project.nro).to_string_lossy().into_owned()));
+                let dest = args.dest.clone().or_else(|| Some(project.dest.clone()));
+                let nro_args = args.args.clone().unwrap_or_else(|| project.args.clone());
+                let elf = args.elf.clone().or_else(|| Some(project.dir.join(&project.elf).to_string_lossy().into_owned()));
+                let module = args.module.clone().or_else(|| Some(project.module()));
+                (local, args.sd_path.clone(), dest, nro_args, elf, module, crate::launch::Mode::Full)
+            } else {
+                (
+                    args.local_path.clone(),
+                    args.sd_path.clone(),
+                    args.dest.clone(),
+                    args.args.clone().unwrap_or_default(),
+                    args.elf.clone(),
+                    args.module.clone(),
+                    crate::launch::Mode::Full,
+                )
+            };
+
+            let program = match (local_path, sd_path) {
+                (Some(local), None) => {
+                    let path_buf = std::path::PathBuf::from(&local);
+                    let nro = tokio::fs::read(&path_buf).await.with_context(|| format!("reading {local}"))?;
+                    let name = path_buf.file_name().context("local_path has no file name")?.to_string_lossy().into_owned();
+                    let dest = check_path(&dest.unwrap_or_else(|| format!("/switch/kickstand/{name}")), true)?;
+                    self.permit(&context.peer, &dest, Need::Write, false, &format!("put {name} at {dest} and reload it")).await?;
+                    crate::launch::Program::Local { nro, dest }
+                }
+                (None, Some(sd)) => {
+                    let sd = check_path(&sd, false)?;
+                    self.permit(&context.peer, &sd, Need::Read, false, &format!("reload {sd}")).await?;
+                    crate::launch::Program::Sd(sd)
+                }
+                _ => anyhow::bail!("give a project name, local_path, or sd_path"),
+            };
+
+            let symbols = match &elf_path {
+                Some(elf) => Some(crate::symbolize::Symbolizer::new(elf.as_ref(), module_name.as_deref())?.shared()),
+                None => None,
+            };
+            if let Some(elf) = &elf_path {
+                *self.elf.lock().unwrap() = Some((elf.clone(), module_name.clone()));
+            }
+            let mode = crate::launch::Mode::parse(args.mode.as_deref(), default_mode)?;
+            self.readable_outputs(&nro_args);
+            let exit_buttons = args.exit_buttons.as_deref().map(crate::client::parse_buttons).transpose()?;
+
+            let options = crate::reload::ReloadOptions {
+                program,
+                args: nro_args,
+                mode,
+                use_usb: args.prefer_usb.unwrap_or(true),
+                exit_buttons,
+                replay_macro: args.replay_macro,
+            };
+            let reloaded = crate::reload::hot_reload(&self.client, options).await?;
+            let mut notes = Vec::new();
+            if let Some(bn) = build_note {
+                notes.push(bn);
+            }
+            notes.push(format!(
+                "reloaded ({}) in {:.1}s",
+                if reloaded.hot { "hot in-process" } else { "full relaunch" },
+                reloaded.elapsed.as_secs_f64()
+            ));
+            notes.extend(reloaded.started.notes);
+            let mut text = notes.join("\n");
+            if let Some(stream) = reloaded.started.output {
+                let handle = crate::launch::OutputLog::collect(&self.output, stream, symbols, reloaded.started.pid);
+                if let Some(old) = self.collector.lock().unwrap().replace(handle) {
+                    old.abort();
+                }
+                let wait = args.wait_seconds.unwrap_or(5).min(60);
+                text.push_str(&self.read_output(wait, &OutputView::default()).await);
+            }
+            anyhow::Ok(text)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Sample the running application's CPU call stacks (50-100 Hz) via frame-pointer unwinding, symbolize against its DWARF `.elf`, write a `.folded` stack file and interactive `.svg` flamegraph on this PC, and return a token-efficient hotspot report.")]
+    async fn profile(&self, Parameters(args): Parameters<ProfileArgs>) -> CallToolResult {
+        let result = async {
+            let elf = self.elf(args.elf, args.module)?;
+            let seconds = args.seconds.unwrap_or(3.0).clamp(0.1, 15.0);
+            let duration_ms = (seconds * 1000.0).round() as u32;
+            let hz = args.hz.unwrap_or(50).clamp(5, 100);
+            let interval_ms = (1000 / hz).clamp(10, 200);
+            let thread_id = match args.thread_id.as_deref() {
+                Some(s) => {
+                    let s = s.trim();
+                    let val = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                        Some(hex) => u64::from_str_radix(hex, 16),
+                        None => s.parse::<u64>(),
+                    }
+                    .with_context(|| format!("invalid thread_id {s:?}"))?;
+                    Some(val)
+                }
+                None => None,
+            };
+            let out_path = match args.svg_path {
+                Some(p) => Some(std::path::PathBuf::from(p)),
+                None => default_capture_path("svg").ok(),
+            };
+            let out = crate::profile::run(
+                &self.client,
+                &elf,
+                &crate::profile::ProfileOptions {
+                    duration_ms,
+                    interval_ms,
+                    thread_id,
+                    min_tree_pct: args.min_tree_pct.unwrap_or(crate::profile::DEFAULT_MIN_TREE_PCT),
+                    max_hotspots: args.max_hotspots.unwrap_or(crate::profile::DEFAULT_MAX_HOTSPOTS),
+                    out: out_path,
+                },
+            )
+            .await?;
+            anyhow::Ok(out.text)
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
+    #[tool(description = "Save the last N seconds (up to 5.0 s) of console audio from the daemon's rolling 48 kHz 16-bit stereo ring buffer to a `.wav` file on this PC and analyze it (RMS/peak dBFS, dominant frequency, silence, clipping, underrun/pop glitches, and optional reference `.wav` cross-correlation). Output adapts to the session's modalities registered in ping (inline WAV for audio, waveform+spectrogram PNG for image, or DSP metrics text).")]
+    async fn audio_replay(&self, Parameters(args): Parameters<AudioReplayArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let seconds = args.seconds.unwrap_or(5.0).clamp(0.1, 5.0);
+            let samples = self.client.audio_replay(seconds).await?;
+            let wav_path = match args.local_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => default_capture_path("wav")?,
+            };
+            let ref_path = args.reference_wav.map(std::path::PathBuf::from);
+            let modalities = self.session_modalities(&context);
+            let (_, _, blocks) = tokio::task::spawn_blocking(move || {
+                crate::audio::format_audio_output(
+                    &samples,
+                    crate::audio::DEFAULT_SAMPLE_RATE,
+                    crate::audio::DEFAULT_CHANNELS,
+                    &wav_path,
+                    ref_path.as_deref(),
+                    modalities,
+                )
+            })
+            .await??;
+            anyhow::Ok(blocks)
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Proactively record live 48 kHz 16-bit stereo audio from the Switch for `seconds` (0.1 to 30.0 s, default 3.0 s), save it as a `.wav` file on this PC, and run DSP waveform/glitch/reference-correlation analysis. Output adapts to the session's modalities registered in ping.")]
+    async fn record_audio(&self, Parameters(args): Parameters<RecordAudioArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
+        let result = async {
+            let seconds = args.seconds.unwrap_or(3.0).clamp(0.1, 30.0);
+            let samples = self.client.record_audio(seconds).await?;
+            let wav_path = match args.local_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => default_capture_path("wav")?,
+            };
+            let ref_path = args.reference_wav.map(std::path::PathBuf::from);
+            let modalities = self.session_modalities(&context);
+            let (_, _, blocks) = tokio::task::spawn_blocking(move || {
+                crate::audio::format_audio_output(
+                    &samples,
+                    crate::audio::DEFAULT_SAMPLE_RATE,
+                    crate::audio::DEFAULT_CHANNELS,
+                    &wav_path,
+                    ref_path.as_deref(),
+                    modalities,
+                )
+            })
+            .await??;
+            anyhow::Ok(blocks)
+        };
+        result.await.map_or_else(fail, CallToolResult::success)
+    }
+
+    #[tool(description = "Query or set the Switch's system audio output volume (0-100%) and mute state. Call with no arguments to inspect the active audio output target (BuiltInSpeaker, Headphones, TvOutput, UsbOutput), sample rate, volume, and mute status.")]
+    async fn audio_control(&self, Parameters(args): Parameters<AudioControlArgs>) -> CallToolResult {
+        let result = async {
+            let status = self.client.audio_control(args.volume, args.muted).await?;
+            anyhow::Ok(format!(
+                "audio output: target={}, {} Hz {}ch, volume={}%{}, active={}",
+                status.target,
+                status.sample_rate,
+                status.channels,
+                status.volume_pct,
+                if status.muted { " (muted)" } else { "" },
+                status.output_active
+            ))
+        };
+        result.await.map_or_else(fail, ok)
+    }
+
     #[tool(description = "Delete a file or directory on the Switch's SD card, e.g. old builds or test output. Only inside the writable folders (see upload); directories must be empty unless recursive is true.")]
     async fn delete(&self, Parameters(args): Parameters<DeleteArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
@@ -1780,6 +2145,7 @@ const CONTENTIOUS: &[&str] = &[
     "launch_title",
     "open_hbmenu",
     "run_nro",
+    "reload_nro",
     "test_build",
     "supervise",
     "write_memory",
@@ -1787,6 +2153,7 @@ const CONTENTIOUS: &[&str] = &[
     "reboot",
     "sysmodule",
     "keep_awake",
+    "audio_control",
 ];
 
 impl Tools {

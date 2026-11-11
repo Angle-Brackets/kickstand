@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 pub mod caps;
 pub mod debug;
 pub mod hid;
@@ -15,3 +16,4 @@ pub mod pl;
 pub mod pm;
 pub mod power;
 pub mod set;
+pub mod usbds;

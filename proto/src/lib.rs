@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -110,6 +110,44 @@ pub const MAX_CHUNK: usize = 64 * 1024;
 
 /// Largest encoded frame either side accepts (a chunk plus a path and some slack).
 pub const MAX_FRAME: usize = MAX_CHUNK + 4096;
+
+/// The protocol over a USB cable ([`Request::UsbOpen`]). The console is a USB device with one vendor-specific
+/// interface ([`usb::CLASS`]) of a bulk OUT and a bulk IN endpoint. Each frame, length prefix and all, is one
+/// transfer that ends in a short packet: a frame whose length is a multiple of 64 bytes gets one more byte
+/// (zero), so it does at every speed (packets are 64 bytes at full speed, 512 at high, 1024 at super), and the
+/// receiver ignores a byte after the frame. Requests and replies alternate as on TCP, several requests may be
+/// queued, and nothing else crosses the link.
+pub mod usb {
+    /// libnx's default ids for a homebrew USB device; [`PRODUCT`] and the serial number tell ours apart.
+    pub const VENDOR_ID: u16 = 0x057E;
+    pub const PRODUCT_ID: u16 = 0x3000;
+    pub const MANUFACTURER: &str = "Kickstand";
+    pub const PRODUCT: &str = "Kickstand";
+    /// The interface's class, subclass and protocol: vendor-specific, then "KS".
+    pub const CLASS: (u8, u8, u8) = (0xFF, 0x4B, 0x53);
+    /// The interface goes away after this long without a request.
+    pub const IDLE_MS: u64 = 60_000;
+    /// ... or this long after [`super::Request::UsbOpen`] if the PC hasn't opened it.
+    pub const ATTACH_MS: u64 = 20_000;
+    /// Longest transfer: the largest frame, its prefix and the padding byte.
+    pub const MAX_TRANSFER: usize = super::MAX_FRAME + 5;
+
+    /// `frame` (an encoded message, prefix included) as one transfer.
+    pub fn pad(frame: &mut alloc::vec::Vec<u8>) {
+        if frame.len().is_multiple_of(64) {
+            frame.push(0);
+        }
+    }
+
+    /// The message in a received transfer (without its prefix), if the transfer holds exactly one frame.
+    pub fn unpad(transfer: &[u8]) -> Option<&[u8]> {
+        let prefix: [u8; 4] = transfer.get(..4)?.try_into().ok()?;
+        let len = super::frame_len(prefix)?;
+        let end = 4 + len;
+        let padded = end.is_multiple_of(64);
+        (transfer.len() == end || (padded && transfer.len() == end + 1)).then(|| &transfer[4..end])
+    }
+}
 
 /// Most entries one [`Response::Dir`] carries; longer listings come back truncated.
 pub const MAX_DIR_ENTRIES: usize = 1024;
@@ -284,6 +322,32 @@ pub enum Request {
     /// at once instead of [`Response::Ok`], and so does every Play after it on that connection until
     /// another request. Answers [`Response::Playback`] with how things were when it arrived.
     Playback { action: PlaybackAction },
+    /// (28) Starts Kickstand's USB interface on the console's USB-C port, for a cable to the PC: the PC
+    /// opens the device ([`usb`]) whose serial number is the one answered and talks this protocol over it, a
+    /// connection like any other that starts with Hello. The interface goes away after
+    /// [`Request::UsbClose`], [`usb::IDLE_MS`] without a request, [`usb::ATTACH_MS`] without the PC opening
+    /// it, or when the cable is pulled; while it's up, other USB homebrew (haze, DBI, Goldleaf) can't use
+    /// the port. Sysmodule only; asked again while up, answers the same serial. Answers
+    /// [`Response::UsbOpened`].
+    UsbOpen,
+    /// (28) Ends the USB interface (after this reply, when sent over it). Answers [`Response::Ok`].
+    UsbClose,
+    /// (29) Samples the running application's (or applet's) call stacks every `interval_ms` for
+    /// `duration_ms` (optionally restricted to `thread_id`). Answers [`Response::Profile`].
+    Profile { duration_ms: u32, interval_ms: u32, thread_id: Option<u64> },
+    /// (29) Snapshots the last `duration_ms` of the console's 48 kHz 16-bit stereo PCM audio ring buffer
+    /// into the session's replay buffer. Answers [`Response::Data`] with `data` empty and `file_size` set to
+    /// the total byte length of the snapshot; read its chunks with [`Request::AudioRead`].
+    AudioReplay { duration_ms: u32 },
+    /// (29) Reads `len` bytes from `offset` of the session's last [`Request::AudioReplay`] snapshot. Answers
+    /// [`Response::Data`].
+    AudioRead { offset: u64, len: u32 },
+    /// (29) Captures `duration_ms` (at most 1,000 ms) of live 48 kHz 16-bit stereo PCM audio. Answers
+    /// [`Response::Data`] with the raw PCM bytes.
+    AudioStreamChunk { duration_ms: u32 },
+    /// (29) Queries or updates system audio output volume (`0..=100`) and mute state. Answers
+    /// [`Response::AudioStatus`].
+    AudioControl { volume: Option<u8>, muted: Option<bool> },
 }
 
 /// What [`Request::Playback`] does.
@@ -382,6 +446,7 @@ impl Request {
             Request::RecordStart { .. } | Request::RecordStop | Request::RecordRead { .. } => "recording the controller",
             Request::Find { .. } | Request::Grep { .. } => "reading files",
             Request::Playback { .. } => "controlling a macro",
+            Request::UsbOpen | Request::UsbClose => "connecting",
             Request::KeepAwake { .. } => "keeping the screen on",
             Request::IndicatorPosition { .. } => "placing the indicator",
             Request::Screenshot | Request::ScreenshotRead { .. } => "looking at the screen",
@@ -394,7 +459,13 @@ impl Request {
             | Request::ReadMemory { .. }
             | Request::WriteMemory { .. }
             | Request::MemoryTarget { .. }
-            | Request::Threads => "debugging the running software",
+            | Request::Threads
+            | Request::Profile { .. } => "debugging the running software",
+            Request::AudioReplay { .. }
+            | Request::AudioRead { .. }
+            | Request::AudioStreamChunk { .. }
+            | Request::AudioControl { volume: None, muted: None } => "listening to audio",
+            Request::AudioControl { .. } => "changing audio volume",
         }
     }
 }
@@ -404,7 +475,7 @@ impl Request {
 pub const ROUTINE: [&str; 2] = ["connecting", "checking on the console"];
 
 /// What a client does without changing anything on the console ([`Request::describe`]).
-pub const LOOKING: [&str; 7] = [
+pub const LOOKING: [&str; 8] = [
     "reading files",
     "looking at the screen",
     "looking at installed software",
@@ -412,6 +483,7 @@ pub const LOOKING: [&str; 7] = [
     "keeping the screen on",
     "placing the indicator",
     "recording the controller",
+    "listening to audio",
 ];
 
 /// Whether a request described as `doing` changes something on the console (input, launching or closing,
@@ -588,6 +660,33 @@ pub enum Response {
     Matches { matches: Vec<GrepMatch>, files: u32, truncated: bool },
     /// (27) Answer to [`Request::Playback`], and to a [`Request::Play`] that was stopped.
     Playback(Playback),
+    /// (28) Answer to [`Request::UsbOpen`]: the USB device to open has this serial number.
+    UsbOpened { serial: String },
+    /// (29) Answer to [`Request::Profile`].
+    Profile { app: App, elapsed_ms: u32, ticks: u32, samples: Vec<ProfileSample> },
+    /// (29) Answer to [`Request::AudioControl`].
+    AudioStatus(AudioOutStatus),
+}
+
+/// One sampled thread stack from [`Request::Profile`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSample {
+    pub thread_id: u64,
+    pub pc: u64,
+    pub lr: u64,
+    /// Return addresses walked from `fp` (`x29`), leaf-most caller first.
+    pub frames: Vec<u64>,
+}
+
+/// System audio output state ([`Response::AudioStatus`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AudioOutStatus {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub target: String,
+    pub volume_pct: u8,
+    pub muted: bool,
+    pub output_active: bool,
 }
 
 /// Answer to [`Request::Activity`].
@@ -894,6 +993,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn usb_transfers_end_short_and_unpad_to_the_message() {
+        for body_len in [0usize, 1, 59, 60, 61, 64, 124, 508, 1020, 2044, MAX_FRAME] {
+            let body: Vec<u8> = (0..body_len).map(|i| i as u8).collect();
+            let mut frame = (body_len as u32).to_le_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            let mut transfer = frame.clone();
+            usb::pad(&mut transfer);
+            assert!(!transfer.len().is_multiple_of(64), "{body_len}: ends in a full packet");
+            assert_eq!(usb::unpad(&transfer), Some(&body[..]), "{body_len}");
+            assert!(transfer.len() <= usb::MAX_TRANSFER);
+        }
+        // Two frames in one transfer, a cut-off one, an oversized prefix.
+        let mut two = encode(&Request::Ping { nonce: 1 }).unwrap();
+        two.extend(encode(&Request::Ping { nonce: 2 }).unwrap());
+        assert_eq!(usb::unpad(&two), None);
+        assert_eq!(usb::unpad(&encode(&Request::Ping { nonce: 1 }).unwrap()[..5]), None);
+        assert_eq!(usb::unpad(&((MAX_FRAME + 1) as u32).to_le_bytes()), None);
+    }
+
     /// Every variant's position, which is how postcard encodes it. Appending a variant means adding it here
     /// (the matches won't compile otherwise); moving one fails the test.
     #[test]
@@ -951,6 +1070,13 @@ mod tests {
                 Request::Find { .. } => 48,
                 Request::Grep { .. } => 49,
                 Request::Playback { .. } => 50,
+                Request::UsbOpen => 51,
+                Request::UsbClose => 52,
+                Request::Profile { .. } => 53,
+                Request::AudioReplay { .. } => 54,
+                Request::AudioRead { .. } => 55,
+                Request::AudioStreamChunk { .. } => 56,
+                Request::AudioControl { .. } => 57,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -981,6 +1107,9 @@ mod tests {
                 Response::Found { .. } => 23,
                 Response::Matches { .. } => 24,
                 Response::Playback(_) => 25,
+                Response::UsbOpened { .. } => 26,
+                Response::Profile { .. } => 27,
+                Response::AudioStatus(_) => 28,
             }
         }
         let s = || String::from("/a");
@@ -1036,6 +1165,13 @@ mod tests {
             Request::Find { dir: s(), name: s(), max: 0 },
             Request::Grep { path: s(), needle: s(), ignore_case: false, max: 0 },
             Request::Playback { action: PlaybackAction::Query },
+            Request::UsbOpen,
+            Request::UsbClose,
+            Request::Profile { duration_ms: 0, interval_ms: 0, thread_id: None },
+            Request::AudioReplay { duration_ms: 0 },
+            Request::AudioRead { offset: 0, len: 0 },
+            Request::AudioStreamChunk { duration_ms: 0 },
+            Request::AudioControl { volume: None, muted: None },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -1068,6 +1204,16 @@ mod tests {
             Response::Found { entries: Vec::new(), truncated: false },
             Response::Matches { matches: Vec::new(), files: 0, truncated: false },
             Response::Playback(Playback::default()),
+            Response::UsbOpened { serial: s() },
+            Response::Profile { app: app.clone(), elapsed_ms: 0, ticks: 0, samples: Vec::new() },
+            Response::AudioStatus(AudioOutStatus {
+                sample_rate: 48_000,
+                channels: 2,
+                target: s(),
+                volume_pct: 50,
+                muted: false,
+                output_active: true,
+            }),
         ];
         for (i, resp) in responses.iter().enumerate() {
             assert_eq!((response(resp) as usize, encode(resp).unwrap()[4]), (i, i as u8), "{resp:?}");

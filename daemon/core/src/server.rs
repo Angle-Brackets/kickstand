@@ -79,7 +79,7 @@ impl Mailbox {
     }
 }
 
-fn take_slot() -> Option<usize> {
+pub(crate) fn take_slot() -> Option<usize> {
     let mut taken = SLOTS.load(Ordering::Acquire);
     loop {
         let slot = (!taken).trailing_zeros() as usize;
@@ -93,7 +93,7 @@ fn take_slot() -> Option<usize> {
     }
 }
 
-fn free_slot(slot: usize) {
+pub(crate) fn free_slot(slot: usize) {
     SLOTS.fetch_and(!(1 << slot), Ordering::AcqRel);
 }
 
@@ -142,7 +142,7 @@ pub fn listening_ip() -> Option<Ipv4Addr> {
     }
 }
 
-fn stopped(config: &Config) -> bool {
+pub(crate) fn stopped(config: &Config) -> bool {
     config.stop.is_some_and(|s| s.load(Ordering::Relaxed))
 }
 
@@ -150,6 +150,9 @@ fn stopped(config: &Config) -> bool {
 /// finish. Rebinds after network errors, which happen when Wi-Fi drops or the console sleeps.
 pub fn run(config: &'static Config<'static>) {
     clear_staging();
+    if config.kind == DaemonKind::Sysmodule {
+        crate::usb::start(config);
+    }
     let mailboxes: &'static [Mailbox; MAX_CLIENTS] = Box::leak(Box::new(core::array::from_fn(|_| Mailbox::new())));
     // A stoppable server (the NRO) joins its workers before returning: hbloader loads the next NRO into the
     // same process, and a thread left running there executes unmapped code.
@@ -235,7 +238,7 @@ fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
     while !stopped(config) {
         let Some((stream, who)) = mailbox.take(timeout_ns) else { continue };
         crate::activity::connected(slot, who.0);
-        serve(&stream, config, slot, who.0);
+        serve(&mut TcpLink(&stream), config, slot, who.0);
         crate::activity::disconnected(slot);
         drop(stream);
         log!("client {}:{} disconnected", who.0, who.1);
@@ -243,28 +246,51 @@ fn worker(slot: usize, mailbox: &Mailbox, config: &Config) {
     }
 }
 
-fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
-    let mut session = Session::new(config.kind, slot, who);
-    let mut frame = Vec::new();
-    loop {
-        match wait_readable(stream, Some(config.idle_timeout_ms), config) {
+/// How a client's requests arrive and its replies leave: a TCP connection, or the USB cable ([`crate::usb`]).
+pub(crate) trait Link {
+    /// Waits for the next request and reads its frame (without the length prefix) into `frame`. `false` when
+    /// the client has gone, idled out or sent something broken, or the server is stopping.
+    fn receive(&mut self, frame: &mut Vec<u8>, config: &Config) -> bool;
+    /// Sends one encoded frame (prefix included).
+    fn send(&mut self, frame: Vec<u8>) -> bool;
+}
+
+struct TcpLink<'a>(&'a TcpStream);
+
+impl Link for TcpLink<'_> {
+    fn receive(&mut self, frame: &mut Vec<u8>, config: &Config) -> bool {
+        match wait_readable(self.0, Some(config.idle_timeout_ms), config) {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => return false,
             Err(rc) => {
                 log!("poll on client failed: {rc}");
-                return;
+                return false;
             }
         }
         let mut prefix = [0u8; 4];
-        if read_exact(stream, &mut prefix, config).is_err() {
-            return;
+        if read_exact(self.0, &mut prefix, config).is_err() {
+            return false;
         }
         let Some(len) = proto::frame_len(prefix) else {
-            let _ = send(stream, &Response::error(ErrorKind::BadRequest, "frame too large"));
-            return;
+            let _ = send(self.0, &Response::error(ErrorKind::BadRequest, "frame too large"));
+            return false;
         };
         frame.resize(len, 0);
-        if read_exact(stream, &mut frame, config).is_err() {
+        read_exact(self.0, frame, config).is_ok()
+    }
+
+    fn send(&mut self, frame: Vec<u8>) -> bool {
+        send_bytes(self.0, &frame).is_ok()
+    }
+}
+
+/// Answers `link`'s requests until it ends. `slot` is the client's (from [`take_slot`]); `who` its address,
+/// for the log and [`crate::activity`] (unspecified over USB).
+pub(crate) fn serve(link: &mut impl Link, config: &Config, slot: usize, who: Ipv4Addr) {
+    let mut session = Session::new(config.kind, slot, who);
+    let mut frame = Vec::new();
+    loop {
+        if !link.receive(&mut frame, config) {
             return;
         }
         let resp = match proto::decode::<Request>(&frame) {
@@ -276,7 +302,8 @@ fn serve(stream: &TcpStream, config: &Config, slot: usize, who: Ipv4Addr) {
                 format!("this daemon (protocol {}) doesn't know that request: update the sysmodule", proto::PROTOCOL_VERSION),
             ),
         };
-        if send(stream, &resp).is_err() {
+        let Ok(bytes) = proto::encode(&resp) else { return };
+        if !link.send(bytes) {
             return;
         }
         match session.take_after_reply() {
@@ -470,7 +497,10 @@ fn read_exact(stream: &TcpStream, buf: &mut [u8], config: &Config) -> core::resu
 }
 
 fn send(stream: &TcpStream, resp: &Response) -> core::result::Result<(), ()> {
-    let bytes = proto::encode(resp).map_err(|_| ())?;
+    send_bytes(stream, &proto::encode(resp).map_err(|_| ())?)
+}
+
+fn send_bytes(stream: &TcpStream, bytes: &[u8]) -> core::result::Result<(), ()> {
     let mut done = 0;
     while done < bytes.len() {
         match stream.send(&bytes[done..]) {
