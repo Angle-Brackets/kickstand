@@ -2,7 +2,7 @@
 
 All notable changes to Kickstand are documented in this file.
 
-## [0.1.2] - 2026-11-11
+## [0.1.2] - unreleased
 
 ### Added
 - **Native USB Bulk Transport (`usb_upload`, `kickstand usb-put`, `kickstand put --usb`)**:
@@ -17,9 +17,9 @@ All notable changes to Kickstand are documented in this file.
   - When the running game records gameplay (or homebrew runs in such a game's place), the sysmodule streams the console's own 30 fps 1280x720 H.264 from the gameplay recorder (`grc:d`) on demand (`Request::VideoStream`, a 384 KiB queue on the console that resumes at the next keyframe if the PC falls behind); the PC adds the parameter sets the recorder leaves out, muxes an `.mp4` (`ffmpeg -c:v copy`, frames numbered at the clip's rate, with the sound pulled from `Request::AudioStream` alongside as AAC) and decodes the GIF and contact sheet from it. Without ffmpeg, or when the game doesn't record, it falls back to screenshots and says why.
   - The PC also keeps a rolling ring of recent screenshots (`VideoRingBuffer`; `/clip` and `/ring` on `kickstand watch`). That ring is screenshots taken by the PC, not a stream from the console.
 - **Fast In-Process NRO Hot-Reload (`reload_nro`, `kickstand reload`)**:
-  - Added `reload_nro` MCP tool and `kickstand reload` CLI subcommand to hot-reload homebrew NROs without a 10-15 second Home Menu round-trip.
-  - Stages the updated `.nro` to `/switch/...` over USB (`usb_upload`) or Wi-Fi while the current NRO is still running, exits the running NRO cleanly back to `hbmenu` inside the existing `hbloader` process, and chainloads the new NRO via `kickstand.nro --open <dest> [args...]`.
-  - Automatically falls back to a full `run_nro` launch if `hbloader` is not running or does not answer on NetLoader, and supports optional `replay_macro` execution immediately after reload.
+  - Swaps a new build in for the running homebrew inside the same hbloader process, without a Home Menu round trip, and reports the path taken (`hook`, `hbmenu` or `cold`) with the time for each phase (upload, exit, load).
+  - **Next-load hook** (opt-in, a few lines of C or Rust, no library; TOOLS.md has both): Kickstand writes `/kickstand/next-load` (the NRO path, then its argv) and presses the exit button(s); an app started from a PC over nxlink deletes the file and calls `envSetNextLoad`, so hbloader loads the new build directly. The delete decides: if the file is still there 3 s later, Kickstand withdraws it, so a leftover request can't redirect a launch from hbmenu. Support is detected from the NRO itself (`--hook` / `--no-hook` override).
+  - Otherwise it exits to hbmenu, starts NetLoader (Y repeated every second) and chain-loads the build through `kickstand.nro --open`; if hbloader isn't running, a full `run_nro` launch. `exit_buttons` for apps that don't quit on `+`, and an optional macro replay afterwards.
 - **Sampling CPU Profiler & Interactive SVG Flamegraphs (`profile`, `kickstand profile`)**:
   - Added `Request::Profile` / `Response::Profile` (protocol 29) in `daemon-core` to sample the running application's (or applet's) threads at 50-100 Hz via `svcDebugActiveProcess` and `svcBreakDebugProcess`, unwinding AArch64 frame-pointer chains (`fp` / `x29`) with leaf `lr` (`x30`) recovery while bounding sysmodule heap allocations to 32 KiB.
   - Added PC-side DWARF inline-aware symbolization, Brendan Gregg folded stack generation, zero-dependency interactive `.svg` flamegraph rendering (with zoom, hover tooltips, and regex search), and token-efficient AI reports ranking exclusive self-time hotspots and pruned inclusive call trees.
@@ -30,10 +30,18 @@ All notable changes to Kickstand are documented in this file.
   - `grc:d`'s stream is started at most once per boot, only after a Transfer answers "not initialized" (a second start would crash grc), and Kickstand stays off it while SysDVR runs. Nothing opens `audout:u`/`audin:u` and the debugger isn't involved.
   - A reader stopped in the middle of a `grc:d` Transfer (one blocks while the game is behind an applet such as the Album) leaves grc sending nothing to anyone until a reboot (found on 23.0.1). `Request::CaptureHold` pauses capture and waits for Transfers under way to finish, and `sysmodule install`/`update` send it before restarting the sysmodule (verified: capture continues across the restart). When a daemon was stopped without that, the next one reports `CaptureState::NeedsReboot` instead of "waiting", and the tools say to reboot.
   - PC side: WAV encoding/decoding, DSP metrics (RMS/peak dBFS, dominant frequency, silence, clipping, pops), reference `.wav` matching by exact normalized cross-correlation over every lag (FFT), ignoring windows far quieter than the reference, and waveform + spectrogram rendering.
+- **USB First, Automatically (`upload`, `kickstand put`, `run_nro`, `reload_nro`)**:
+  - Files go to a mounted SD card when there is one, else over USB when a cable is plugged in and the file is 4 MiB or more, else over Wi-Fi. A failed USB attempt falls back to Wi-Fi with the reason and keeps automatic uploads on Wi-Fi for 5 minutes. `run_nro` copies a large build over USB and starts it from the SD card instead of sending it to NetLoader over Wi-Fi. `put --usb` / `--wifi` and `usb_upload` insist on one.
+- **One-Time USB Setup (`kickstand usb-setup`, desktop app's Set up USB)**:
+  - Linux: a udev rule for `057e:3000` through the desktop's password prompt (`pkexec`) or `sudo`. Windows: the WinUSB driver, installed with libwdi (the library Zadig is built on) after Windows' admin prompt. macOS: nothing to do. The desktop app explains what changes in its own dialog first. CI runs the real setup on Linux, Windows and macOS runners.
 - **Wireless Daemon Update from Local Builds (`update`)**:
   - Updated `kickstand update --switch` and the desktop app's **Update** button to detect local `cargo nx build --release` artifacts (`sys-kickstand.nsp` and `kickstand.nro`) when running a source build, and to offer a wireless Switch update whenever either the daemon crate version or `proto::PROTOCOL_VERSION` is behind the PC.
 
 ### Fixed
+- **Holding R opens hbmenu again after Kickstand ran** (`third_party/nx` `input::Context`, `daemon_core::pm_input`):
+  - The vendored nx deactivated npad for applet resource user id 0 whenever an input context was dropped (Kickstand's NRO screen, opened by every network sysmodule install, and macro recording). Atmosphère's pm reads held keys through that id, so holding R started the game instead of hbloader until a reboot, while Kickstand's own override still worked. nx now deactivates only its own id, and the sysmodule re-applies pm's settings at start, which mends an affected console without a reboot (verified on hardware).
+- **Kickstand's NRO hands back to the sysmodule when a client ends it** (`kickstand exit`), not only on `+`; ending it left nothing listening until someone pressed `+` at the console.
+- **A forgotten hbl override is disarmed after 60 s**: a client killed mid-launch left the title starting as hbloader unless R was held.
 - **Cancelled Transfer Recovery (`mcp/src/client.rs`, `daemon/core/src/server.rs`)**:
   - Replaced client connections left with a half-sent frame or unread replies after a cancelled tool call, timed out daemon frame reads stalled for 30 seconds (`FRAME_STALL_MS`), and cleaned up leftover `upload-*.part` staging files on daemon startup.
 - **USB Transport Lifecycle (`daemon/core/src/usb.rs`, `mcp/src/usb.rs`)**:
