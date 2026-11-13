@@ -39,6 +39,7 @@ fn main() {
     daemon_core::awake::start();
     daemon_core::awake::unlock_after_agent_reboot();
     daemon_core::hbl::disarm_leftover();
+    daemon_core::pm_input::restore();
     indicator::start();
     daemon_core::start_hold_expiry();
     daemon_core::audio::start_sampler();

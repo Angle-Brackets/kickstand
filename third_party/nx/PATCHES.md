@@ -26,3 +26,8 @@ Local changes (worth upstreaming):
    the owner and nothing ran again. `unlock` cleared the owner before `arbitrate_unlock`, so a third thread
    could take the mutex while the kernel handed it to a waiter. Found on hardware: stopping a paused macro
    (the stop and the hold-expiry thread both waiting on the controller's lock) froze every client.
+7. `input::Context` deactivates npad on drop only for its own applet resource user id, and never for id 0. It
+   always deactivated id 0, which every non-applet process shares: Atmosphère's pm activates npad there once
+   and reads held keys through it to decide title overrides, so dropping any `Context` (an NRO's input screen,
+   a sysmodule's input reader) left pm seeing no buttons, and holding R no longer opened hbmenu, until a
+   reboot. Found on hardware (fw 23.0.1).
