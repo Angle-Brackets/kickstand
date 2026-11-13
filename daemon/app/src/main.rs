@@ -81,15 +81,23 @@ fn main() {
 
     if run_screen() {
         log!("+ pressed");
-        if stopped_sysmodule || BOOT2.load(Ordering::Relaxed) {
+        if BOOT2.load(Ordering::Relaxed) {
             daemon_core::HANDOVER_REQUESTED.store(true, Ordering::Relaxed);
         }
+    }
+    // Hand back to the background service this screen paused, however the screen ends (+, or a client's
+    // Exit): ending without it left nothing listening, and only someone at the console could recover.
+    if stopped_sysmodule {
+        daemon_core::HANDOVER_REQUESTED.store(true, Ordering::Relaxed);
     }
     STOP.store(true, Ordering::Relaxed);
     let _ = server.join();
     services::hid::release_hold();
-    // The listener is closed now, so the sysmodule can bind the port on its first try.
-    if daemon_core::HANDOVER_REQUESTED.load(Ordering::Relaxed) {
+    // The listener is closed now, so the sysmodule can bind the port on its first try. A client may have
+    // started it already (sysmodule start, then handover); don't start a second one.
+    if daemon_core::HANDOVER_REQUESTED.load(Ordering::Relaxed)
+        && services::pm::process_id(proto::path::SYSMODULE_PROGRAM_ID).is_none()
+    {
         match daemon_core::start_sysmodule() {
             Ok(pid) => log!("handed over to the sysmodule (pid {pid})"),
             Err(rc) => log!("starting the sysmodule failed: {rc}"),
