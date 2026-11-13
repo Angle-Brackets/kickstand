@@ -79,8 +79,12 @@ pub fn run(gui: bool) -> Result<String> {
                 bail!("the driver installation didn't finish (cancelled, or it failed)");
             }
         }
+        // The config folder may not exist yet on a PC that never paired.
         if let Some(marker) = driver_marker() {
-            let _ = std::fs::write(marker, "WinUSB for 057e:3000\n");
+            let written = marker.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&marker, "WinUSB for 057e:3000\n"));
+            if let Err(e) = written {
+                eprintln!("installed, but couldn't note it in {}: {e}", marker.display());
+            }
         }
         Ok("Installed WinUSB for the Switch's Kickstand USB device: this PC may now use USB with it".into())
     }
