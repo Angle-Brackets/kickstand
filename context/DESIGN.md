@@ -12,6 +12,8 @@ kickstand/
   daemon/   sysmodule on the `nx` crate: command server, launch/kill/reboot, screenshots, input, files, watchdog
   proto/    shared command and response types (no_std + serde), used by both sides
   mcp/      MCP server on rmcp: a thin client to the daemon over TCP
+  libkickstand/  linked into the user's homebrew (C for libnx, rust/ for nx): quits when reload_nro asks,
+            claims the next-load request, and releases what a build leaves behind in the shared hbloader process
 ```
 One protocol crate means the two halves can't drift apart.
 
@@ -26,6 +28,7 @@ One protocol crate means the two halves can't drift apart.
 | Sleep drops Wi-Fi | Turn auto-sleep off during a session |
 | Seeing and playing | Screenshots (`caps:sc`), virtual controller (`hid:dbg`), memory read/write (as sys-botbase does) |
 | Logs, crash reports | Reads `sdmc:/atmosphere/crash_reports/` and app logs directly. No FTP module |
+| Relaunching after every build | `reload_nro`: the next build loads into the same hbloader process (the app's next-load hook, or hbmenu's NetLoader); libkickstand makes that safe and button-free |
 | Stepping through code | Later: Atmosphère's GDB stub (`enable_standalone_gdbstub`), driven from the MCP side |
 
 Only the power button should ever need the user.

@@ -79,6 +79,9 @@ cd daemon && cargo nx build --release -p sys-kickstand   # -> daemon/target/aarc
 
 # 3. Build the Switch hbmenu NRO (first-time installer, status screen & launcher)
 cd daemon && cargo nx build --release -p kickstand-nro   # -> daemon/target/aarch64-nintendo-switch-freestanding/release/kickstand.nro
+
+# 4. Optional, for your own homebrew: libkickstand for libnx (C/C++) apps (requires devkitA64)
+make -C libkickstand                                     # -> libkickstand/libkickstand.a (Rust apps on nx: the libkickstand/rust crate)
 ```
 
 ---
