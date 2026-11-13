@@ -71,12 +71,45 @@ const HOOK_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { D
 
 /// Bytes every NRO implementing the hook contains: it has to name the request file.
 const HOOK_MARKER: &[u8] = b"kickstand/next-load";
+/// Bytes every NRO linking libkickstand contains: it quits by itself once the request is there.
+const LIB_MARKER: &[u8] = b"kickstand-lib/1";
+
+/// How the app takes part in a reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hook {
+    /// Not at all: it exits on the exit button(s) and goes back to hbmenu.
+    Off,
+    /// The next-load hook, written into the app: it claims the request once the exit button(s) make it quit.
+    Press,
+    /// libkickstand: it quits by itself when the request appears (no button press), claims the request, and
+    /// releases what it left behind so the next build runs safely in the same process.
+    Ask,
+}
+
+/// Which [`Hook`] a build implements, from its bytes.
+pub fn hook_of(nro: &[u8]) -> Hook {
+    if memchr::memmem::find(nro, LIB_MARKER).is_some() {
+        Hook::Ask
+    } else if implements_hook(nro) {
+        Hook::Press
+    } else {
+        Hook::Off
+    }
+}
+
+/// Destinations whose build linked libkickstand, for reloads of a build already on the SD card.
+static ASKS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 /// hbloader's buffers for `envSetNextLoad` (nx-hbloader's `g_nextNroPath` and `g_nextArgv`), NUL included.
 const NEXT_PATH_MAX: usize = 512;
 const NEXT_ARGV_MAX: usize = 2048;
 
 /// SD card NROs whose app claimed a next-load request in this process: their next reload tries the hook too.
 static HOOKED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Destinations whose running build holds its own file open (homebrew with a romfs does), so a new build
+/// can't replace it: each reload alternates between the destination and [`alternate`]. With the path
+/// loaded last, so the next build goes to the other one.
+static LOCKED: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());
 /// The Kickstand NRO's bytes for the hbmenu path, by file size, so a reload doesn't read ~700 KB over Wi-Fi
 /// each time. (A same-sized replacement would be missed; any Kickstand NRO can open an NRO, so that's harmless.)
 static LAUNCHER_CACHE: Mutex<Option<(u64, Vec<u8>)>> = Mutex::new(None);
@@ -158,8 +191,8 @@ impl Reloaded {
             // can't be told apart from here.
             let exit = self.phases.exit.unwrap_or_default();
             parts.push(match self.phases.load {
-                Some(load) => format!("press, exit and load {}", secs(exit + load)),
-                None => format!("press and exit {}, load ? (no stdout)", secs(exit)),
+                Some(load) => format!("exit and load {}", secs(exit + load)),
+                None => format!("exit {}, load ? (no stdout)", secs(exit)),
             });
         } else {
             parts.extend(self.phases.exit.map(|d| format!("exit {}", secs(d))));
@@ -253,17 +286,28 @@ pub async fn hot_reload(client: &Client, opts: ReloadOptions) -> Result<Reloaded
         // Validate the macro up front before spending time transferring or reloading the NRO.
         crate::macros::load(macro_name)?;
     }
-    let want_hook = opts.hook.unwrap_or_else(|| match &opts.program {
-        Program::Local { nro, .. } => implements_hook(nro),
-        Program::Sd(_) => HOOKED.lock().unwrap().contains(&sd_dest),
-    });
+    let detected = match &opts.program {
+        Program::Local { nro, .. } => hook_of(nro),
+        Program::Sd(_) if ASKS.lock().unwrap().contains(&sd_dest) => Hook::Ask,
+        Program::Sd(_) if HOOKED.lock().unwrap().contains(&sd_dest) => Hook::Press,
+        Program::Sd(_) => Hook::Off,
+    };
+    let hook = match opts.hook {
+        None => detected,
+        Some(false) => Hook::Off,
+        Some(true) if detected == Hook::Ask => Hook::Ask,
+        Some(true) => Hook::Press,
+    };
 
     let start = Instant::now();
-    let transfer_note = stage_nro_on_sd(client, &opts.program, &sd_dest, opts.use_usb).await?;
+    let (transfer_note, sd_dest) = stage_nro_on_sd(client, &opts.program, &sd_dest, opts.use_usb).await?;
     let mut phases = Phases { upload: start.elapsed(), ..Phases::default() };
+    if hook == Hook::Ask {
+        ASKS.lock().unwrap().insert(sd_dest.clone());
+    }
 
     let attempt =
-        try_in_process_reload(client, &sd_dest, &opts.args, opts.mode, opts.exit_buttons.as_deref(), want_hook).await?;
+        try_in_process_reload(client, &sd_dest, &opts.args, opts.mode, opts.exit_buttons.as_deref(), hook).await?;
     let (mut started, path) = match attempt {
         HotOutcome::Hot { mut started, path, exit, load } => {
             started.notes.insert(0, transfer_note.clone());
@@ -330,20 +374,62 @@ async fn validate_destination(client: &Client, program: &Program, mode: Mode) ->
 
 /// Uploads a local NRO to `sd_dest` (over USB if requested and available, otherwise over Wi-Fi) while the
 /// current NRO is still running, or stats an existing SD card NRO.
-async fn stage_nro_on_sd(client: &Client, program: &Program, sd_dest: &str, use_usb: bool) -> Result<String> {
+/// Returns what happened and where the build is: `sd_dest`, or [`alternate`] when the running build holds
+/// `sd_dest` open.
+async fn stage_nro_on_sd(client: &Client, program: &Program, sd_dest: &str, use_usb: bool) -> Result<(String, String)> {
     match program {
         Program::Local { nro, .. } => {
             // USB first when a cable is in and the build is big enough to repay it, else Wi-Fi.
             let transport = if use_usb { Transport::Auto } else { Transport::Wifi };
-            let sent = transfer::put_bytes(client, nro, sd_dest, transport).await.with_context(|| format!("uploading {sd_dest}"))?;
-            Ok(format!("uploaded {sd_dest}: {}", sent.describe()))
+            let other = alternate(sd_dest);
+            // Known to hold its file open: straight to the path not loaded last.
+            let first = match LOCKED.lock().unwrap().get(sd_dest) {
+                Some(last) if *last == sd_dest => other.clone(),
+                _ => sd_dest.to_string(),
+            };
+            let upload = |path: String| async move {
+                let sent = transfer::put_bytes(client, nro, &path, transport).await;
+                (path, sent)
+            };
+            let (path, sent) = match upload(first.clone()).await {
+                (path, Err(e)) if transfer::destination_locked(&e) => {
+                    let second = if path == sd_dest { other } else { sd_dest.to_string() };
+                    let (second, sent) = upload(second).await;
+                    let sent = sent.with_context(|| format!("uploading {second} ({path} is held open by the running build)"))?;
+                    (second, Ok::<_, anyhow::Error>(sent))
+                }
+                done => done,
+            };
+            let sent = sent.with_context(|| format!("uploading {path}"))?;
+            let mut note = format!("uploaded {path}: {}", sent.describe());
+            if path != sd_dest || LOCKED.lock().unwrap().contains_key(sd_dest) {
+                LOCKED.lock().unwrap().insert(sd_dest.to_string(), path.clone());
+                if path != sd_dest {
+                    note.push_str(&format!(
+                        " (the running build holds {sd_dest} open, as homebrew with a romfs does, so this one loads from \
+                         beside it; the next reload goes back to {sd_dest})"
+                    ));
+                }
+            }
+            Ok((note, path))
         }
         Program::Sd(_) => {
             let entry = client.stat(sd_dest).await.with_context(|| format!("checking {sd_dest} on the SD card"))?;
-            Ok(format!("using {sd_dest} already on the SD card ({} bytes)", entry.size))
+            Ok((format!("using {sd_dest} already on the SD card ({} bytes)", entry.size), sd_dest.to_string()))
         }
     }
 }
+
+/// Where a build goes while the one at `sd_dest` is running and holds its file open: `x.nro` -> `x.reload.nro`,
+/// in the same folder, so an app that finds its files beside its NRO still does.
+fn alternate(sd_dest: &str) -> String {
+    match sd_dest.strip_suffix(".nro") {
+        Some(stem) => format!("{stem}.reload.nro"),
+        None => format!("{sd_dest}.reload.nro"),
+    }
+}
+
+
 
 /// The Kickstand NRO, from [`LAUNCHER_CACHE`] when its size hasn't changed.
 async fn launcher_bytes(client: &Client) -> Result<Vec<u8>> {
@@ -366,8 +452,9 @@ enum HotOutcome {
 enum HookOutcome {
     /// The app claimed the request; hbloader is loading the new build.
     Taken { started: Started, exit: Duration, load: Option<Duration> },
-    /// Kickstand withdrew the request: the app didn't claim it after the exit button(s), pressed at `pressed_at`.
-    Withdrawn { pressed_at: Instant, note: String },
+    /// Kickstand withdrew the request: the app didn't claim it. `pressed_at`: when the exit button(s) went
+    /// in, if they were pressed ([`Hook::Press`]).
+    Withdrawn { pressed_at: Option<Instant>, note: String },
     /// The request couldn't be made (nothing was written or pressed).
     Skipped { note: String },
 }
@@ -384,7 +471,7 @@ async fn try_in_process_reload(
     args: &[String],
     mode: Mode,
     exit_buttons: Option<&[Button]>,
-    want_hook: bool,
+    hook: Hook,
 ) -> Result<HotOutcome> {
     let Some(app) = launch::status(client, mode).await? else {
         return Ok(HotOutcome::Cold { reason: "no application was running".into(), notes: Vec::new() });
@@ -402,14 +489,15 @@ async fn try_in_process_reload(
     // When the exit button(s) went in: the start of the exit phase.
     let mut pressed_at = None;
 
-    if want_hook && !already_at_hbmenu && !buttons.is_empty() {
-        match try_hook(client, sd_dest, args, &buttons, app.pid).await? {
+    let hook_buttons: &[Button] = if hook == Hook::Ask { &[] } else { &buttons };
+    if hook != Hook::Off && !already_at_hbmenu && (hook == Hook::Ask || !buttons.is_empty()) {
+        match try_hook(client, sd_dest, args, hook_buttons, app.pid).await? {
             HookOutcome::Taken { started, exit, load } => {
                 return Ok(HotOutcome::Hot { started, path: ReloadPath::Hook, exit: Some(exit), load });
             }
             HookOutcome::Withdrawn { pressed_at: at, note } => {
                 notes.push(note);
-                pressed_at = Some(at);
+                pressed_at = at;
             }
             HookOutcome::Skipped { note } => notes.push(note),
         }
@@ -520,8 +608,8 @@ async fn withdraw(client: &Client) -> Result<bool> {
     }
 }
 
-/// Writes the next-load request, presses the exit button(s) and waits for the app to claim the request,
-/// withdrawing it if the app doesn't.
+/// Writes the next-load request, presses the exit button(s) (none: libkickstand quits by itself when it
+/// sees the request) and waits for the app to claim the request, withdrawing it if the app doesn't.
 async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Button], pid: u64) -> Result<HookOutcome> {
     let host = nxlink_host_arg(client.host()).await;
     let request = match next_load_request(sd_dest, args, host.as_deref()) {
@@ -535,11 +623,12 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
     launch::nro_starting();
     // Before the press: the app exits while it's held, and the press itself takes over a second.
     let pressed_at = Instant::now();
-    if let Err(e) = client.press(buttons.to_vec(), 1, 120).await {
+    let pressed = !buttons.is_empty();
+    if pressed && let Err(e) = client.press(buttons.to_vec(), 1, 120).await {
         let _ = withdraw(client).await;
         return Err(e);
     }
-    let names = button_names(buttons);
+    let asked = if pressed { format!("pressed {}", button_names(buttons)) } else { "asked the app to quit (libkickstand)".into() };
 
     let claimed = loop {
         match request_pending(client).await {
@@ -554,10 +643,11 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
     };
     if !claimed {
         HOOKED.lock().unwrap().remove(sd_dest);
+        ASKS.lock().unwrap().remove(sd_dest);
         return Ok(HookOutcome::Withdrawn {
-            pressed_at,
+            pressed_at: pressed.then_some(pressed_at),
             note: format!(
-                "pressed {names}; the app didn't claim the next-load request within {:.1} s (it doesn't implement \
+                "{asked}; the app didn't claim the next-load request within {:.1} s (it doesn't implement \
                  the hook, wasn't started from a PC, or didn't exit), so it was withdrawn",
                 HOOK_WAIT.as_secs_f64()
             ),
@@ -570,8 +660,8 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
     let output = output.accept(HOT_OUTPUT_WAIT).await?;
     let load = output.as_ref().map(|_| load_from.elapsed());
     let mut notes = vec![format!(
-        "pressed {names}; the app claimed the next-load request {:.2} s after the press began and hbloader \
-         loaded {sd_dest} directly (same process, pid {pid}; no hbmenu)",
+        "{asked}; the app claimed the next-load request {:.2} s later and hbloader loaded {sd_dest} directly \
+         (same process, pid {pid}; no hbmenu)",
         exit.as_secs_f64()
     )];
     if output.is_none() {
@@ -643,6 +733,11 @@ mod tests {
     }
 
     #[test]
+    fn the_alternate_sits_beside_the_destination() {
+        assert_eq!(alternate("/switch/paperboat/paperboat.nro"), "/switch/paperboat/paperboat.reload.nro");
+    }
+
+    #[test]
     fn builds_chainload_args_and_default_exit_buttons() {
         assert_eq!(
             chainload_args("/switch/mygame/mygame.nro", &["--level".into(), "3".into()]),
@@ -706,7 +801,7 @@ mod tests {
 
         // 1. Wi-Fi upload (`use_usb: false`)
         let payload = b"NRO0-wifi-payload".to_vec();
-        let note = stage_nro_on_sd(
+        let (note, path) = stage_nro_on_sd(
             &client,
             &Program::Local { nro: payload.clone(), dest: "/switch/mygame/mygame.nro".into() },
             "/switch/mygame/mygame.nro",
@@ -715,11 +810,12 @@ mod tests {
         .await
         .unwrap();
         assert!(note.contains("via Wi-Fi"), "{note}");
+        assert_eq!(path, "/switch/mygame/mygame.nro");
         assert_eq!(std::fs::read(root.join("switch/mygame/mygame.nro")).unwrap(), payload);
 
         // 2. USB requested when no USB cable/mount exists -> seamlessly falls back to Wi-Fi
         let payload2 = b"NRO0-usb-fallback-payload".to_vec();
-        let note2 = stage_nro_on_sd(
+        let (note2, path) = stage_nro_on_sd(
             &client,
             &Program::Local { nro: payload2.clone(), dest: "/switch/mygame/mygame.nro".into() },
             "/switch/mygame/mygame.nro",
@@ -728,13 +824,15 @@ mod tests {
         .await
         .unwrap();
         assert!(note2.contains("USB unavailable") || note2.contains("via"), "{note2}");
+        assert_eq!(path, "/switch/mygame/mygame.nro");
         assert_eq!(std::fs::read(root.join("switch/mygame/mygame.nro")).unwrap(), payload2);
 
         // 3. Existing SD card NRO (`Program::Sd`)
-        let note3 = stage_nro_on_sd(&client, &Program::Sd("/switch/mygame/mygame.nro".into()), "/switch/mygame/mygame.nro", false)
+        let (note3, path) = stage_nro_on_sd(&client, &Program::Sd("/switch/mygame/mygame.nro".into()), "/switch/mygame/mygame.nro", false)
             .await
             .unwrap();
         assert!(note3.contains("already on the SD card"), "{note3}");
+        assert_eq!(path, "/switch/mygame/mygame.nro");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -823,6 +921,37 @@ mod tests {
         let reloaded = hot_reload(&client, options(Program::Sd("/switch/mygame/mygame.nro".into()), Vec::new(), None)).await.unwrap();
         let _out = again.await.unwrap();
         assert_eq!(reloaded.path, ReloadPath::Hook, "notes: {:?}", reloaded.started.notes);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_app_with_libkickstand_is_asked_to_quit_without_a_press() {
+        let _ports = PORTS.lock().await;
+        let (root, console, client) = console_with_app("lib", false).await;
+        console.app.lock().unwrap().libkickstand = true;
+        let app = console.clone();
+        let new_build = tokio::spawn(async move {
+            while app.app.lock().unwrap().chainloaded.is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::net::TcpStream::connect(("127.0.0.1", nxlink::CLIENT_PORT)).await.unwrap()
+        });
+
+        assert_eq!(hook_of(b"NRO0 kickstand-lib/1 sdmc:/kickstand/next-load"), Hook::Ask);
+        assert_eq!(hook_of(b"NRO0 sdmc:/kickstand/next-load"), Hook::Press);
+        assert_eq!(hook_of(b"NRO0"), Hook::Off);
+        let program = Program::Local {
+            nro: b"NRO0 kickstand-lib/1 sdmc:/kickstand/next-load".to_vec(),
+            dest: "/switch/mygame/mygame.nro".into(),
+        };
+        let reloaded = hot_reload(&client, options(program, Vec::new(), None)).await.unwrap();
+        let _out = new_build.await.unwrap();
+
+        assert_eq!(reloaded.path, ReloadPath::Hook, "notes: {:?}", reloaded.started.notes);
+        assert!(reloaded.started.notes.iter().any(|n| n.contains("asked the app to quit")), "{:?}", reloaded.started.notes);
+        assert_eq!(console.app.lock().unwrap().presses, 0, "no button was pressed");
+        assert!(!root.join("kickstand/next-load").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }

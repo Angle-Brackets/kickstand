@@ -117,6 +117,8 @@ pub async fn put_file(client: &Client, local: &Path, remote: &str, transport: Tr
         Transport::Auto => match plan(size) {
             Plan::Usb => match over_usb(client, local, remote).await {
                 Ok(sent) => return Ok(sent),
+                // The SD card refused the file, not USB: Wi-Fi would be refused too.
+                Err(e) if destination_locked(&e) => return Err(e),
                 Err(e) => usb_failed(e),
             },
             Plan::Wifi(note) => note,
@@ -135,6 +137,8 @@ pub async fn put_bytes(client: &Client, data: &[u8], remote: &str, transport: Tr
         Transport::Auto => match plan(data.len() as u64) {
             Plan::Usb => match bytes_over_usb(client, data, remote).await {
                 Ok(sent) => return Ok(sent),
+                // The SD card refused the file, not USB: Wi-Fi would be refused too.
+                Err(e) if destination_locked(&e) => return Err(e),
                 Err(e) => usb_failed(e),
             },
             Plan::Wifi(note) => note,
@@ -142,6 +146,13 @@ pub async fn put_bytes(client: &Client, data: &[u8], remote: &str, transport: Tr
     };
     let stats = client.upload(remote, data).await?;
     Ok(Sent { size: stats.size, elapsed: stats.elapsed, via: "Wi-Fi".into(), note })
+}
+
+/// Whether the SD card refused the file because it's open elsewhere (fs `TargetLocked`, 2002-0007), e.g. the
+/// NRO that's running: no way of sending it would do better.
+pub fn destination_locked(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    text.contains("2002-0007") || text.contains("0xe02")
 }
 
 /// Records a failed automatic USB attempt and returns the note for the Wi-Fi upload that follows.
@@ -182,6 +193,12 @@ mod tests {
         *USB_FAILURE.lock().unwrap() = Some((Instant::now() - USB_RETRY_AFTER - Duration::from_secs(1), "old".into()));
         assert!(recent_failure().is_none());
         forget_failure();
+    }
+
+    #[test]
+    fn a_locked_destination_is_not_a_usb_failure() {
+        assert!(destination_locked(&anyhow::anyhow!("Io: remove /switch/x.nro: 2002-0007 (result 0xe02)")));
+        assert!(!destination_locked(&anyhow::anyhow!("USB: permission denied")));
     }
 
     #[test]

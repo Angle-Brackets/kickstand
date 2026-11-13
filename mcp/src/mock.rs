@@ -49,6 +49,24 @@ pub struct MockApp {
     pub next_load_hook: bool,
     /// The (path, argv) the hook claimed.
     pub chainloaded: Option<(String, String)>,
+    /// Like an NRO linked with libkickstand: it notices `/kickstand/next-load` by itself (here: the next
+    /// time the folder is listed) and claims it with no button press.
+    pub libkickstand: bool,
+    /// How many Presses arrived.
+    pub presses: u32,
+}
+
+impl MockApp {
+    /// What the hook does on the way out: claim the request (read, delete) and keep what it would load.
+    fn claim_next_load(&mut self, root: &std::path::Path) {
+        let file = root.join(&path::NEXT_LOAD[1..]);
+        if let Ok(text) = std::fs::read_to_string(&file)
+            && std::fs::remove_file(&file).is_ok()
+            && let [load, argv, ..] = text.lines().collect::<Vec<_>>()[..]
+        {
+            self.chainloaded = Some((load.to_string(), argv.to_string()));
+        }
+    }
 }
 
 /// Who is connected and what they did, for [`Request::Activity`].
@@ -402,7 +420,14 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             Request::UsbOpen => Response::error(ErrorKind::Unsupported, "the mock console has no USB port"),
             Request::UsbClose => Response::Ok,
             Request::ListDir { path } => match path::check_read(&path) {
-                Ok(p) => list(&root.join(&p[1..])),
+                Ok(p) => {
+                    let mut app = console.app.lock().unwrap();
+                    if app.libkickstand && app.running.is_some() && path::NEXT_LOAD.starts_with(&format!("{p}/")) {
+                        app.claim_next_load(root);
+                    }
+                    drop(app);
+                    list(&root.join(&p[1..]))
+                }
                 Err(e) => Response::error(ErrorKind::Forbidden, e.describe()),
             },
             Request::Stat { path } => match path::check_read(&path) {
@@ -481,14 +506,9 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
             Request::Press { buttons, .. } => {
                 let mut app = console.app.lock().unwrap();
                 if buttons.contains(&proto::Button::Plus) && app.running.is_some() && app.next_load_hook {
-                    let file = root.join(&path::NEXT_LOAD[1..]);
-                    if let Ok(text) = std::fs::read_to_string(&file)
-                        && std::fs::remove_file(&file).is_ok()
-                        && let [load, argv, ..] = text.lines().collect::<Vec<_>>()[..]
-                    {
-                        app.chainloaded = Some((load.to_string(), argv.to_string()));
-                    }
+                    app.claim_next_load(root);
                 }
+                app.presses += 1;
                 Response::Ok
             }
             Request::Hold { .. }
