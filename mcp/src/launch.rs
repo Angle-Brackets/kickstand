@@ -31,6 +31,16 @@ use crate::{config, nxlink};
 /// is sent. Lets [`run_nro`] press Y straight away instead of reopening hbmenu.
 pub(crate) static HBMENU_PID: AtomicU64 = AtomicU64::new(0);
 
+/// Set when Kickstand closes the Album, which leaves the home menu showing: [`crate::client::SCREEN_CHANGES`]
+/// then. While nothing has changed the screen since, the home menu is still in front, and HOME there would
+/// resume a suspended application (hbmenu with full memory, say) instead of selecting the first tile.
+static HOME_LEFT_AT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Whether the home menu Kickstand left showing (by closing the Album) still is, as far as Kickstand knows.
+fn home_still_showing() -> bool {
+    HOME_LEFT_AT.load(Ordering::Relaxed) == crate::client::SCREEN_CHANGES.load(Ordering::Relaxed)
+}
+
 /// Shortest wait for the home menu to come back after an application closes.
 const AFTER_CLOSE: Duration = Duration::from_millis(1500);
 /// How long to look for a new application process after the last input.
@@ -91,8 +101,10 @@ pub async fn open_hbmenu(client: &Client, mode: Mode) -> Result<Opened> {
 }
 
 /// `at_home`: the Album was just closed, which leaves the home menu showing with its first tile selected.
-/// HOME then would resume a suspended game instead.
+/// HOME then would resume a suspended game instead. Also assumed when Kickstand closed the Album earlier
+/// and nothing has changed the screen since (a sysmodule install ends that way).
 async fn open_applet(client: &Client, mut at_home: bool) -> Result<Opened> {
+    at_home |= home_still_showing();
     let mut notes = Vec::new();
     if let Some(app) = client.applet_status().await? {
         if app.hbl == Some(true) {
@@ -351,6 +363,7 @@ pub async fn close(client: &Client, mode: Mode, app: &App, how: How) -> Result<C
             );
         }
         HBMENU_PID.store(0, Ordering::Relaxed);
+        HOME_LEFT_AT.store(crate::client::SCREEN_CHANGES.load(Ordering::Relaxed), Ordering::Relaxed);
         tokio::time::sleep(AFTER_CLOSE).await;
         return Ok(Closed::Exited);
     }

@@ -302,8 +302,14 @@ pub async fn hot_reload(client: &Client, opts: ReloadOptions) -> Result<Reloaded
     let start = Instant::now();
     let (transfer_note, sd_dest) = stage_nro_on_sd(client, &opts.program, &sd_dest, opts.use_usb).await?;
     let mut phases = Phases { upload: start.elapsed(), ..Phases::default() };
+    // What a new build implements replaces what the last one at this path did.
     if hook == Hook::Ask {
         ASKS.lock().unwrap().insert(sd_dest.clone());
+    } else if matches!(opts.program, Program::Local { .. }) {
+        ASKS.lock().unwrap().remove(&sd_dest);
+        if detected == Hook::Off {
+            HOOKED.lock().unwrap().remove(&sd_dest);
+        }
     }
 
     let attempt =

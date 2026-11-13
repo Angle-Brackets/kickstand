@@ -997,6 +997,9 @@ impl Client {
 
     /// [`Client::request`] with the connection already locked, for multi-request operations.
     async fn request_locked(&self, guard: &mut MutexGuard<'_, Option<Conn>>, req: Request) -> Result<Response> {
+        if changes_the_screen(&req) {
+            SCREEN_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let had_conn = guard.is_some();
         let conn = self.connected(guard).await?;
         match round_trip(conn, &req).await {
@@ -1408,6 +1411,25 @@ pub fn describe_app(app: &proto::App) -> String {
     format!("{what} {:016x}, pid {}", app.program_id, app.pid)
 }
 
+/// How many requests that can change what's in front (input, closing software, a reboot) this process has
+/// sent, so [`crate::launch`] can tell whether the home menu it left showing still is.
+pub(crate) static SCREEN_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn changes_the_screen(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Press { .. }
+            | Request::Input { .. }
+            | Request::Hold { .. }
+            | Request::Play { .. }
+            | Request::Playback { .. }
+            | Request::TypeText { .. }
+            | Request::CloseApp
+            | Request::CloseApplet
+            | Request::RebootToHekate { .. }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use proto::AgentInfo;
@@ -1445,3 +1467,4 @@ mod tests {
         assert_eq!(super::other_agents(&agents, true), ["an agent in Antigravity CLI on this PC was pressing buttons 12 s ago"]);
     }
 }
+
