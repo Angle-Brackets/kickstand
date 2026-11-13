@@ -2,7 +2,7 @@
 
 All notable changes to Kickstand are documented in this file.
 
-## [0.1.2] - unreleased
+## [0.1.2] - 2026-11-13
 
 ### Added
 - **Native USB Bulk Transport (`usb_upload`, `kickstand usb-put`, `kickstand put --usb`)**:
