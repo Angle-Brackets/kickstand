@@ -8,7 +8,7 @@ The tool names are the same in every AI app.
 
 | Area | Tools |
 | :--- | :--- |
-| [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`quit_app`](#quit_app) · [`force_quit_app`](#force_quit_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
+| [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`reload_nro`](#reload_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`quit_app`](#quit_app) · [`force_quit_app`](#force_quit_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
 | [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`save_macro`](#save_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
@@ -64,6 +64,104 @@ Start a homebrew NRO (either uploaded from `local_path` on the PC or already on 
 | `elf` | `string` | — | Path to the NRO's `.elf` on the PC (with debug info) for live backtrace symbolization. |
 | `module` | `string` | ELF filename stem | Module name used in backtraces. |
 | `mode` | `string` | `"full"` | `"full"` (title takeover with full RAM) or `"applet"` (Album applet mode for small tools). |
+
+---
+
+### `reload_nro`
+Swap a new build of the homebrew that's running for the old one, without going back to the Home Menu. For the edit, build, test loop: much faster than [`run_nro`](#run_nro), which reopens hbmenu from the Home Menu every time.
+- Uploads the build to the SD card while the old one still runs (over USB when a cable is connected), then presses `+` so the old one exits. Homebrew that returns from `main` stays inside the same hbloader process, and Kickstand starts the new build there, by the fastest of:
+  1. **`hook`**: the app implements Kickstand's [next-load hook](#the-next-load-hook) and starts the new build itself. hello.nro: about **1 s** from the `+` to the new build's first line of output.
+  2. **`hbmenu`**: the app exits to hbmenu, Y starts its NetLoader, and the Kickstand NRO is sent to open the build (about 3-5 s).
+  3. **`cold`**: the same as `run_nro` (about 14 s), when no homebrew was running or it didn't come back to hbmenu.
+- The result's first line names the path taken and the time per phase: `upload` (to the SD card), `exit` (from `+` until the old build was out of the way) and `load` (until the new build's stdout connected). Read the rest of the stdout with [`nro_output`](#nro_output).
+- With `replay_macro`, plays a saved macro once the build is up, to get back to the state under test.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `project` | `string` | — | A project from `projects.json` (its NRO, destination, args and ELF), or give `local_path` / `sd_path`. |
+| `build` | `boolean` | `false` | With `project`, run its build command first. |
+| `local_path` | `string` | — | An `.nro` on the PC to upload and reload. |
+| `dest` | `string` | Project's, or `/switch/kickstand/<filename>` | Where `local_path` goes on the SD card (under `/switch/`). |
+| `sd_path` | `string` | — | Instead: an `.nro` already on the SD card. |
+| `args` | `string[]` | Project's, or `[]` | Arguments for the NRO (`argv[1..]`). |
+| `hook` | `boolean` | Detected | Use the app's next-load hook. By default it's tried when the NRO contains `kickstand/next-load` (or, for `sd_path`, when it worked for that NRO before); `false` never, `true` always. |
+| `exit_buttons` | `string` | `"plus"` | The buttons that make the app exit, if not `+`. |
+| `prefer_usb` | `boolean` | `true` | Upload over USB when a cable or SD card mount is there. |
+| `replay_macro` | `string` | — | A saved macro to play once the new build is running. |
+| `wait_seconds` | `integer` | `5` *(max 60)* | Seconds to collect stdout before returning. |
+| `elf`, `module` | `string` | Project's | For symbolizing backtraces, as in `run_nro`. |
+| `mode` | `string` | `"full"` | `"full"` or `"applet"`. |
+
+#### The next-load hook
+A few lines in your homebrew make `reload_nro` skip hbmenu and NetLoader altogether. There's no library to link: just a file on the SD card and libnx's `envSetNextLoad`.
+
+**The contract.** Before pressing `+`, Kickstand writes `sdmc:/kickstand/next-load`, two lines of text:
+```
+sdmc:/switch/mygame/mygame.nro
+"sdmc:/switch/mygame/mygame.nro" "--level" "3" "5656a8c0_NXLINK_"
+```
+Line 1 is the NRO to load; line 2 is its argv string, which hbloader passes to the next NRO as it is (hbmenu's convention: every argument in double quotes, the NRO's own path first, and nxlink's address marker last, so the new build's stdout comes back to Kickstand). When your app is about to return from `main`, it should:
+1. Do nothing unless it was started from a PC over nxlink (libnx: `__nxlink_host.s_addr != 0`; otherwise an argument ending in `_NXLINK_`). A launch from hbmenu by hand never follows the file.
+2. Read the file, if it exists.
+3. Delete it, and only if the delete worked, call `envSetNextLoad(line1, line2)`.
+4. Return from `main` as usual.
+
+The delete is what claims the request. If the app doesn't claim it within 3 s of the `+`, Kickstand deletes it itself and goes through hbmenu instead; only one of the two deletes can succeed, so Kickstand always knows which way it went, and an app can't follow a request Kickstand gave up on. Kickstand also clears a leftover request before `run_nro` and before any reload that doesn't use the hook. Kickstand notices the hook by the file name in your NRO, so nothing needs configuring.
+
+**C (libnx)**, called just before returning from `main()` (libnx mounts `sdmc:` by default):
+```c
+#include <switch.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+
+// Kickstand's hot-reload hook: if Kickstand left a next-load request, claim it and let hbloader load that NRO next.
+static void kickstand_next_load(void) {
+    const char *request = "sdmc:/kickstand/next-load";
+    if (!__nxlink_host.s_addr) return;          // not started from a PC: leave the file alone
+    FILE *f = fopen(request, "r");
+    if (!f) return;
+    char path[512], argv[2048];
+    bool ok = fgets(path, sizeof path, f) && fgets(argv, sizeof argv, f);
+    fclose(f);
+    if (ok && remove(request) == 0) {           // the delete claims it; if Kickstand got there first, do nothing
+        path[strcspn(path, "\r\n")] = 0;
+        argv[strcspn(argv, "\r\n")] = 0;
+        envSetNextLoad(path, argv);
+    }
+}
+```
+
+**Rust ([nx](https://github.com/aarch64-switch-rs/nx), features `fs`)**, the same thing, as `daemon/hello` does it:
+```rust
+fn kickstand_next_load() {
+    use nx::fs::{self, FileOpenOption};
+    const REQUEST: &str = "sdmc:/kickstand/next-load";
+    // Not started from a PC over nxlink: leave the file alone.
+    if !nx::hbl::get_argv().is_some_and(|a| a.contains("_NXLINK_")) {
+        return;
+    }
+    if fs::initialize_fspsrv_session().is_err() || fs::mount_sd_card("sdmc").is_err() {
+        return;
+    }
+    let Ok(mut file) = fs::open_file(REQUEST, FileOpenOption::Read()) else { return };
+    let mut buf = [0u8; 2600];
+    let mut len = 0;
+    while let Ok(n @ 1..) = file.read_array(&mut buf[len..]) {
+        len += n;
+    }
+    drop(file);
+    let mut lines = core::str::from_utf8(&buf[..len]).unwrap_or("").lines();
+    if let (Some(path), Some(argv)) = (lines.next(), lines.next())
+        && fs::remove_file(REQUEST).is_ok() // the delete claims it
+    {
+        // nx copies both into hbloader's buffers; it just wants 'static strings.
+        let _ = nx::hbl::set_next_load_entry(String::leak(path.into()), String::leak(argv.into()));
+    }
+}
+```
+
+Try it with hello.nro, which waits for `+` with `--stay`: `kickstand run hello.nro -- --stay`, rebuild, then `kickstand reload hello.nro -- --stay`.
 
 ---
 
@@ -621,6 +719,7 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | **Develop & Run** | `kickstand test <project>` | Build, deploy, run, and supervise a project from `~/.config/kickstand/projects.json`. |
 | | `kickstand projects` | List projects configured in `~/.config/kickstand/projects.json`. |
 | | `kickstand run <nro> [-- <args>...]` | Run a local `.nro` or `sdmc:/path.nro` with full memory (or `--applet`) and stream stdout. |
+| | `kickstand reload <nro> [--hook\|--no-hook] [-- <args>...]` | Swap a new build in for the running homebrew without the Home Menu (the app's next-load hook, else hbmenu, else a full relaunch), print the path taken and time per phase, then stream stdout. |
 | | `kickstand supervise` | Watch the running homebrew until it exits, crashes, fatals, or hangs. |
 | | `kickstand hbmenu [--full]` | Open `hbmenu` in applet mode or `--full` title-takeover mode. |
 | | `kickstand apps [--max <n>]` | List installed titles in home-menu order. |

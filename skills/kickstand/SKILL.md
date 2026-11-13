@@ -22,6 +22,11 @@ it, so look before you act and leave it how you found it.
 
 - A configured project (`projects`): `test_build` builds, checks the NRO matches its ELF, deploys, runs with
   full memory and supervises in one call. Prefer it.
+- Iterating on homebrew that's already running: `reload_nro` swaps the new build in without the Home Menu.
+  Its first line says which path it took (`hook`, `hbmenu` or `cold`) and where the time went (upload, exit,
+  load). If the user's app keeps taking the slower `hbmenu` path, suggest the next-load hook (TOOLS.md
+  "The next-load hook": a few lines of C or Rust before `main` returns) rather than adding it yourself
+  unasked.
 - Anything else: `run_nro`, then `nro_output` to read stdout. Use `grep`, `max_lines` and `timestamps` there
   instead of reading everything. `supervise` watches until exit, crash, fatal or hang.
 - Games and ports need **full memory**, which is the default. `mode: "applet"` is only for small tools; never

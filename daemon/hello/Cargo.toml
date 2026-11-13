@@ -3,10 +3,10 @@ name = "hello"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Toolchain check: prints over nxlink and exits"
+description = "Toolchain check: prints over nxlink and exits; also the reference for the hot-reload hook"
 
 [dependencies]
-nx = { workspace = true, features = ["socket"] }
+nx = { workspace = true, features = ["socket", "fs", "input"] }
 nxlink.workspace = true
 
 [package.metadata.nx.nro]

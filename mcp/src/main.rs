@@ -288,6 +288,12 @@ enum Command {
         /// Saved macro name to replay automatically after reload completes.
         #[arg(long)]
         replay_macro: Option<String>,
+        /// Always try the app's next-load hook (default: when the NRO contains "kickstand/next-load").
+        #[arg(long, conflicts_with = "no_hook")]
+        hook: bool,
+        /// Never try the app's next-load hook.
+        #[arg(long)]
+        no_hook: bool,
         /// The NRO's ELF, to symbolize `<module>+0x...` backtrace addresses in its output.
         #[arg(long)]
         elf: Option<PathBuf>,
@@ -1284,7 +1290,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 }
             }
         }
-        Command::Reload { nro, applet, dest, no_usb, exit_buttons, replay_macro, elf, module, args } => {
+        Command::Reload { nro, applet, dest, no_usb, exit_buttons, replay_macro, hook, no_hook, elf, module, args } => {
             let program = match nro.strip_prefix("sdmc:") {
                 Some(path) => {
                     let path = check_path(path, false)?;
@@ -1312,18 +1318,15 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                     use_usb: !no_usb,
                     exit_buttons,
                     replay_macro,
+                    hook: if hook { Some(true) } else if no_hook { Some(false) } else { None },
                 },
             )
             .await?;
-            let summary = format!(
-                "reloaded ({}) in {:.1}s",
-                if reloaded.hot { "hot in-process" } else { "full relaunch" },
-                reloaded.elapsed.as_secs_f64()
-            );
+            let summary = reloaded.summary();
             if out.json() {
                 out.note(summary);
                 reloaded.started.notes.iter().for_each(|n| out.note(n.clone()));
-                out.event(json!({ "reloaded": true, "hot": reloaded.hot, "pid": reloaded.started.pid, "stdout": reloaded.started.output.is_some() }));
+                out.event(json!({ "reloaded": true, "path": reloaded.path.name(), "phases": reloaded.json(), "pid": reloaded.started.pid, "stdout": reloaded.started.output.is_some() }));
             } else {
                 eprintln!("{summary}");
                 for note in &reloaded.started.notes {

@@ -41,6 +41,11 @@ pub const STAGING_DIR: &str = "/kickstand/staging";
 /// screen. A boot without it (the user's own) is left alone.
 pub const AGENT_REBOOT_FLAG: &str = "/kickstand/agent-reboot.flag";
 
+/// The hot-reload hook's request file: Kickstand writes it just before asking a running NRO to exit; an NRO
+/// that implements the hook reads it, deletes it and, only if the delete worked, passes its two lines (the
+/// next NRO's path, then its argv string) to hbloader with `envSetNextLoad`. See TOOLS.md "reload_nro".
+pub const NEXT_LOAD: &str = "/kickstand/next-load";
+
 /// The tokens the daemon accepts, one per line (blank lines and `#` comments ignored): written by hand
 /// or by pairing ([`crate::Request::Pair`]).
 pub const TOKEN_PATH: &str = "/kickstand/token.txt";
