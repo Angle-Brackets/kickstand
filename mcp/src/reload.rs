@@ -36,7 +36,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -46,6 +46,7 @@ use proto::path::NEXT_LOAD;
 use crate::client::{Client, check_path};
 use crate::launch::{self, Mode, Program, Started};
 use crate::nxlink;
+use crate::transfer::{self, Transport};
 
 /// How long the running NRO gets to tear down after the exit button(s) before checking hbloader is still there.
 const EXIT_SETTLE: Duration = if cfg!(test) { Duration::from_millis(30) } else { Duration::from_millis(250) };
@@ -321,52 +322,16 @@ async fn validate_destination(client: &Client, program: &Program, mode: Mode) ->
 async fn stage_nro_on_sd(client: &Client, program: &Program, sd_dest: &str, use_usb: bool) -> Result<String> {
     match program {
         Program::Local { nro, .. } => {
-            if use_usb {
-                match upload_bytes_via_usb(client, nro, sd_dest).await {
-                    Ok(up) => {
-                        return Ok(format!(
-                            "uploaded {} bytes to {sd_dest} via {} in {:.2} s",
-                            up.size,
-                            up.via,
-                            up.elapsed.as_secs_f64()
-                        ));
-                    }
-                    Err(usb_err) => {
-                        let stats = client
-                            .upload(sd_dest, nro)
-                            .await
-                            .with_context(|| format!("uploading {sd_dest} over Wi-Fi after USB failed ({usb_err:#})"))?;
-                        return Ok(format!(
-                            "uploaded {} bytes to {sd_dest} over Wi-Fi in {:.2} s (USB unavailable: {usb_err})",
-                            stats.size,
-                            stats.elapsed.as_secs_f64()
-                        ));
-                    }
-                }
-            }
-            let stats = client.upload(sd_dest, nro).await.with_context(|| format!("uploading {sd_dest}"))?;
-            Ok(format!(
-                "uploaded {} bytes to {sd_dest} over Wi-Fi in {:.2} s",
-                stats.size,
-                stats.elapsed.as_secs_f64()
-            ))
+            // USB first when a cable is in and the build is big enough to repay it, else Wi-Fi.
+            let transport = if use_usb { Transport::Auto } else { Transport::Wifi };
+            let sent = transfer::put_bytes(client, nro, sd_dest, transport).await.with_context(|| format!("uploading {sd_dest}"))?;
+            Ok(format!("uploaded {sd_dest}: {}", sent.describe()))
         }
         Program::Sd(_) => {
             let entry = client.stat(sd_dest).await.with_context(|| format!("checking {sd_dest} on the SD card"))?;
             Ok(format!("using {sd_dest} already on the SD card ({} bytes)", entry.size))
         }
     }
-}
-
-/// Streams `nro` bytes through [`crate::usb::upload`] using a temporary file.
-async fn upload_bytes_via_usb(client: &Client, nro: &[u8], sd_dest: &str) -> Result<crate::usb::UsbUpload> {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("kickstand-reload-{}-{id}.nro", std::process::id()));
-    tokio::fs::write(&tmp, nro).await.with_context(|| format!("writing temporary NRO {}", tmp.display()))?;
-    let res = crate::usb::upload(client, &tmp, sd_dest).await;
-    let _ = tokio::fs::remove_file(&tmp).await;
-    res
 }
 
 /// The Kickstand NRO, from [`LAUNCHER_CACHE`] when its size hasn't changed.
@@ -737,7 +702,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(note.contains("over Wi-Fi"), "{note}");
+        assert!(note.contains("via Wi-Fi"), "{note}");
         assert_eq!(std::fs::read(root.join("switch/mygame/mygame.nro")).unwrap(), payload);
 
         // 2. USB requested when no USB cable/mount exists -> seamlessly falls back to Wi-Fi

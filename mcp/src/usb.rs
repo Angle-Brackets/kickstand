@@ -24,7 +24,7 @@ use crate::client::{Client, check_path};
 
 /// Horizon's own USB product id while nothing presents an interface (and haze's, while it runs).
 const PID_HORIZON: u16 = 0x2000;
-const PID_HAZE_MTP: u16 = 0x201D;
+pub(crate) const PID_HAZE_MTP: u16 = 0x201D;
 /// Buffer size for streaming copies to a mounted SD card (1 MiB).
 const COPY_BUF_SIZE: usize = 1024 * 1024;
 /// How long the console's interface may take to show up on this PC after [`Client::usb_open`].

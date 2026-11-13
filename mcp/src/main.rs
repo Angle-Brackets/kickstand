@@ -26,6 +26,7 @@ mod reload;
 mod symbolize;
 mod tail;
 mod tools;
+mod transfer;
 mod until;
 mod update;
 mod usb;
