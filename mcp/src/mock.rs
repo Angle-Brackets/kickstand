@@ -40,6 +40,11 @@ pub struct MockApp {
     pub running: Option<proto::App>,
     /// Like a hung program: Close software from the home menu doesn't end it; only terminating does.
     pub ignores_exit: bool,
+    /// Like an NRO with Kickstand's hot-reload hook: on +, it claims `/kickstand/next-load` (reads, then
+    /// deletes it) and records what it would pass to `envSetNextLoad` in [`MockApp::chainloaded`].
+    pub next_load_hook: bool,
+    /// The (path, argv) the hook claimed.
+    pub chainloaded: Option<(String, String)>,
 }
 
 /// Who is connected and what they did, for [`Request::Activity`].
@@ -440,8 +445,20 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                 if console.play(&steps, generation).await { Response::Ok } else { Response::Playback(proto::Playback::default()) }
             }
             Request::Playback { action } => Response::Playback(console.control(action)),
-            Request::Press { .. }
-            | Request::Hold { .. }
+            Request::Press { buttons, .. } => {
+                let mut app = console.app.lock().unwrap();
+                if buttons.contains(&proto::Button::Plus) && app.running.is_some() && app.next_load_hook {
+                    let file = root.join(&path::NEXT_LOAD[1..]);
+                    if let Ok(text) = std::fs::read_to_string(&file)
+                        && std::fs::remove_file(&file).is_ok()
+                        && let [load, argv, ..] = text.lines().collect::<Vec<_>>()[..]
+                    {
+                        app.chainloaded = Some((load.to_string(), argv.to_string()));
+                    }
+                }
+                Response::Ok
+            }
+            Request::Hold { .. }
             | Request::TypeText { .. }
             | Request::RecordStart { .. }
             | Request::HblOverride { .. }

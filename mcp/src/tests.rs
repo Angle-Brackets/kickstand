@@ -485,7 +485,7 @@ async fn with_app(hung: bool) -> (Arc<Client>, Arc<mock::Console>) {
     std::fs::create_dir_all(&root).unwrap();
     let console = Arc::new(mock::Console::new(root, vec!["tok".into()], None));
     *console.app.lock().unwrap() =
-        mock::MockApp { running: Some(proto::App { pid: 77, program_id: 0x0100000000001000, hbl: Some(true) }), ignores_exit: hung };
+        mock::MockApp { running: Some(proto::App { pid: 77, program_id: 0x0100000000001000, hbl: Some(true) }), ignores_exit: hung, ..Default::default() };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(mock::serve_console(listener, console.clone()));

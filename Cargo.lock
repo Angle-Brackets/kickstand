@@ -2146,6 +2146,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "kickstand-proto",
+ "memchr",
  "nusb",
  "object",
  "regex",

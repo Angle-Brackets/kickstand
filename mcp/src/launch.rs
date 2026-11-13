@@ -522,7 +522,9 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
             start_netloader(client, NETLOADER_WAIT).await?
         }
     };
-    HBMENU_PID.store(0, Ordering::Relaxed);
+    nro_starting();
+    // A hot-reload request left by an interrupted reload_nro must not redirect this NRO's exit.
+    let _ = client.delete(proto::path::NEXT_LOAD, false).await;
     nxlink::send(sock, &nro, &dest, &args).await?;
     notes.push(match &opens {
         // NetLoader only runs what it's sent; the Kickstand NRO then hands over to the one on the card.
@@ -592,12 +594,38 @@ pub fn nro_exited(pid: u64) {
     }
 }
 
+/// Tests that start NROs (listening on nxlink's fixed ports, counting [`STARTS`]) take turns.
+#[cfg(test)]
+pub(crate) static TEST_STARTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Counts NROs started ([`nro_starting`]), so an NRO's stdout closing after the next one was started in the
+/// same process (a hot reload) isn't taken for hbmenu coming back.
+static STARTS: AtomicU64 = AtomicU64::new(0);
+
+/// Notes that a new NRO is about to start in the hbloader process: it no longer shows hbmenu, and the stdout
+/// of the NRO before it closing no longer means that it does.
+pub(crate) fn nro_starting() {
+    HBMENU_PID.store(0, Ordering::Relaxed);
+    STARTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How often Y is pressed again while hbmenu is starting (a press before its menu loop runs is lost).
+const Y_REPEAT: Duration = Duration::from_secs(4);
+/// How often NetLoader's port is tried; a refused connection costs nothing on the console.
+const NETLOADER_POLL: Duration = Duration::from_millis(150);
+
 /// Presses Y in hbmenu until NetLoader accepts a connection (hbmenu may still be loading at first).
 pub(crate) async fn start_netloader(client: &Client, wait: Duration) -> Result<TcpStream> {
+    start_netloader_every(client, wait, Y_REPEAT).await
+}
+
+/// [`start_netloader`], pressing Y again every `repeat`. hbmenu ignores Y while NetLoader is active, so
+/// a short `repeat` is safe once the NRO before it has exited (until then, Y goes to that NRO).
+pub(crate) async fn start_netloader_every(client: &Client, wait: Duration, repeat: Duration) -> Result<TcpStream> {
     let start = tokio::time::Instant::now();
     let mut pressed_at = None;
     loop {
-        if pressed_at.is_none_or(|t: tokio::time::Instant| t.elapsed() > Duration::from_secs(4)) {
+        if pressed_at.is_none_or(|t: tokio::time::Instant| t.elapsed() > repeat) {
             client.press(vec![Button::Y], 1, 100).await?;
             pressed_at = Some(tokio::time::Instant::now());
         }
@@ -606,7 +634,7 @@ pub(crate) async fn start_netloader(client: &Client, wait: Duration) -> Result<T
             Err(e) if start.elapsed() > wait => {
                 return Err(e).context("hbmenu's NetLoader didn't start listening after Y");
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+            Err(_) => tokio::time::sleep(NETLOADER_POLL).await,
         }
     }
 }
@@ -678,13 +706,14 @@ impl OutputLog {
     ) -> tokio::task::JoinHandle<()> {
         *log.lock().unwrap() = OutputLog { open: true, started: Some(std::time::Instant::now()), ..Default::default() };
         let log = log.clone();
+        let starts = STARTS.load(Ordering::Relaxed);
         tokio::spawn(async move {
             let mut lines = Lines::new(stream, symbols);
             while let Some(line) = lines.next().await {
                 log.lock().unwrap().push(&line);
             }
             let end = lines.end().cloned().unwrap_or(End::Closed);
-            if end == End::Closed {
+            if end == End::Closed && STARTS.load(Ordering::Relaxed) == starts {
                 nro_exited(pid);
             }
             let mut log = log.lock().unwrap();
@@ -832,6 +861,30 @@ mod tests {
         }
         sender.await.unwrap();
         (got, lines.end().cloned())
+    }
+
+    /// After a hot reload, the old build's stdout closing doesn't mean the process shows hbmenu: the new
+    /// build is running there. Without a newer start, it does.
+    #[tokio::test]
+    async fn an_nro_replaced_in_its_process_doesnt_mark_hbmenu() {
+        use std::sync::atomic::Ordering;
+        async fn close_after(replaced: bool, pid: u64) -> u64 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let nro = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (pc, _) = listener.accept().await.unwrap();
+            let log = std::sync::Arc::new(std::sync::Mutex::new(OutputLog::default()));
+            let collector = OutputLog::collect(&log, pc, None, pid);
+            if replaced {
+                super::nro_starting();
+            }
+            drop(nro);
+            collector.await.unwrap();
+            super::HBMENU_PID.load(Ordering::Relaxed)
+        }
+        let _starts = super::TEST_STARTS.lock().await;
+        assert_ne!(close_after(true, 0x7771).await, 0x7771);
+        assert_eq!(close_after(false, 0x7772).await, 0x7772);
     }
 
     #[tokio::test]

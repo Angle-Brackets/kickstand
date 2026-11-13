@@ -559,6 +559,9 @@ pub struct ReloadNroArgs {
     pub exit_buttons: Option<String>,
     /// Optional saved macro name to replay automatically after reload completes to return to a test state.
     pub replay_macro: Option<String>,
+    /// Use the app's next-load hook (the app chain-loads the new build itself; see TOOLS.md). Default:
+    /// detected (the NRO contains "kickstand/next-load"); false never tries it, true always does.
+    pub hook: Option<bool>,
     /// Seconds to collect stdout before returning (default 5, max 60).
     pub wait_seconds: Option<u32>,
     /// ELF path for symbolizing backtraces and subsequent memory/profile calls.
@@ -1887,7 +1890,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Hot-reload a homebrew NRO without a full Home Menu round-trip: optionally builds a project, uploads the NRO (preferring USB when connected), exits the running NRO back into hbmenu's NetLoader, streams the new NRO, and optionally replays a saved macro to return to the exact in-game state. Much faster than run_nro for iterative edit-compile-test loops.")]
+    #[tool(description = "Hot-reload a homebrew NRO without a full Home Menu round-trip: optionally builds a project, uploads the NRO (preferring USB when connected), then presses + so the running NRO exits inside the same hbloader process. An app implementing Kickstand's next-load hook chain-loads the new build itself (fastest); otherwise it goes through hbmenu's NetLoader, or a full relaunch if needed. Reports which path was taken and the time per phase (upload, exit, load), and optionally replays a saved macro to return to the exact in-game state. Much faster than run_nro for iterative edit-compile-test loops.")]
     async fn reload_nro(&self, Parameters(args): Parameters<ReloadNroArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let mut build_note = None;
@@ -1949,17 +1952,14 @@ impl Tools {
                 use_usb: args.prefer_usb.unwrap_or(true),
                 exit_buttons,
                 replay_macro: args.replay_macro,
+                hook: args.hook,
             };
             let reloaded = crate::reload::hot_reload(&self.client, options).await?;
             let mut notes = Vec::new();
             if let Some(bn) = build_note {
                 notes.push(bn);
             }
-            notes.push(format!(
-                "reloaded ({}) in {:.1}s",
-                if reloaded.hot { "hot in-process" } else { "full relaunch" },
-                reloaded.elapsed.as_secs_f64()
-            ));
+            notes.push(reloaded.summary());
             notes.extend(reloaded.started.notes);
             let mut text = notes.join("\n");
             if let Some(stream) = reloaded.started.output {

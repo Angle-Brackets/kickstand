@@ -30,6 +30,7 @@ semver = "1"
 sha2 = "0.10"
 ed25519-dalek = "2"
 tar = "0.4"
+memchr = "2"
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl"] }
 zip = { version = "9.2.0", default-features = false, features = ["deflate"] }
 # USB transfers to the console (Kickstand's own bulk interface): pure Rust on Linux, macOS and Windows.
