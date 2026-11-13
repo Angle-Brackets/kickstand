@@ -94,7 +94,7 @@ Swap a new build of the homebrew that's running for the old one, without going b
 | `mode` | `string` | `"full"` | `"full"` or `"applet"`. |
 
 #### libkickstand
-A small static library for libnx (C or C++) homebrew, in [`libkickstand/`](libkickstand/), that makes `reload_nro` fast **and** safe. Link it; there's nothing to call:
+A small static library for libnx (C or C++) homebrew, in [`libkickstand/`](libkickstand/), that makes `reload_nro` fast **and** safe ([Rust on nx](#libkickstand) below). Link it; there's nothing to call:
 - **Quit on request.** `appletMainLoop()` returns `false` once Kickstand asks for a reload, just as when the Home Menu closes the app, so the app quits its usual way: no button press, and apps that only quit from a menu reload too. A main loop that doesn't call `appletMainLoop()` can poll `kickstand_quit_requested()` once a frame.
 - **The next-load hook** below, done for you at `exit()`.
 - **Cleanup.** The next build loads into the same process and heap, and libnx doesn't undo what an app leaves behind: a thread that was never closed keeps its stack mapped over heap pages, and JIT code memory keeps its pages too, so the next build's `malloc` runs into the holes and crashes (Uprising NX died 0.7 s into every second build; Paperboat after a while). libkickstand wraps the kernel calls that create these (`svcCreateThread`, `svcMapMemory`, `svcCreateCodeMemory`, `svcCreateTransferMemory` and their undoing) and, at exit, gives threads a second to finish, pauses for good those still running (Horizon can't end another thread), and undoes every mapping still outstanding. This runs on any exit, so quitting to hbmenu and starting another NRO is safe too. What it did is appended to `sdmc:/kickstand/libkickstand.log`.
@@ -117,6 +117,16 @@ target_link_libraries(mygame PRIVATE /path/to/kickstand/libkickstand/libkickstan
 ```
 
 On hardware: Paperboat reloaded three times in a row with no button press (the request claimed 1.8-2.6 s after it was written), each build running normally afterwards, and hbmenu's memory after quitting was the same as a fresh hbmenu's. Uprising NX's second build ran (150 s+, rendering) where it had crashed in 0.7 s; at exit the library paused 5 threads still running and unmapped their 11 MiB of stacks and one JIT region.
+
+**Rust (nx).** Rust homebrew on the [nx](https://github.com/aarch64-switch-rs/nx) crate doesn't go through libnx, so there's nothing for `--wrap` to catch; [`libkickstand/rust`](libkickstand/rust/) (crate `kickstand-nx`, `use kickstand`) does the same jobs with three calls. nx keeps thread stacks in the heap and maps nothing, so a finished thread leaves no hole; only threads still running matter.
+```rust
+let worker = kickstand::spawn(nx::thread::Builder::new(), || audio_loop())?; // tracked, instead of nx::thread::spawn
+while !kickstand::quit_requested() && !plus_pressed() {                       // checked at most 5 times a second
+    frame();
+}
+let done = kickstand::finish(); // just before main returns: claims the request; pauses tracked threads still running after 1 s
+```
+Depend on it by path or git (`kickstand-nx = { git = "https://github.com/Angle-Brackets/kickstand" }`), pointing its `nx` at the one your app uses. [hello.nro](daemon/hello/src/main.rs) uses it (`--stay --thread`). JIT code memory your app created is still yours to unmap before returning.
 
 Limits: a paused thread stays in the process until hbloader ends (hbmenu's Home Menu exit, or `run_nro`), and counts against its thread limit: Uprising leaves 5 per run, so after many reloads in a row, start fresh with `run_nro`. Memory the app maps by other means (nvdrv buffers, shared memory) is freed by the services when their sessions close, which libnx does at exit.
 
@@ -162,7 +172,7 @@ static void kickstand_next_load(void) {
 }
 ```
 
-**Rust ([nx](https://github.com/aarch64-switch-rs/nx), features `fs`)**, the same thing, as `daemon/hello` does it:
+**Rust ([nx](https://github.com/aarch64-switch-rs/nx), features `fs`)**, the same thing by hand (or use the `kickstand-nx` crate above):
 ```rust
 fn kickstand_next_load() {
     use nx::fs::{self, FileOpenOption};
@@ -191,7 +201,7 @@ fn kickstand_next_load() {
 }
 ```
 
-Try it with hello.nro, which waits for `+` with `--stay`: `kickstand run hello.nro -- --stay`, rebuild, then `kickstand reload hello.nro -- --stay`.
+Try it with hello.nro, which waits for `+` (or a request from Kickstand) with `--stay`: `kickstand run hello.nro -- --stay`, rebuild, then `kickstand reload hello.nro -- --stay`.
 
 ---
 

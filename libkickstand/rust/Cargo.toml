@@ -1,0 +1,14 @@
+[package]
+name = "kickstand-nx"
+version = "0.1.2"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "libkickstand for Rust homebrew on the nx crate: quit when Kickstand asks for a reload, the next-load hook, and no threads left running into the next build"
+
+[lib]
+name = "kickstand"
+
+[dependencies]
+# Kickstand's vendored nx (the same API as aarch64-switch-rs/nx). In your own project, point this at the nx
+# your app uses, so there is only one.
+nx = { path = "../../third_party/nx", features = ["fs"] }

@@ -2,8 +2,9 @@
 //! Prints a few lines over nxlink and exits back to hbmenu (or with `--hang`/`--crash`, tests the watchdog). Run with
 //! `nxlink -s -a <switch-ip> hello.nro`; it proves the toolchain, the nx runtime and sockets work.
 //!
-//! With `--stay` it keeps running until + is pressed, and it is the reference for Kickstand's hot-reload hook
-//! ([`kickstand_next_load`]): `kickstand reload hello.nro -- --stay` swaps in a new build in under 2 s.
+//! With `--stay` it keeps running until + is pressed or Kickstand asks it to quit, and it is the reference for
+//! libkickstand in Rust (`libkickstand/rust`): `kickstand reload hello.nro -- --stay` swaps in a new build with
+//! no button press. `--thread` also starts a thread that never ends, which libkickstand pauses at exit.
 
 #![no_std]
 #![no_main]
@@ -12,7 +13,6 @@ extern crate alloc;
 
 use nx::diag::abort;
 use nx::diag::log::lm::LmLogger;
-use nx::fs::{self, FileOpenOption};
 use nx::service::hid;
 use nx::{input, svc, util, version};
 use nxlink::println;
@@ -63,46 +63,31 @@ fn main() {
     if nxlink::args().any(|a| a == "--stay") {
         // Set at build time to tell builds apart when hot-reloading (`HELLO_BUILD=2 cargo nx build ...`).
         println!("build {}; press + to exit", option_env!("HELLO_BUILD").unwrap_or("dev"));
+        if nxlink::args().any(|a| a == "--thread") {
+            // A thread that never ends: without libkickstand it would run on into the next build.
+            let spinner = kickstand::spawn(nx::thread::Builder::new().name("spinner").stack_size(0x4000), || {
+                loop {
+                    let _ = svc::sleep_thread(50_000_000);
+                }
+            });
+            println!("spinner thread started: {}", spinner.is_ok());
+        }
         wait_for_plus();
         println!("exiting");
     }
-    kickstand_next_load();
+    let finished = kickstand::finish();
+    println!(
+        "kickstand: {}; threads: {} ended, {} paused",
+        if finished.reloading { "reloading" } else { "no reload" },
+        finished.ended,
+        finished.paused
+    );
     // Give nxlink a moment to drain the socket before the process (and its sockets) go away.
     let _ = svc::sleep_thread(100_000_000);
     nxlink::disconnect();
 }
 
-/// Kickstand's hot-reload hook, called just before returning from `main`. If Kickstand left a next-load
-/// request, claim it by deleting it and have hbloader load that NRO next, instead of hbmenu. The request is
-/// two lines: the NRO's path, then its argv string, both passed to `envSetNextLoad` as they are.
-/// - Only when started from a PC over nxlink, so a leftover request can't redirect a launch from hbmenu.
-/// - Only if *our* delete worked: Kickstand withdraws a request it gave up on by deleting it, so whichever
-///   delete succeeds decides, and Kickstand knows which way it went.
-fn kickstand_next_load() {
-    const REQUEST: &str = "sdmc:/kickstand/next-load";
-    if nxlink::host().is_none() || fs::initialize_fspsrv_session().is_err() || fs::mount_sd_card("sdmc").is_err() {
-        return;
-    }
-    let Ok(mut file) = fs::open_file(REQUEST, FileOpenOption::Read()) else {
-        return;
-    };
-    let mut buf = [0u8; 2600];
-    let mut len = 0;
-    while let Ok(n @ 1..) = file.read_array(&mut buf[len..]) {
-        len += n;
-    }
-    drop(file);
-    let mut lines = core::str::from_utf8(&buf[..len]).unwrap_or("").lines();
-    if let (Some(path), Some(argv)) = (lines.next(), lines.next())
-        && fs::remove_file(REQUEST).is_ok()
-    {
-        // nx copies both into hbloader's buffers; its signature just wants 'static strings.
-        let (path, argv) = (alloc::string::String::leak(path.into()), alloc::string::String::leak(argv.into()));
-        let _ = nx::hbl::set_next_load_entry(path, argv);
-    }
-}
-
-/// Waits until + is pressed on the handheld or the first controller.
+/// Waits until + is pressed on the handheld or the first controller, or Kickstand asks the app to quit.
 fn wait_for_plus() {
     let styles = hid::NpadStyleTag::FullKey() | hid::NpadStyleTag::Handheld() | hid::NpadStyleTag::JoyDual();
     let Ok(ctx) = input::Context::new(styles, 1) else {
@@ -111,6 +96,10 @@ fn wait_for_plus() {
     let mut players = [ctx.get_player(hid::NpadIdType::No1), ctx.get_player(hid::NpadIdType::Handheld)];
     loop {
         if players.iter_mut().any(|p| p.get_buttons_down().contains(hid::NpadButton::Plus())) {
+            return;
+        }
+        if kickstand::quit_requested() {
+            println!("Kickstand asked to quit");
             return;
         }
         let _ = svc::sleep_thread(16_000_000);

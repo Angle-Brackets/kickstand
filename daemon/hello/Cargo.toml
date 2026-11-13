@@ -8,6 +8,8 @@ description = "Toolchain check: prints over nxlink and exits; also the reference
 [dependencies]
 nx = { workspace = true, features = ["socket", "fs", "input"] }
 nxlink.workspace = true
+# libkickstand for Rust (libkickstand/rust): quit on request, the next-load hook, no threads left running.
+kickstand-nx = { path = "../../libkickstand/rust" }
 
 [package.metadata.nx.nro]
 nacp = { default_name = "kickstand hello", default_author = "Angle-Brackets", version = "0.1.0" }
