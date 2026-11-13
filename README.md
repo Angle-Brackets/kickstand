@@ -147,13 +147,15 @@ target/release/kickstand link code
 
 `upload`, `kickstand put`, `run_nro` and `reload_nro` use USB by themselves for files of 4 MB or more when a cable is plugged in (falling back to Wi-Fi, with the reason, if it fails); `usb_upload` (and `kickstand usb-put`) insist on it. They send files over a USB-C cable from the PC straight to the console (not through the dock). The sysmodule presents its own USB device only for the transfer, so whatever runs on the Switch keeps running. The PC needs a one-time setup to be allowed to open that device:
 
-- **Linux:** add a udev rule (needs sudo), then unplug and replug the cable:
+Run **`kickstand usb-setup`** once (or click **Set up USB** on the desktop app's Home screen). Kickstand says what it will change, then your system asks for your approval:
+
+- **Linux:** it adds a udev rule, `/etc/udev/rules.d/71-kickstand.rules`, through your desktop's password prompt (`pkexec`), or `sudo` in a terminal. By hand:
   ```sh
-  echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="3000", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
+  echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="3000", MODE="0660", TAG+="uaccess"' \
     | sudo tee /etc/udev/rules.d/71-kickstand.rules
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
-- **Windows:** install the WinUSB driver for the device once with [Zadig](https://zadig.akeo.ie): start a USB upload so the console's "Kickstand" device is showing, then in Zadig choose *Options → List All Devices*, pick **Kickstand**, select **WinUSB** and click *Install Driver*.
+- **Windows:** it installs the WinUSB driver for the device with libwdi, the library [Zadig](https://zadig.akeo.ie) is built on, after Windows' admin prompt. Like Zadig, it adds a certificate for the driver to the PC's trusted list. By hand: in Zadig choose *Options → List All Devices*, pick **Kickstand** (start a USB upload so it shows), select **WinUSB** and click *Install Driver*.
 - **macOS:** nothing to set up.
 
 If the SD card is mounted on the PC instead (hekate's USB mass storage, which `reboot` can start, or a card reader), `usb_upload` copies straight to it.

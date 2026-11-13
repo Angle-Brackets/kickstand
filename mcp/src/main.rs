@@ -30,6 +30,7 @@ mod transfer;
 mod until;
 mod update;
 mod usb;
+mod usb_setup;
 mod watch;
 mod watchdog;
 
@@ -135,6 +136,13 @@ enum Command {
     /// Kickstand's own USB interface (whatever runs on the console keeps running), or straight to its SD card
     /// when that's mounted on this PC.
     UsbPut { local: PathBuf, path: String },
+    /// One-time setup so this PC may open the Switch's Kickstand USB device: a udev rule on Linux, the
+    /// WinUSB driver on Windows (as Zadig would). Asks for the system's own approval once.
+    UsbSetup {
+        /// The elevated half on Windows, started by `usb-setup` itself.
+        #[arg(long, hide = true)]
+        install_driver: bool,
+    },
     /// Print the last lines of a file on the SD card, such as a log; with -f, keep printing what's added.
     Tail {
         path: String,
@@ -651,6 +659,26 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             };
             let text = symbols.annotate(&text);
             out.done(json!({ "text": text }), || text.clone());
+            return Ok(());
+        }
+        Command::UsbSetup { install_driver } => {
+            #[cfg(windows)]
+            if install_driver {
+                return usb_setup::install_driver();
+            }
+            #[cfg(not(windows))]
+            anyhow::ensure!(!install_driver, "--install-driver is for Windows");
+            let Some(what) = usb_setup::needed() else {
+                out.done(json!({ "changed": false }), || "Nothing to set up: this PC may already use USB with the Switch".into());
+                return Ok(());
+            };
+            if !out.json() {
+                eprintln!("{what}");
+            }
+            // The desktop's prompt when there is a desktop session, else sudo in this terminal.
+            let gui = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+            let done = tokio::task::spawn_blocking(move || usb_setup::run(gui)).await??;
+            out.done(json!({ "changed": true, "result": done }), || done.clone());
             return Ok(());
         }
         Command::Token => {
@@ -1482,6 +1510,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             out.done(json!({}), || "the NRO daemon is exiting".into());
         }
         Command::Token
+        | Command::UsbSetup { .. }
         | Command::Mock { .. }
         | Command::Symbolize { .. }
         | Command::Discover { .. }

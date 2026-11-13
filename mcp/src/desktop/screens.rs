@@ -814,6 +814,14 @@ fn console(app: &mut Kickstand, ui: &mut Ui, model: &mut Model) {
         if theme::button(ui, "Macros", Kind::Outline, false, true).on_hover_text("Record yourself playing, for agents to replay").clicked() {
             app.go(model, Screen::Macros);
         }
+        // This computer's own setup: it doesn't need the Switch.
+        if model.usb_setup.is_some()
+            && theme::button(ui, "Set up USB", Kind::Outline, false, model.busy.is_none())
+                .on_hover_text("Lets this computer send large files to the Switch over a USB cable")
+                .clicked()
+        {
+            app.ask(Confirm::UsbSetup);
+        }
         if theme::button(ui, "Restart into hekate", Kind::Dashed, false, ready).clicked() {
             app.ask(Confirm::Reboot);
         }
@@ -1031,6 +1039,13 @@ pub fn confirm_words(what: Confirm, model: &Model) -> (String, String) {
                 ),
             )
         }
+        Confirm::UsbSetup => (
+            "Set up USB?".into(),
+            format!(
+                "{} Then agents send large files, like builds and ROMs, over the cable instead of Wi-Fi. Without it, everything still works over Wi-Fi.",
+                model.usb_setup.unwrap_or("Kickstand sets this computer up to use the Switch's USB device.")
+            ),
+        ),
         Confirm::UpdateSwitch => {
             let from = match &model.reach {
                 Reach::Connected(live) if live.info.version == crate::update::VERSION && live.info.protocol < proto::PROTOCOL_VERSION => {
@@ -1058,6 +1073,7 @@ pub fn confirm(app: &mut Kickstand, ctx: &egui::Context, open: f32, (title, text
         Confirm::Unpair => ("Unpair", Cmd::Unpair),
         Confirm::UpdatePc => ("Update", Cmd::UpdatePc),
         Confirm::UpdateSwitch => ("Update", Cmd::UpdateSwitch),
+        Confirm::UsbSetup => ("Set up", Cmd::UsbSetup),
     };
     // The frame fades with what's in it.
     let frame = egui::Frame::new().fill(theme::paper().gamma_multiply(open)).stroke(Stroke::new(1.5, ink().gamma_multiply(open))).inner_margin(Margin::same(28));

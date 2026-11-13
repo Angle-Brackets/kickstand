@@ -751,6 +751,7 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
 | | `kickstand put [--usb\|--wifi] <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified) the fastest way available: a mounted SD card, USB for files of 4 MB or more when a cable is in, else Wi-Fi. `--usb` or `--wifi` insists on one. |
 | | `kickstand usb-put <local> <remote>` | Upload a file from the PC to the SD card over a USB cable (Kickstand's own USB interface, or a mounted SD card), for large files. |
+| | `kickstand usb-setup` | One-time setup so this PC may use USB with the Switch: a udev rule on Linux, the WinUSB driver on Windows (as Zadig would). Says what it changes, then the system asks for approval. For the user to run, not an agent. |
 | | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
 | | `kickstand find <dir> [name] [--max <n>]` | Find files and folders by name, searched on the console. |
 | | `kickstand grep [-i] <text> <path> [--max <n>]` | Print matching lines of a file or of every file under a folder, searched on the console. |

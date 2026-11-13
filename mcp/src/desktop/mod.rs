@@ -63,6 +63,7 @@ pub enum Confirm {
     Unpair,
     UpdatePc,
     UpdateSwitch,
+    UsbSetup,
 }
 
 impl Screen {

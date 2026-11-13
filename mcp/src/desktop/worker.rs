@@ -43,6 +43,8 @@ pub enum Cmd {
     UpdatePc,
     /// Put this PC's version of Kickstand on the console in use.
     UpdateSwitch,
+    /// The one-time USB setup on this PC: the system asks the user for approval.
+    UsbSetup,
     /// The user's answer to an agent's question ([`crate::questions`]).
     Answer { id: String, answer: crate::questions::Answer },
     /// Start recording the controllers for a macro.
@@ -95,6 +97,8 @@ pub struct Model {
     pub macros: Vec<crate::macros::Listed>,
     /// When the recording running now began.
     pub recording: Option<std::time::Instant>,
+    /// What the one-time USB setup would change on this PC, while it's needed ([`crate::usb_setup`]).
+    pub usb_setup: Option<&'static str>,
 }
 
 /// What to call each agent ("Gemini Agent #2"): numbered per maker as first seen, kept while the app runs.
@@ -217,6 +221,7 @@ pub fn spawn(ctx: egui::Context) -> (Shared, mpsc::UnboundedSender<Cmd>) {
         host: config::host(None).ok(),
         links: App::ALL.iter().map(|&app| (app, link::state(app))).collect(),
         macros: crate::macros::list().unwrap_or_default(),
+        usb_setup: crate::usb_setup::needed(),
         ..Default::default()
     }));
     let (tx, rx) = mpsc::unbounded_channel();
@@ -498,6 +503,21 @@ impl Worker {
                 update::update_switch(&client).await?;
                 Ok(format!("The Switch has Kickstand {}", update::VERSION))
             }),
+            Cmd::UsbSetup => {
+                self.update(|m| m.busy = Some("Setting up USB"));
+                let worker = self.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(|| crate::usb_setup::run(true)).await.map_err(anyhow::Error::from).and_then(|r| r);
+                    worker.update(|m| {
+                        m.busy = None;
+                        m.usb_setup = crate::usb_setup::needed();
+                        m.notice = Some(match result {
+                            Ok(text) => (text, false),
+                            Err(e) => (format!("{e:#}"), true),
+                        });
+                    });
+                });
+            }
             Cmd::Reboot => self.button("Restarting", |client| async move {
                 client.reboot_to_hekate(HekateTarget::Menu).await?;
                 Ok("The Switch is restarting into hekate's menu".into())

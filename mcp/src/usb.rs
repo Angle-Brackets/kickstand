@@ -167,18 +167,18 @@ impl UsbLink {
     }
 }
 
-/// What to do when this PC may not open the device.
+/// What to do when this PC may not open the device. Agents relay it; the setup itself is the user's to do.
 fn permission_hint() -> String {
+    let how = "the user sets this PC up once with `kickstand usb-setup` or Set up USB in Kickstand's desktop app \
+               (the system asks for their approval; an agent shouldn't run it)";
     if cfg!(target_os = "linux") {
         format!(
-            "this user may not open the Switch's USB device. Add a udev rule once (the user runs this; it needs sudo): \
-             echo 'SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{VENDOR_ID:04x}\", ATTRS{{idProduct}}==\"{PRODUCT_ID:04x}\", MODE=\"0660\", GROUP=\"plugdev\", TAG+=\"uaccess\"' \
-             | sudo tee /etc/udev/rules.d/71-kickstand.rules && sudo udevadm control --reload-rules && sudo udevadm trigger"
+            "this user may not open the Switch's USB device: {how}. By hand: echo '{}' | sudo tee {} && sudo udevadm control --reload-rules && sudo udevadm trigger",
+            crate::usb_setup::UDEV_RULE,
+            crate::usb_setup::UDEV_RULE_PATH
         )
     } else if cfg!(windows) {
-        "Windows has no driver for the Switch's Kickstand USB device: install WinUSB for it once with Zadig (zadig.akeo.ie: \
-         Options > List All Devices, pick \"Kickstand\", choose WinUSB, Install Driver) while the console's interface is up"
-            .into()
+        format!("Windows has no driver for the Switch's Kickstand USB device: {how}. By hand: Zadig (zadig.akeo.ie), WinUSB for \"Kickstand\"")
     } else {
         "this user may not open the Switch's USB device".into()
     }

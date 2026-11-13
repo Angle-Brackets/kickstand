@@ -36,5 +36,12 @@ zip = { version = "9.2.0", default-features = false, features = ["deflate"] }
 # USB transfers to the console (Kickstand's own bulk interface): pure Rust on Linux, macOS and Windows.
 nusb = { version = "0.2.9", features = ["tokio"] }
 
+# The one-time USB setup (usb_setup.rs) asks for the OS's own approval: pkexec/sudo on Linux, UAC on Windows.
+[target.'cfg(any(target_os = "linux", windows))'.dependencies]
+privesc = "1.2.0"
+
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+# Installs WinUSB for Kickstand's USB device: libwdi, the library Zadig is built on (LGPL-3.0, built in).
+# x64 only, like the Windows release.
+wdi = { version = "0.1.5", default-features = false }
