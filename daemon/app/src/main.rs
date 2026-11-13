@@ -160,12 +160,9 @@ static BOOT2: AtomicBool = AtomicBool::new(false);
 
 /// Shows the status screen until + is pressed (true) or a client asks the daemon to exit.
 fn run_screen() -> bool {
-    let styles = hid::NpadStyleTag::FullKey()
-        | hid::NpadStyleTag::Handheld()
-        | hid::NpadStyleTag::JoyDual()
-        | hid::NpadStyleTag::JoyLeft()
-        | hid::NpadStyleTag::JoyRight();
-    let ctx = input::Context::new(styles, 1).unwrap();
+    // pm's settings: if this NRO runs without an applet resource user id of its own, it shares id 0 with pm,
+    // and anything narrower would stop holding R from opening hbmenu (see daemon_core::pm_input).
+    let ctx = input::Context::new(daemon_core::pm_input::styles(), daemon_core::pm_input::PLAYERS).unwrap();
     let mut players = [ctx.get_player(hid::NpadIdType::No1), ctx.get_player(hid::NpadIdType::Handheld)];
     let mut screen = screen::Screen::new();
     while !STOP.load(Ordering::Relaxed) {

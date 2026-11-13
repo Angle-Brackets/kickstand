@@ -14,6 +14,7 @@ pub mod hbl;
 pub mod log;
 pub mod pairing;
 pub mod playback;
+pub mod pm_input;
 pub mod profile;
 pub mod record;
 pub mod sd;
