@@ -594,6 +594,10 @@ pub fn nro_exited(pid: u64) {
     }
 }
 
+/// Tests that start NROs (listening on nxlink's fixed ports, counting [`STARTS`]) take turns.
+#[cfg(test)]
+pub(crate) static TEST_STARTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Counts NROs started ([`nro_starting`]), so an NRO's stdout closing after the next one was started in the
 /// same process (a hot reload) isn't taken for hbmenu coming back.
 static STARTS: AtomicU64 = AtomicU64::new(0);
@@ -857,6 +861,30 @@ mod tests {
         }
         sender.await.unwrap();
         (got, lines.end().cloned())
+    }
+
+    /// After a hot reload, the old build's stdout closing doesn't mean the process shows hbmenu: the new
+    /// build is running there. Without a newer start, it does.
+    #[tokio::test]
+    async fn an_nro_replaced_in_its_process_doesnt_mark_hbmenu() {
+        use std::sync::atomic::Ordering;
+        async fn close_after(replaced: bool, pid: u64) -> u64 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let nro = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (pc, _) = listener.accept().await.unwrap();
+            let log = std::sync::Arc::new(std::sync::Mutex::new(OutputLog::default()));
+            let collector = OutputLog::collect(&log, pc, None, pid);
+            if replaced {
+                super::nro_starting();
+            }
+            drop(nro);
+            collector.await.unwrap();
+            super::HBMENU_PID.load(Ordering::Relaxed)
+        }
+        let _starts = super::TEST_STARTS.lock().await;
+        assert_ne!(close_after(true, 0x7771).await, 0x7771);
+        assert_eq!(close_after(false, 0x7772).await, 0x7772);
     }
 
     #[tokio::test]

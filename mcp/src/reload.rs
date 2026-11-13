@@ -614,8 +614,8 @@ mod tests {
     use super::*;
     use crate::mock;
 
-    /// The tests that listen on nxlink's fixed ports take turns.
-    static PORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // The tests that listen on nxlink's fixed ports take turns.
+    use crate::launch::TEST_STARTS as PORTS;
 
     fn options(program: Program, args: Vec<String>, hook: Option<bool>) -> ReloadOptions {
         ReloadOptions { program, args, mode: Mode::Full, use_usb: false, exit_buttons: None, replay_macro: None, hook }
