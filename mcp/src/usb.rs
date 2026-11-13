@@ -167,8 +167,19 @@ impl UsbLink {
     }
 }
 
-/// What to do when this PC may not open the device. Agents relay it; the setup itself is the user's to do.
+/// Set when this PC couldn't open the device for want of the one-time setup: the MCP server then asks the
+/// user whether to do it ([`take_setup_wanted`]).
+static SETUP_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a USB attempt since the last call needed the one-time setup.
+pub fn take_setup_wanted() -> bool {
+    SETUP_WANTED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What to do when this PC may not open the device. Agents relay it; the setup itself is the user's to do
+/// (the MCP server asks them, and starts it with the system's own approval prompt if they say so).
 fn permission_hint() -> String {
+    SETUP_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let how = "the user sets this PC up once with `kickstand usb-setup` or Set up USB in Kickstand's desktop app \
                (the system asks for their approval; an agent shouldn't run it)";
     if cfg!(target_os = "linux") {

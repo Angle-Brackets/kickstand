@@ -83,6 +83,9 @@ struct Saved {
     /// Apps the user doesn't want libkickstand suggested for.
     #[serde(default)]
     never: BTreeSet<String>,
+    /// The user doesn't want to be asked to set up USB.
+    #[serde(default)]
+    never_usb_setup: bool,
 }
 
 fn file() -> Result<PathBuf> {
@@ -98,11 +101,15 @@ pub fn never(app: &str) -> Result<()> {
     asked(app);
     let mut saved = saved();
     saved.never.insert(app.to_string());
+    save(&saved)
+}
+
+fn save(saved: &Saved) -> Result<()> {
     let path = file()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(&saved)?)?;
+    std::fs::write(path, serde_json::to_string_pretty(saved)?)?;
     Ok(())
 }
 
@@ -162,6 +169,63 @@ pub fn ask_in_chat(app: &str, lang: Lang, crashed: bool) -> String {
         question(app, lang, crashed)
     )
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The one-time USB setup (a udev rule on Linux, the WinUSB driver on Windows), asked about when an upload
+// couldn't use USB for want of it.
+
+static USB_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether to ask about the USB setup now: once per Kickstand run, and not after "Don't ask again".
+pub fn should_ask_usb() -> bool {
+    !USB_ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) && !saved().never_usb_setup
+}
+
+pub fn never_usb() -> Result<()> {
+    let mut saved = saved();
+    saved.never_usb_setup = true;
+    save(&saved)
+}
+
+/// The question: `change` says what the setup changes on this PC ([`crate::usb_setup::needed`]).
+pub fn usb_question(change: &str) -> String {
+    format!(
+        "Kickstand: this PC isn't set up to send files to the Switch over USB yet, so they went over Wi-Fi \
+         (about 7 MB/s; USB about 19). {change} Set it up now? Your system's own prompt asks you to approve it."
+    )
+}
+
+/// For AI apps that can't show Kickstand's question: what the agent asks in the chat. It doesn't start the
+/// setup itself: the user does, so the yes is theirs.
+pub fn usb_ask_in_chat(change: &str) -> String {
+    format!(
+        "Kickstand suggests the one-time USB setup. Ask the user as a question with options (use your app's \
+         question tool if it has one), don't decide for them: \"{}\" Options: \"I'll set it up\" (they run \
+         `kickstand usb-setup` in their own terminal, or click Set up USB in Kickstand's desktop app; don't run it \
+         for them), \"Use Wi-Fi for now\", \"Don't ask again\" (then call answer_hint with hint \"usb_setup\" \
+         and answer \"never\").",
+        usb_question(change)
+    )
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UsbSetupAnswer {
+    /// Set up USB on this PC?
+    pub choice: UsbSetupChoice,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[schemars(inline)]
+pub enum UsbSetupChoice {
+    #[serde(rename = "Set it up now")]
+    SetUp,
+    #[serde(rename = "Use Wi-Fi for now")]
+    Wifi,
+    #[serde(rename = "Don't ask again")]
+    Never,
+}
+
+rmcp::elicit_safe!(UsbSetupAnswer);
 
 /// The user's answer to [`question`], shown as options by the AI app.
 #[derive(Deserialize, schemars::JsonSchema)]

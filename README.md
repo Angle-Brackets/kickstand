@@ -147,7 +147,7 @@ target/release/kickstand link code
 
 `upload`, `kickstand put`, `run_nro` and `reload_nro` use USB by themselves for files of 4 MB or more when a cable is plugged in (falling back to Wi-Fi, with the reason, if it fails); `usb_upload` (and `kickstand usb-put`) insist on it. They send files over a USB-C cable from the PC straight to the console (not through the dock). The sysmodule presents its own USB device only for the transfer, so whatever runs on the Switch keeps running. About 19 MB/s, near what the SD card takes (Wi-Fi: about 7 MB/s). The PC needs a one-time setup to be allowed to open that device:
 
-Run **`kickstand usb-setup`** once (or click **Set up USB** on the desktop app's Home screen). Kickstand says what it will change, then your system asks for your approval:
+Run **`kickstand usb-setup`** once (or click **Set up USB** on the desktop app's Home screen; or answer *Set it up now* when Kickstand asks in your AI app, after an upload had to go over Wi-Fi for want of it). Kickstand says what it will change, then your system asks for your approval:
 
 - **Linux:** it adds a udev rule, `/etc/udev/rules.d/71-kickstand.rules`, through your desktop's password prompt (`pkexec`), or `sudo` in a terminal. By hand:
   ```sh

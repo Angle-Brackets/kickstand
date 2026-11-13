@@ -457,9 +457,12 @@ pub struct AnswerAccessArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AnswerHintArgs {
-    /// The app the suggestion was about, as the tool named it.
-    pub app: String,
-    /// What the user chose: "add" (yes, add it to the build), "not_now" or "never" (don't ask again).
+    /// Which suggestion: "libkickstand" (the default) or "usb_setup".
+    pub hint: Option<String>,
+    /// For libkickstand: the app the suggestion was about, as the tool named it.
+    pub app: Option<String>,
+    /// What the user chose: "add" (libkickstand: yes, add it to the build), "not_now" or "never" (don't ask
+    /// again).
     pub answer: String,
 }
 
@@ -1025,16 +1028,58 @@ impl Tools {
         Some(hints::answered(app, lang, choice).unwrap_or_else(|e| format!("(couldn't save the user's answer: {e:#})")))
     }
 
-    #[tool(description = "Pass on the user's answer to Kickstand's libkickstand suggestion when a tool asked you to put it to them in the chat: only what the user actually chose; never answer for them. answer: add, not_now or never.")]
+    /// Asks the user whether to do the one-time USB setup now (once per Kickstand run, never after "Don't ask
+    /// again"); on yes, starts it, and the system asks them to approve it. What to tell the agent.
+    async fn offer_usb_setup(&self, peer: &Peer<RoleServer>) -> Option<String> {
+        use crate::hints::{self, UsbSetupAnswer, UsbSetupChoice};
+        let change = crate::usb_setup::needed()?;
+        if !hints::should_ask_usb() {
+            return None;
+        }
+        let choice = match peer.elicit_with_timeout::<UsbSetupAnswer>(hints::usb_question(change), Some(std::time::Duration::from_secs(120))).await {
+            Ok(Some(answer)) => answer.choice,
+            Ok(None) | Err(ElicitationError::UserDeclined | ElicitationError::UserCancelled) => UsbSetupChoice::Wifi,
+            Err(ElicitationError::CapabilityNotSupported) => return Some(hints::usb_ask_in_chat(change)),
+            Err(e) => return Some(format!("(Kickstand couldn't ask the user about setting up USB: {e})")),
+        };
+        Some(match choice {
+            UsbSetupChoice::SetUp => match tokio::task::spawn_blocking(|| crate::usb_setup::run(true)).await {
+                Ok(Ok(done)) => {
+                    crate::transfer::forget_failure();
+                    format!("The user set up USB: {done}. Uploads use it from now on (try usb_upload again if this one went over Wi-Fi).")
+                }
+                Ok(Err(e)) => format!("The user asked for the USB setup, but it didn't finish: {e:#}. Uploads stay on Wi-Fi."),
+                Err(e) => format!("The USB setup couldn't start: {e}"),
+            },
+            UsbSetupChoice::Wifi => "The user chose Wi-Fi for now; Kickstand won't ask about USB again until it restarts.".into(),
+            UsbSetupChoice::Never => match hints::never_usb() {
+                Ok(()) => "The user doesn't want to be asked to set up USB; Kickstand won't ask again (~/.config/kickstand/hints.json).".into(),
+                Err(e) => format!("(couldn't save the user's answer: {e:#})"),
+            },
+        })
+    }
+
+    #[tool(description = "Pass on the user's answer to one of Kickstand's suggestions when a tool asked you to put it to them in the chat: only what the user actually chose; never answer for them. hint: libkickstand (default; answer add, not_now or never, with app) or usb_setup (answer not_now or never; the user runs the setup themselves).")]
     async fn answer_hint(&self, Parameters(args): Parameters<AnswerHintArgs>) -> CallToolResult {
         let result = async {
+            if args.hint.as_deref() == Some("usb_setup") {
+                return match args.answer.as_str() {
+                    "never" => {
+                        crate::hints::never_usb()?;
+                        anyhow::Ok("Kickstand won't ask about setting up USB again".to_string())
+                    }
+                    "not_now" => anyhow::Ok("Uploads stay on Wi-Fi; Kickstand won't ask about USB again until it restarts".to_string()),
+                    other => anyhow::bail!("for usb_setup, answer is not_now or never, not {other:?} (the user runs `kickstand usb-setup` themselves)"),
+                };
+            }
+            let app = args.app.as_deref().context("give app: the app the libkickstand question was about")?;
             let choice = match args.answer.as_str() {
                 "add" => crate::hints::LinkChoice::Add,
                 "not_now" => crate::hints::LinkChoice::NotNow,
                 "never" => crate::hints::LinkChoice::Never,
                 other => anyhow::bail!("answer is add, not_now or never, not {other:?}"),
             };
-            let app = crate::hints::app_name(&args.app);
+            let app = crate::hints::app_name(app);
             crate::hints::answered(&app, crate::hints::lang_of(&app), choice)
         };
         result.await.map_or_else(fail, ok)
@@ -1909,7 +1954,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card over a USB cable, streamed from disk. Preferred over upload for large files (ROMs, ISOs, .o2r archives) whenever status reports a USB cable. Goes through Kickstand's own USB interface, the same CRC-checked upload as over Wi-Fi: nothing on the console is opened or closed and a running game keeps running (other USB homebrew like haze can't use the port meanwhile). If the SD card is mounted on this PC instead, copies straight to it. If it fails asking for a one-time setup on this PC (a udev rule on Linux, a driver on Windows), tell the user what it says; don't try to do it. Same path and permission rules as upload.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card over a USB cable, streamed from disk. Preferred over upload for large files (ROMs, ISOs, .o2r archives) whenever status reports a USB cable. Goes through Kickstand's own USB interface, the same CRC-checked upload as over Wi-Fi: nothing on the console is opened or closed and a running game keeps running (other USB homebrew like haze can't use the port meanwhile). If the SD card is mounted on this PC instead, copies straight to it. If this PC lacks the one-time setup (a udev rule on Linux, a driver on Windows), Kickstand asks the user itself whether to do it (their system then asks them to approve it); if a result asks you to put that question to them, do, but never run the setup yourself. Same path and permission rules as upload.")]
     async fn usb_upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
@@ -2223,9 +2268,17 @@ impl ServerHandler for Tools {
             }
         }
         let warning = if CONTENTIOUS.contains(&request.name.as_ref()) { self.clash().await } else { None };
+        let peer = context.peer.clone();
         let mut response = self.tool_router.call(ToolCallContext::new(self, request, context)).await?;
         if let (Some(warning), CallToolResponse::Complete(result)) = (warning, &mut response) {
             result.content.insert(0, ContentBlock::text(warning));
+        }
+        // Any upload that couldn't use USB for want of the one-time setup: ask the user about it.
+        if crate::usb::take_setup_wanted()
+            && let Some(text) = self.offer_usb_setup(&peer).await
+            && let CallToolResponse::Complete(result) = &mut response
+        {
+            result.content.push(ContentBlock::text(text));
         }
         Ok(response)
     }

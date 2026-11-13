@@ -99,7 +99,7 @@ pub fn remember_failure(why: &anyhow::Error) {
     *USB_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), format!("{why:#}")));
 }
 
-fn forget_failure() {
+pub fn forget_failure() {
     *USB_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 

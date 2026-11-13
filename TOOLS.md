@@ -655,6 +655,7 @@ Upload a file from the PC to the Switch's SD card over a USB cable, streamed fro
 - **A mounted SD card** (hekate's USB mass storage, a card reader, or `$KICKSTAND_USB_MOUNT`): copied straight to the card, staged in `/kickstand/staging/` and renamed into place.
 - One-time setup on the PC: on Linux a udev rule, so your user may open the device; on Windows the WinUSB driver for it. The error says exactly what to do; see [USB transfers](README.md#usb-transfers).
 - Same path and folder permission rules as [`upload`](#upload).
+- **When this PC isn't set up for USB yet**, the upload goes over Wi-Fi (or `usb_upload` fails) and Kickstand asks the user, as a question in the AI app: *Set it up now* (starts `kickstand usb-setup`; their system asks them to approve it), *Use Wi-Fi for now*, or *Don't ask again*. Asked once each time Kickstand starts, after any tool whose upload needed it. In an AI app that can't show the question, the agent asks in the chat and the user runs the setup themselves; *Don't ask again* goes through [`answer_hint`](#answer_hint) with `hint: "usb_setup"`.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -694,12 +695,13 @@ Pass on the user's answer to an access question they answered in the chat, for A
 ---
 
 ### `answer_hint`
-Pass on the user's answer to the [libkickstand question](#reload_nro) when a tool asked you to put it to them in the chat (AI apps that can't show Kickstand's question). Only what the user chose.
+Pass on the user's answer to one of Kickstand's suggestions, the [libkickstand question](#reload_nro) or the [USB setup](#usb_upload), when a tool asked you to put it to them in the chat (AI apps that can't show Kickstand's question). Only what the user chose.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `app` | `string` *(required)* | — | The app the question was about, as the tool named it. |
-| `answer` | `string` *(required)* | — | `add` (yes, add it to the build: the result says how), `not_now`, or `never` (don't ask again for this app). |
+| `hint` | `string` | `"libkickstand"` | Which suggestion: `libkickstand` or `usb_setup`. |
+| `app` | `string` | — | For `libkickstand`: the app the question was about, as the tool named it. |
+| `answer` | `string` *(required)* | — | `libkickstand`: `add` (yes, add it to the build: the result says how), `not_now`, or `never` (don't ask again for this app). `usb_setup`: `not_now` or `never` (the user runs the setup themselves). |
 
 ---
 
