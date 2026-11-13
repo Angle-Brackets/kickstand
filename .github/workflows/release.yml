@@ -87,6 +87,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: WDK redistributables (for the USB driver setup)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/wdk-redist
       - name: Test
         if: matrix.target != 'x86_64-apple-darwin'
         run: cargo test --locked -p kickstand -p kickstand-proto

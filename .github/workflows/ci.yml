@@ -22,6 +22,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: WDK redistributables (for the USB driver setup)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/wdk-redist
       - name: Run workspace tests
         run: cargo test --workspace --locked
       # The one-time USB setup for real, on this throwaway runner: the udev rule with sudo on Linux, WinUSB

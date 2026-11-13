@@ -1,0 +1,23 @@
+# libwdi (the wdi crate, Kickstand's Windows USB driver setup) embeds the WinUSB co-installers from the WDK 8.0
+# redistributable components and finds them through WDK_DIR, as libwdi's own CI does. Pinned by SHA-256.
+name: WDK 8.0 redistributables
+description: Downloads and unpacks Microsoft's WDK 8.0 redistributable components and sets WDK_DIR (Windows only).
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      run: |
+        $msi = Join-Path $env:RUNNER_TEMP "wdk-redist.msi"
+        $dir = Join-Path $env:RUNNER_TEMP "wdk"
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkID=253170" -OutFile $msi
+        $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+        if ($hash -ne "29314207814ce9d5d73695f7e9239539cf37c79e750b9d5ea5a5ef5487a583d6") {
+          throw "the WDK redistributable download changed (sha256 $hash)"
+        }
+        Start-Process msiexec.exe -Wait -NoNewWindow -ArgumentList "/a", "`"$msi`"", "/qn", "TARGETDIR=`"$dir`""
+        $wdk = Join-Path $dir "Windows Kits\8.0"
+        if (-not (Test-Path (Join-Path $wdk "redist\wdf\x64\WdfCoInstaller01011.dll"))) {
+          throw "WdfCoInstaller01011.dll isn't where libwdi looks for it under $wdk"
+        }
+        # Forward slashes: libwdi-sys puts WDK_DIR into a C string literal, where a backslash starts an escape.
+        "WDK_DIR=$($wdk -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
