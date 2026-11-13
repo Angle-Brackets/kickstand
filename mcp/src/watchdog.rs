@@ -32,6 +32,8 @@ const TAIL_LINES: usize = 15;
 pub struct Report {
     pub text: String,
     pub screenshot: Option<Vec<u8>>,
+    /// The process, if it crashed or ended without exiting cleanly.
+    pub died: Option<u64>,
 }
 
 /// Watches the homebrew running as the application (full memory) or, failing that, in the Album, with its
@@ -59,7 +61,7 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
                 client.reboot_to_hekate(proto::HekateTarget::Entry(1)).await?;
                 text.push_str("\n\nRebooted into hekate entry 1; the daemon is back in about 3 minutes (check status).");
             }
-            return Ok(Report { text: with_tail(text), screenshot: None });
+            return Ok(Report { text: with_tail(text), screenshot: None, died: None });
         }
 
         let now = client.status().await?;
@@ -73,7 +75,7 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
                 let fetched = crate::crash::fetch(client, &path).await?;
                 let symbols = elf.symbolizer()?;
                 let text = format!("CRASHED after {:.0} s ({path}):\n\n{}", start.elapsed().as_secs_f64(), crate::crash::describe(&fetched, symbols.as_ref())?);
-                return Ok(Report { text: with_tail(text), screenshot: fetched.jpg });
+                return Ok(Report { text: with_tail(text), screenshot: fetched.jpg, died: Some(app.pid) });
             }
             if gone_at.elapsed() >= wait_for_report {
                 break;
@@ -90,12 +92,12 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
                 start.elapsed().as_secs_f64(),
                 app.pid
             );
-            return Ok(Report { text: with_tail(text), screenshot: client.screenshot().await.ok() });
+            return Ok(Report { text: with_tail(text), screenshot: client.screenshot().await.ok(), died: Some(app.pid) });
         }
         // Only a clean close is the NRO exiting; a dropped connection leaves it running, watched by its screen.
         if output.is_some_and(|o| o.lock().unwrap().end() == Some(&crate::launch::End::Closed)) {
             let text = format!("EXITED after {:.0} s: the NRO closed its stdout (back to hbmenu, or exiting)", start.elapsed().as_secs_f64());
-            return Ok(Report { text: with_tail(text), screenshot: None });
+            return Ok(Report { text: with_tail(text), screenshot: None, died: None });
         }
 
         if let Some(at) = output.and_then(|o| o.lock().unwrap().last_output()) {
@@ -120,13 +122,13 @@ pub async fn supervise(client: &Client, output: Option<&Arc<Mutex<OutputLog>>>, 
                     None => screen.to_string(),
                 };
                 let text = format!("LOOKS HUNG after {:.0} s: {what} for {quiet:.0} s. Every thread's backtrace:\n\n{threads}", start.elapsed().as_secs_f64());
-                return Ok(Report { text: with_tail(text), screenshot });
+                return Ok(Report { text: with_tail(text), screenshot, died: None });
             }
         }
 
         if start.elapsed() >= settings.max {
             let text = format!("STILL RUNNING after {:.0} s: no crash, fatal or hang (pid {})", start.elapsed().as_secs_f64(), app.pid);
-            return Ok(Report { text: with_tail(text), screenshot: None });
+            return Ok(Report { text: with_tail(text), screenshot: None, died: None });
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

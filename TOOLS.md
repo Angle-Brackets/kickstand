@@ -12,7 +12,7 @@ The tool names are the same in every AI app.
 | [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) · [`audio_replay`](#audio_replay) · [`record_audio`](#record_audio) · [`audio_control`](#audio_control) |
 | [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`save_macro`](#save_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
-| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`usb_upload`](#usb_upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
+| [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`usb_upload`](#usb_upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) · [`answer_hint`](#answer_hint) |
 | [Console & Daemon Management](#6-console--daemon-management) | [`status`](#status) · [`ping`](#ping) · [`resources`](#resources) · [`keep_awake`](#keep_awake) · [`sysmodule`](#sysmodule) · [`hekate_entries`](#hekate_entries) · [`reboot`](#reboot) |
 | [CLI Command Reference](#7-cli-command-reference) | Every tool, plus setup, from a terminal: `kickstand <command>` |
 
@@ -76,6 +76,8 @@ Swap a new build of the homebrew that's running for the old one, without going b
 - The result's first line names the path taken and the time per phase: `upload` (to the SD card), `exit` (from pressing `+` until the old build was out of the way) and `load` (until the new build's stdout connected). On the `hook` path the exit and the load happen during the press, so they are one figure. Read the rest of the stdout with [`nro_output`](#nro_output).
 - A running NRO keeps its own file open, so a build that can't replace it goes to `<name>.reload.nro` beside it, and later reloads alternate between the two.
 - With `replay_macro`, plays a saved macro once the build is up, to get back to the state under test.
+- **The libkickstand question.** When the new build doesn't link [libkickstand](#libkickstand), Kickstand asks the user, as a question in the AI app with options, whether the agent should add it to the app's build: *Yes, add it to the build*, *Not now*, or *Don't ask again for this app*. It knows a libnx (C/C++) build from an nx (Rust) one, so a yes comes back with the right steps for the agent. Asked once per app each time Kickstand starts; *Don't ask again* is kept in `~/.config/kickstand/hints.json`. In an AI app that can't show the question, the agent is asked to put it to the user with its own question tool and pass the answer on with [`answer_hint`](#answer_hint). [`supervise`](#supervise) asks too when a build crashes within two minutes of loading into the same process as one without libkickstand, and says that leftovers are the likely cause.
+- How the old build is ended goes by the build that's running (recorded when Kickstand started it): the first build with libkickstand still exits one without it the old way, and the reloads after that are asked.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -688,6 +690,16 @@ Pass on the user's answer to an access question they answered in the chat, for A
 | :--- | :--- | :--- | :--- |
 | `path` | `string` *(required)* | — | The path the request was about, as the tool said. |
 | `answer` | `string` *(required)* | — | `once` (just this once), `session` (this folder until Kickstand restarts), `always` (this folder from now on) or `no`. |
+
+---
+
+### `answer_hint`
+Pass on the user's answer to the [libkickstand question](#reload_nro) when a tool asked you to put it to them in the chat (AI apps that can't show Kickstand's question). Only what the user chose.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `app` | `string` *(required)* | — | The app the question was about, as the tool named it. |
+| `answer` | `string` *(required)* | — | `add` (yes, add it to the build: the result says how), `not_now`, or `never` (don't ask again for this app). |
 
 ---
 

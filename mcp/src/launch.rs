@@ -469,6 +469,13 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     if mode == Mode::Applet && is_game(target, &crate::project::load_all().unwrap_or_default()) {
         bail!("{target} is a game: it runs with full memory only (mode \"full\"), never in applet mode");
     }
+    // What it implements decides how reload_nro ends it later.
+    if let Ok(path) = check_path(target, true) {
+        match &program {
+            Program::Local { nro, .. } => crate::reload::started(&path, nro),
+            Program::Sd(_) => crate::reload::started_unseen(&path),
+        }
+    }
     // A large build goes to the SD card over USB first (much faster than NetLoader over Wi-Fi), then starts
     // from there through the Kickstand NRO. If USB fails, NetLoader sends it as before.
     let mut notes = Vec::new();

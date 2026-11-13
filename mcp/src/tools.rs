@@ -456,6 +456,14 @@ pub struct AnswerAccessArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct AnswerHintArgs {
+    /// The app the suggestion was about, as the tool named it.
+    pub app: String,
+    /// What the user chose: "add" (yes, add it to the build), "not_now" or "never" (don't ask again).
+    pub answer: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct KeepAwakeArgs {
     /// Keep the console awake for this many minutes from now (max 480; default 30, the same as any tool
     /// call); 0 lets it sleep now.
@@ -995,6 +1003,41 @@ impl Tools {
             Answer::Always => access::save(folder, need),
             Answer::No => anyhow::bail!("the user said no to letting you {action}. Don't look for another way; if you need it, ask them why it's needed"),
         }
+    }
+
+    /// Asks the user whether to link libkickstand into `app` (once per app per Kickstand run, never after
+    /// "Don't ask again"), as a question with options in the AI app; or, if it can't show one, has the agent
+    /// ask in the chat. What to tell the agent, if anything.
+    async fn suggest_libkickstand(&self, peer: &Peer<RoleServer>, app: &str, lang: crate::hints::Lang, crashed: bool) -> Option<String> {
+        use crate::hints::{self, LinkAnswer, LinkChoice};
+        if !hints::should_ask(app) {
+            return None;
+        }
+        hints::asked(app);
+        hints::remember_lang(app, lang);
+        let question = hints::question(app, lang, crashed);
+        let choice = match peer.elicit_with_timeout::<LinkAnswer>(question, Some(std::time::Duration::from_secs(120))).await {
+            Ok(Some(answer)) => answer.choice,
+            Ok(None) | Err(ElicitationError::UserDeclined | ElicitationError::UserCancelled) => LinkChoice::NotNow,
+            Err(ElicitationError::CapabilityNotSupported) => return Some(hints::ask_in_chat(app, lang, crashed)),
+            Err(e) => return Some(format!("(Kickstand couldn't ask the user about linking libkickstand into {app}: {e})")),
+        };
+        Some(hints::answered(app, lang, choice).unwrap_or_else(|e| format!("(couldn't save the user's answer: {e:#})")))
+    }
+
+    #[tool(description = "Pass on the user's answer to Kickstand's libkickstand suggestion when a tool asked you to put it to them in the chat: only what the user actually chose; never answer for them. answer: add, not_now or never.")]
+    async fn answer_hint(&self, Parameters(args): Parameters<AnswerHintArgs>) -> CallToolResult {
+        let result = async {
+            let choice = match args.answer.as_str() {
+                "add" => crate::hints::LinkChoice::Add,
+                "not_now" => crate::hints::LinkChoice::NotNow,
+                "never" => crate::hints::LinkChoice::Never,
+                other => anyhow::bail!("answer is add, not_now or never, not {other:?}"),
+            };
+            let app = crate::hints::app_name(&args.app);
+            crate::hints::answered(&app, crate::hints::lang_of(&app), choice)
+        };
+        result.await.map_or_else(fail, ok)
     }
 
     #[tool(description = "Pass on the user's answer to Kickstand's access question when they gave it in this chat: only after a tool said Kickstand is asking (its window shows the same question, which this takes away), and only what the user actually chose; never answer for them. Then try the request again.")]
@@ -1550,13 +1593,28 @@ impl Tools {
     }
 
     #[tool(description = "Watch the running homebrew (after run_nro) until something happens, and say what: EXITED (with its last output), CRASHED (a new crash report for it, symbolized, with Atmosphère's screenshot), FATAL (the console stopped; rebooted into hekate entry 1 unless reboot_on_fatal is false), LOOKS HUNG (no output for quiet_seconds and a screen frozen for 5 s more: every thread's backtrace and a screenshot), or STILL RUNNING when seconds run out. Use it after starting a build to test, instead of polling status.")]
-    async fn supervise(&self, Parameters(args): Parameters<SuperviseArgs>) -> CallToolResult {
+    async fn supervise(&self, Parameters(args): Parameters<SuperviseArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let elf = self.elf(args.elf, None)?;
             let settings = watch_settings(args.seconds, args.quiet_seconds, args.reboot_on_fatal.unwrap_or(true));
             let output = self.output.lock().unwrap().is_open().then_some(&self.output);
             let report = crate::watchdog::supervise(&self.client, output, &elf, &settings).await?;
-            let mut content = vec![ContentBlock::text(report.text)];
+            let mut text = report.text;
+            if let Some(pid) = report.died
+                && let Some(reload) = crate::hints::crash_after_reload(pid)
+            {
+                text.push_str(&format!(
+                    "\n\n{} loaded into the same process as the build before it {:.0} s earlier, without libkickstand: \
+                     threads, thread stacks or JIT memory left by the old build are the likely cause.",
+                    reload.app,
+                    reload.at.elapsed().as_secs_f64()
+                ));
+                if let Some(answer) = self.suggest_libkickstand(&context.peer, &reload.app, reload.lang, true).await {
+                    text.push_str("\n\n");
+                    text.push_str(&answer);
+                }
+            }
+            let mut content = vec![ContentBlock::text(text)];
             if let Some(jpeg) = report.screenshot {
                 content.push(jpeg_block(&jpeg));
             }
@@ -1928,7 +1986,7 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Hot-reload a homebrew NRO without a full Home Menu round-trip: optionally builds a project, uploads the NRO (preferring USB when connected), then presses + so the running NRO exits inside the same hbloader process. An app implementing Kickstand's next-load hook chain-loads the new build itself (fastest); otherwise it goes through hbmenu's NetLoader, or a full relaunch if needed. Reports which path was taken and the time per phase (upload, exit, load), and optionally replays a saved macro to return to the exact in-game state. Much faster than run_nro for iterative edit-compile-test loops.")]
+    #[tool(description = "Hot-reload a homebrew NRO without a full Home Menu round-trip: optionally builds a project, uploads the NRO (preferring USB when connected), then presses + so the running NRO exits inside the same hbloader process. An app implementing Kickstand's next-load hook chain-loads the new build itself (fastest); otherwise it goes through hbmenu's NetLoader, or a full relaunch if needed. Reports which path was taken and the time per phase (upload, exit, load), and optionally replays a saved macro to return to the exact in-game state. Much faster than run_nro for iterative edit-compile-test loops. A build without libkickstand makes Kickstand ask the user (once per app) whether you should link it into the app's build: follow their answer, and don't change their build without it.")]
     async fn reload_nro(&self, Parameters(args): Parameters<ReloadNroArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let mut build_note = None;
@@ -1983,6 +2041,15 @@ impl Tools {
             self.readable_outputs(&nro_args);
             let exit_buttons = args.exit_buttons.as_deref().map(crate::client::parse_buttons).transpose()?;
 
+            // For the libkickstand question afterwards: the new build, if it's here.
+            let new_build = match &program {
+                crate::launch::Program::Local { nro, dest } => Some((
+                    crate::hints::app_name(dest),
+                    crate::hints::lang(nro),
+                    crate::reload::hook_of(nro) == crate::reload::Hook::Ask,
+                )),
+                crate::launch::Program::Sd(_) => None,
+            };
             let options = crate::reload::ReloadOptions {
                 program,
                 args: nro_args,
@@ -2007,6 +2074,15 @@ impl Tools {
                 }
                 let wait = args.wait_seconds.unwrap_or(5).min(60);
                 text.push_str(&self.read_output(wait, &OutputView::default()).await);
+            }
+            if let Some((app, lang, with_lib)) = new_build {
+                if reloaded.path != crate::reload::ReloadPath::Cold {
+                    crate::hints::reloaded_in_process(reloaded.started.pid, &app, lang, with_lib);
+                }
+                if !with_lib && let Some(answer) = self.suggest_libkickstand(&context.peer, &app, lang, false).await {
+                    text.push_str("\n\n");
+                    text.push_str(&answer);
+                }
             }
             anyhow::Ok(text)
         };

@@ -21,6 +21,7 @@ const TOOLS: &[Area] = &[
             ("projects", "The projects test_build knows (~/.config/kickstand/projects.json)"),
             ("run_nro", "Run homebrew with full memory (or in the Album for small tools), streaming what it prints"),
             ("reload_nro", "Hot-reload homebrew in place without going back through the Home Menu"),
+            ("answer_hint", "Pass on your answer when you said whether to link libkickstand in the chat instead"),
             ("nro_output", "What the running homebrew has printed"),
             ("supervise", "Watch the running homebrew until it exits, crashes or hangs"),
             ("open_hbmenu", "Open the Homebrew Menu"),

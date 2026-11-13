@@ -34,7 +34,6 @@
 //! the bytes `kickstand/next-load` ([`implements_hook`]); a build already on the SD card is tried when the
 //! hook worked for that path earlier in this process. [`ReloadOptions::hook`] overrides both.
 
-use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -97,14 +96,40 @@ pub fn hook_of(nro: &[u8]) -> Hook {
     }
 }
 
-/// Destinations whose build linked libkickstand, for reloads of a build already on the SD card.
-static ASKS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// What the build last started at each destination ([`key`]) implements, as far as Kickstand knows: the
+/// build that's *running* decides how a reload ends it (the first build with libkickstand replaces one
+/// without, which has to be pressed). Set by [`started`] (`run_nro` and reloads of a local build) and by how
+/// a hook attempt went.
+static RUNNING: Mutex<std::collections::BTreeMap<String, Hook>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// A destination and its `.reload.nro` twin ([`alternate`]) are one app.
+fn key(path: &str) -> String {
+    match path.strip_suffix(".reload.nro") {
+        Some(base) => format!("{base}.nro"),
+        None => path.to_string(),
+    }
+}
+
+/// Notes that `nro` was started from `path`.
+pub fn started(path: &str, nro: &[u8]) {
+    set_running(path, hook_of(nro));
+}
+
+/// Notes that the NRO at `path` was started without Kickstand seeing its bytes.
+pub fn started_unseen(path: &str) {
+    RUNNING.lock().unwrap().remove(&key(path));
+}
+
+fn set_running(path: &str, hook: Hook) {
+    RUNNING.lock().unwrap().insert(key(path), hook);
+}
+
+fn running_hook(path: &str) -> Option<Hook> {
+    RUNNING.lock().unwrap().get(&key(path)).copied()
+}
 /// hbloader's buffers for `envSetNextLoad` (nx-hbloader's `g_nextNroPath` and `g_nextArgv`), NUL included.
 const NEXT_PATH_MAX: usize = 512;
 const NEXT_ARGV_MAX: usize = 2048;
-
-/// SD card NROs whose app claimed a next-load request in this process: their next reload tries the hook too.
-static HOOKED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Destinations whose running build holds its own file open (homebrew with a romfs does), so a new build
 /// can't replace it: each reload alternates between the destination and [`alternate`]. With the path
@@ -286,12 +311,12 @@ pub async fn hot_reload(client: &Client, opts: ReloadOptions) -> Result<Reloaded
         // Validate the macro up front before spending time transferring or reloading the NRO.
         crate::macros::load(macro_name)?;
     }
-    let detected = match &opts.program {
-        Program::Local { nro, .. } => hook_of(nro),
-        Program::Sd(_) if ASKS.lock().unwrap().contains(&sd_dest) => Hook::Ask,
-        Program::Sd(_) if HOOKED.lock().unwrap().contains(&sd_dest) => Hook::Press,
-        Program::Sd(_) => Hook::Off,
+    // The new build's, if it's here; the running build's decides how it's ended.
+    let new_hook = match &opts.program {
+        Program::Local { nro, .. } => Some(hook_of(nro)),
+        Program::Sd(_) => None,
     };
+    let detected = running_hook(&sd_dest).or(new_hook).unwrap_or(Hook::Off);
     let hook = match opts.hook {
         None => detected,
         Some(false) => Hook::Off,
@@ -302,15 +327,6 @@ pub async fn hot_reload(client: &Client, opts: ReloadOptions) -> Result<Reloaded
     let start = Instant::now();
     let (transfer_note, sd_dest) = stage_nro_on_sd(client, &opts.program, &sd_dest, opts.use_usb).await?;
     let mut phases = Phases { upload: start.elapsed(), ..Phases::default() };
-    // What a new build implements replaces what the last one at this path did.
-    if hook == Hook::Ask {
-        ASKS.lock().unwrap().insert(sd_dest.clone());
-    } else if matches!(opts.program, Program::Local { .. }) {
-        ASKS.lock().unwrap().remove(&sd_dest);
-        if detected == Hook::Off {
-            HOOKED.lock().unwrap().remove(&sd_dest);
-        }
-    }
 
     let attempt =
         try_in_process_reload(client, &sd_dest, &opts.args, opts.mode, opts.exit_buttons.as_deref(), hook).await?;
@@ -340,6 +356,9 @@ pub async fn hot_reload(client: &Client, opts: ReloadOptions) -> Result<Reloaded
         }
     };
 
+    if let Some(hook) = new_hook {
+        set_running(&sd_dest, hook);
+    }
     if let Some(macro_name) = &opts.replay_macro {
         let replayed = crate::macros::play(client, macro_name).await?;
         started.notes.push(format!("replayed macro: {}", replayed.summary()));
@@ -648,8 +667,7 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
         }
     };
     if !claimed {
-        HOOKED.lock().unwrap().remove(sd_dest);
-        ASKS.lock().unwrap().remove(sd_dest);
+        set_running(sd_dest, Hook::Off);
         return Ok(HookOutcome::Withdrawn {
             pressed_at: pressed.then_some(pressed_at),
             note: format!(
@@ -660,7 +678,8 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
         });
     }
     let exit = pressed_at.elapsed();
-    HOOKED.lock().unwrap().insert(sd_dest.to_string());
+    // An SD card build reloaded again is the same build: it'll take the hook the same way.
+    set_running(sd_dest, if pressed { Hook::Press } else { Hook::Ask });
 
     let load_from = Instant::now();
     let output = output.accept(HOT_OUTPUT_WAIT).await?;
@@ -856,22 +875,22 @@ mod tests {
         let netloader_task = fake_netloader(netloader);
 
         let game_nro = b"NEW-GAME-BUILD-NRO".to_vec();
-        let program = Program::Local { nro: game_nro.clone(), dest: "/switch/mygame/mygame.nro".into() };
+        let program = Program::Local { nro: game_nro.clone(), dest: "/switch/hotgame/hotgame.nro".into() };
         let reloaded = hot_reload(&client, options(program, vec!["--fast".into()], None)).await.unwrap();
 
         assert_eq!(reloaded.path, ReloadPath::Hbmenu, "notes: {:?}", reloaded.started.notes);
         assert_eq!(reloaded.started.pid, 0x42);
         assert!(reloaded.elapsed < Duration::from_secs(5));
-        assert!(reloaded.transfer_note.contains("/switch/mygame/mygame.nro"), "{}", reloaded.transfer_note);
+        assert!(reloaded.transfer_note.contains("/switch/hotgame/hotgame.nro"), "{}", reloaded.transfer_note);
         assert!(reloaded.phases.exit.is_some());
         assert!(reloaded.summary().contains("in-process through hbmenu"), "{}", reloaded.summary());
-        assert_eq!(std::fs::read(root.join("switch/mygame/mygame.nro")).unwrap(), game_nro);
+        assert_eq!(std::fs::read(root.join("switch/hotgame/hotgame.nro")).unwrap(), game_nro);
         assert!(!root.join("kickstand/next-load").exists(), "the leftover request was cleared");
 
         let (sent_name, sent_nro, sent_argv) = netloader_task.await.unwrap();
         assert_eq!(sent_name, "kickstand/kickstand.nro");
         assert_eq!(sent_nro, b"KICKSTAND-LAUNCHER-NRO");
-        assert_eq!(sent_argv, b"--open\0/switch/mygame/mygame.nro\0--fast\0");
+        assert_eq!(sent_argv, b"--open\0/switch/hotgame/hotgame.nro\0--fast\0");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -934,29 +953,46 @@ mod tests {
     #[tokio::test]
     async fn an_app_with_libkickstand_is_asked_to_quit_without_a_press() {
         let _ports = PORTS.lock().await;
-        let (root, console, client) = console_with_app("lib", false).await;
-        console.app.lock().unwrap().libkickstand = true;
-        let app = console.clone();
-        let new_build = tokio::spawn(async move {
-            while app.app.lock().unwrap().chainloaded.is_none() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            tokio::net::TcpStream::connect(("127.0.0.1", nxlink::CLIENT_PORT)).await.unwrap()
-        });
-
-        assert_eq!(hook_of(b"NRO0 kickstand-lib/1 sdmc:/kickstand/next-load"), Hook::Ask);
+        let (root, console, client) = console_with_app("lib", true).await;
+        let dest = "/switch/libgame/libgame.nro";
+        let with_lib = b"NRO0 kickstand-lib/1 sdmc:/kickstand/next-load".to_vec();
+        assert_eq!(hook_of(&with_lib), Hook::Ask);
         assert_eq!(hook_of(b"NRO0 sdmc:/kickstand/next-load"), Hook::Press);
         assert_eq!(hook_of(b"NRO0"), Hook::Off);
-        let program = Program::Local {
-            nro: b"NRO0 kickstand-lib/1 sdmc:/kickstand/next-load".to_vec(),
-            dest: "/switch/mygame/mygame.nro".into(),
+        let connect_when_loaded = |console: Arc<mock::Console>| {
+            tokio::spawn(async move {
+                while console.app.lock().unwrap().chainloaded.is_none() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                tokio::net::TcpStream::connect(("127.0.0.1", nxlink::CLIENT_PORT)).await.unwrap()
+            })
         };
+
+        // The build running has only the hand-written hook: the first build with the library still has to
+        // press + to end it.
+        started(dest, b"NRO0 sdmc:/kickstand/next-load");
+        let new_build = connect_when_loaded(console.clone());
+        let program = Program::Local { nro: with_lib.clone(), dest: dest.into() };
         let reloaded = hot_reload(&client, options(program, Vec::new(), None)).await.unwrap();
         let _out = new_build.await.unwrap();
+        assert_eq!(reloaded.path, ReloadPath::Hook, "notes: {:?}", reloaded.started.notes);
+        assert!(reloaded.started.notes.iter().any(|n| n.contains("pressed plus")), "{:?}", reloaded.started.notes);
+        assert_eq!(console.app.lock().unwrap().presses, 1);
 
+        // Now the library runs: the next reload asks, with no press.
+        {
+            let mut app = console.app.lock().unwrap();
+            app.chainloaded = None;
+            app.next_load_hook = false;
+            app.libkickstand = true;
+        }
+        let new_build = connect_when_loaded(console.clone());
+        let program = Program::Local { nro: with_lib, dest: dest.into() };
+        let reloaded = hot_reload(&client, options(program, Vec::new(), None)).await.unwrap();
+        let _out = new_build.await.unwrap();
         assert_eq!(reloaded.path, ReloadPath::Hook, "notes: {:?}", reloaded.started.notes);
         assert!(reloaded.started.notes.iter().any(|n| n.contains("asked the app to quit")), "{:?}", reloaded.started.notes);
-        assert_eq!(console.app.lock().unwrap().presses, 0, "no button was pressed");
+        assert_eq!(console.app.lock().unwrap().presses, 1, "no second press");
         assert!(!root.join("kickstand/next-load").exists());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -972,7 +1008,7 @@ mod tests {
         let (root, console, client) = console_with_app("withdrawn", false).await;
         let netloader_task = fake_netloader(netloader);
 
-        let program = Program::Local { nro: b"NEW sdmc:/kickstand/next-load".to_vec(), dest: "/switch/mygame/mygame.nro".into() };
+        let program = Program::Local { nro: b"NEW sdmc:/kickstand/next-load".to_vec(), dest: "/switch/oldgame/oldgame.nro".into() };
         let reloaded = hot_reload(&client, options(program, Vec::new(), None)).await.unwrap();
 
         assert_eq!(reloaded.path, ReloadPath::Hbmenu, "notes: {:?}", reloaded.started.notes);
@@ -984,13 +1020,13 @@ mod tests {
         assert!(console.app.lock().unwrap().chainloaded.is_none());
         let (sent_name, _, sent_argv) = netloader_task.await.unwrap();
         assert_eq!(sent_name, "kickstand/kickstand.nro");
-        assert_eq!(sent_argv, b"--open\0/switch/mygame/mygame.nro\0");
+        assert_eq!(sent_argv, b"--open\0/switch/oldgame/oldgame.nro\0");
 
         // hook: false never writes a request, even for an app with the hook.
         console.app.lock().unwrap().next_load_hook = true;
         let netloader = tokio::net::TcpListener::bind(("127.0.0.1", nxlink::SERVER_PORT)).await.unwrap();
         let netloader_task = fake_netloader(netloader);
-        let program = Program::Local { nro: b"NEW sdmc:/kickstand/next-load".to_vec(), dest: "/switch/mygame/mygame.nro".into() };
+        let program = Program::Local { nro: b"NEW sdmc:/kickstand/next-load".to_vec(), dest: "/switch/oldgame/oldgame.nro".into() };
         let reloaded = hot_reload(&client, options(program, Vec::new(), Some(false))).await.unwrap();
         assert_eq!(reloaded.path, ReloadPath::Hbmenu);
         assert!(console.app.lock().unwrap().chainloaded.is_none());

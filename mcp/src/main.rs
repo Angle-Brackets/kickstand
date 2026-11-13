@@ -9,6 +9,7 @@ mod client;
 mod config;
 mod crash;
 mod desktop;
+mod hints;
 mod install;
 mod launch;
 mod link;
