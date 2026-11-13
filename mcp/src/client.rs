@@ -830,37 +830,155 @@ impl Client {
         }
     }
 
-    /// Fetches the last `seconds` (up to 5.0 s) of 48 kHz 16-bit stereo PCM samples from the daemon's
-    /// rolling audio ring buffer.
-    pub async fn audio_replay(&self, seconds: f64) -> Result<Vec<i16>> {
-        let duration_ms = ((seconds.clamp(0.1, 5.0) * 1000.0).round() as u32).clamp(100, 5_000);
+    /// What the console's background audio capture is doing (protocol 30).
+    pub async fn audio_capture(&self) -> Result<proto::AudioCapture> {
+        match self.request(Request::AudioCapture).await? {
+            Response::AudioCapture(c) => Ok(c),
+            other => Err(too_old_for(other, "audio capture through grc:d", 30)),
+        }
+    }
+
+    /// The last `seconds` (up to [`proto::audio::REPLAY_MAX_MS`]) of the audio the console has been
+    /// recording in the background, as interleaved stereo samples, with the capture's state. Errors with
+    /// the reason (and what to do) when there's none.
+    pub async fn audio_replay(&self, seconds: f64) -> Result<(Vec<i16>, proto::AudioCapture)> {
+        let capture = self.audio_capture().await?;
+        let max = f64::from(proto::audio::REPLAY_MAX_MS) / 1000.0;
+        let duration_ms = (seconds.clamp(0.1, max) * 1000.0).round() as u32;
         let (raw, _) = self
             .read_chunks(
                 Request::AudioReplay { duration_ms },
                 |offset, len| Request::AudioRead { offset, len: len as u32 },
                 0,
                 u64::MAX,
-                "the audio replay buffer",
+                "the audio replay",
             )
             .await?;
-        Ok(raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect())
+        if raw.is_empty() {
+            bail!("{}", crate::audio::why_silent(&capture).unwrap_or_else(|| "the console has recorded no audio yet".into()));
+        }
+        Ok((crate::audio::pcm_bytes_to_i16(&raw), capture))
     }
 
-    /// Streams `seconds` (up to 30.0 s) of live 48 kHz 16-bit stereo PCM samples from the daemon in chunks.
-    pub async fn record_audio(&self, seconds: f64) -> Result<Vec<i16>> {
-        let total_ms = ((seconds.clamp(0.1, 30.0) * 1000.0).round() as u32).clamp(100, 30_000);
-        let mut remaining_ms = total_ms;
-        let mut samples = Vec::new();
-        while remaining_ms > 0 {
-            let chunk_ms = remaining_ms.min(500);
-            let data = match self.request(Request::AudioStreamChunk { duration_ms: chunk_ms }).await? {
-                Response::Data { data, .. } => data,
-                other => return Err(too_old_for(other, "record_audio", 29)),
-            };
-            samples.extend(data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));
-            remaining_ms = remaining_ms.saturating_sub(chunk_ms);
+    /// Records the next `seconds` (up to 30) of live audio as it arrives, streamed from the console.
+    /// Stops early if capturing stops; errors with the reason if nothing arrived.
+    /// Pauses the sysmodule's gameplay capture for `ms` (0 resumes it) so that stopping it leaves no grc:d
+    /// read under way; `None` from a daemon without it (before protocol 30, or the NRO).
+    pub async fn hold_capture(&self, ms: u32) -> Result<Option<proto::AudioCapture>> {
+        match self.request(Request::CaptureHold { ms }).await? {
+            Response::AudioCapture(c) => Ok(Some(c)),
+            _ => Ok(None),
         }
-        Ok(samples)
+    }
+
+    pub async fn record_audio(&self, seconds: f64) -> Result<crate::audio::Recording> {
+        let first = self.audio_capture().await?;
+        if let Some(why) = crate::audio::why_silent(&first) {
+            bail!("{why}");
+        }
+        let want = proto::audio::bytes_for_ms((seconds.clamp(0.1, 30.0) * 1000.0).round() as u32);
+        let mut pcm = Vec::with_capacity(want as usize);
+        let mut from = None;
+        let mut gaps_ms = 0u64;
+        let mut stopped = false;
+        while (pcm.len() as u64) < want {
+            let left_ms = proto::audio::ms_for_bytes(want - pcm.len() as u64) as u32;
+            let req = Request::AudioStream { from, min_ms: left_ms.clamp(20, 300), max_wait_ms: 1_000 };
+            let chunk = match self.request(req).await? {
+                Response::AudioChunk(c) => c,
+                other => return Err(too_old_for(other, "record_audio through grc:d", 30)),
+            };
+            if from.is_some() && chunk.skipped > 0 {
+                // A gap: keep the timeline, fill it with silence.
+                let fill = chunk.skipped.min(want - pcm.len() as u64) as usize & !3;
+                pcm.resize(pcm.len() + fill, 0);
+                gaps_ms += proto::audio::ms_for_bytes(chunk.skipped);
+            }
+            let take = chunk.data.len().min((want - pcm.len() as u64) as usize);
+            pcm.extend_from_slice(&chunk.data[..take]);
+            from = Some(chunk.from + chunk.data.len() as u64);
+            if chunk.data.is_empty() && chunk.state != proto::CaptureState::Capturing {
+                stopped = true;
+                break;
+            }
+        }
+        if pcm.is_empty() {
+            let capture = self.audio_capture().await?;
+            bail!("{}", crate::audio::why_silent(&capture).unwrap_or_else(|| "no audio arrived from the console".into()));
+        }
+        let stopped = if stopped { crate::audio::why_silent(&self.audio_capture().await?) } else { None };
+        Ok(crate::audio::Recording { samples: crate::audio::pcm_bytes_to_i16(&pcm), gaps_ms, stopped })
+    }
+
+    /// Streams the running application's gameplay video (H.264 from the console's recorder) for about
+    /// `seconds`, starting at a keyframe. The clip is empty (with the reason in `stopped`) when the
+    /// console can't, or no keyframe came within a few seconds.
+    pub async fn record_video(&self, seconds: f64) -> Result<crate::video::Clip> {
+        let mut clip = crate::video::Clip::default();
+        let mut frame = Vec::new();
+        let mut restart = true;
+        let started = Instant::now();
+        let mut first: Option<(u64, Instant)> = None;
+        let span = std::time::Duration::from_secs_f64(seconds.clamp(0.5, 30.0));
+        loop {
+            let chunk = match self.request(Request::VideoStream { restart }).await? {
+                Response::VideoChunk(c) => c,
+                other => return Err(too_old_for(other, "video capture through grc:d", 30)),
+            };
+            restart = false;
+            clip.dropped += chunk.dropped;
+            if chunk.data.is_empty() {
+                if chunk.state != proto::CaptureState::Capturing {
+                    clip.stopped = Some(chunk.state);
+                    break;
+                }
+            } else {
+                if chunk.frame_start {
+                    frame.clear();
+                }
+                frame.extend_from_slice(&chunk.data);
+                if chunk.frame_end {
+                    let (ts0, at0) = *first.get_or_insert((chunk.timestamp, Instant::now()));
+                    clip.frames.push(crate::video::Frame { data: std::mem::take(&mut frame), timestamp: chunk.timestamp.saturating_sub(ts0) });
+                    clip.elapsed = at0.elapsed();
+                    // The sound too, from the first frame on, picked up every few frames between them.
+                    if clip.frames.len() % 8 == 1 {
+                        self.video_sound(&mut clip).await;
+                    }
+                }
+            }
+            match first {
+                Some((_, at)) if at.elapsed() >= span => break,
+                None if started.elapsed() > crate::video::KEYFRAME_WAIT => {
+                    clip.no_keyframe = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !clip.frames.is_empty() {
+            self.video_sound(&mut clip).await;
+        }
+        Ok(clip)
+    }
+
+    /// Adds the sound captured since the last call to `clip` (the first call starts it at the stream's
+    /// head); gives up on sound for the clip if the console isn't capturing it.
+    async fn video_sound(&self, clip: &mut crate::video::Clip) {
+        if clip.audio_from == Some(u64::MAX) {
+            return;
+        }
+        let req = Request::AudioStream { from: clip.audio_from, min_ms: 0, max_wait_ms: 0 };
+        match self.request(req).await {
+            Ok(Response::AudioChunk(c)) if c.state == proto::CaptureState::Capturing => {
+                if clip.audio_from.is_some() {
+                    clip.audio.resize(clip.audio.len() + c.skipped as usize, 0);
+                }
+                clip.audio.extend_from_slice(&c.data);
+                clip.audio_from = Some(c.from + c.data.len() as u64);
+            }
+            _ => clip.audio_from = Some(u64::MAX),
+        }
     }
 
     /// Queries or modifies system audio output volume (`0..=100`) and mute state.

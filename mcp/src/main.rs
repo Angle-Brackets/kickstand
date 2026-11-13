@@ -31,6 +31,7 @@ mod until;
 mod update;
 mod usb;
 mod usb_setup;
+mod video;
 mod watch;
 mod watchdog;
 
@@ -468,9 +469,13 @@ enum Command {
     KeepAwake { minutes: Option<u32> },
     /// Save a screenshot of the console (JPEG).
     Screenshot { local: PathBuf },
-    /// Record the screen as a looping GIF from repeated screenshots.
+    /// Record the screen as a looping GIF (and an .mp4 of the console's own video when the running game
+    /// records gameplay and ffmpeg is installed; otherwise from repeated screenshots).
     Gif {
         local: PathBuf,
+        /// Use screenshots even when the console's video stream would work.
+        #[arg(long)]
+        screenshots: bool,
         #[arg(long, default_value_t = 3.0)]
         seconds: f64,
         /// Target frame rate; capturing is slower than this at high rates.
@@ -509,7 +514,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AudioCmd {
-    /// Save the last N seconds (up to 5.0 s) of console audio from the ring buffer and run DSP analysis.
+    /// What the console's background audio capture is doing, and why it hears nothing if it doesn't.
+    Status,
+    /// Save the last N seconds (up to 5.0 s) the console has been recording in the background, and analyse them.
     Replay {
         #[arg(long, default_value_t = 5.0)]
         seconds: f64,
@@ -518,7 +525,7 @@ enum AudioCmd {
         #[arg(long)]
         reference: Option<PathBuf>,
     },
-    /// Record live console audio for N seconds (up to 30.0 s) and run DSP analysis.
+    /// Record the next N seconds (up to 30.0 s) of console audio as it plays, and analyse them.
     Record {
         #[arg(long, default_value_t = 3.0)]
         seconds: f64,
@@ -1408,45 +1415,44 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             out.done(json!({ "report": res.text, "svg": res.svg_path }), || res.text.clone());
         }
         Command::Audio { action } => match action {
-            AudioCmd::Replay { seconds, out: wav_out, reference } => {
-                let samples = client.audio_replay(seconds).await?;
-                let wav_path = match wav_out {
-                    Some(p) => p,
-                    None => tools::default_capture_path("wav")?,
+            AudioCmd::Status => {
+                let c = client.audio_capture().await?;
+                let text = match audio::why_silent(&c) {
+                    Some(why) => format!("not capturing: {why}"),
+                    None => audio::capture_line(&c),
                 };
-                let (analysis, saved, _) = audio::format_audio_output(
-                    &samples,
-                    audio::DEFAULT_SAMPLE_RATE,
-                    audio::DEFAULT_CHANNELS,
-                    &wav_path,
-                    reference.as_deref(),
-                    modalities::Modalities::IMAGE,
-                )?;
-                let spec_path = saved.with_extension("spectrogram.png");
-                let spec_png = audio::render_spectrogram_png(&samples, audio::DEFAULT_SAMPLE_RATE, audio::DEFAULT_CHANNELS)?;
-                std::fs::write(&spec_path, &spec_png)?;
-                let summary = format!("{}\nspectrogram: {}", analysis.summary_text(Some(&saved)).trim_end(), spec_path.display());
-                out.done(json!({ "path": saved, "spectrogram": spec_path, "analysis": analysis, "summary": summary }), || summary.clone());
+                out.done(
+                    json!({
+                        "state": format!("{:?}", c.state),
+                        "program_id": c.program_id.map(|id| format!("{id:016x}")),
+                        "hbl": c.hbl,
+                        "video_capture": c.video_capture,
+                        "buffered_ms": c.buffered_ms,
+                        "newest_age_ms": c.newest_age_ms,
+                        "summary": text,
+                    }),
+                    || text.clone(),
+                );
+            }
+            AudioCmd::Replay { seconds, out: wav_out, reference } => {
+                let (samples, capture) = client.audio_replay(seconds).await?;
+                let note = format!(
+                    "{} (asked for {seconds:.1} s, got {:.2} s)",
+                    audio::capture_line(&capture),
+                    samples.len() as f64 / f64::from(audio::DEFAULT_SAMPLE_RATE * u32::from(audio::DEFAULT_CHANNELS))
+                );
+                save_audio(&out, &samples, wav_out, reference, note)?;
             }
             AudioCmd::Record { seconds, out: wav_out, reference } => {
-                let samples = client.record_audio(seconds).await?;
-                let wav_path = match wav_out {
-                    Some(p) => p,
-                    None => tools::default_capture_path("wav")?,
-                };
-                let (analysis, saved, _) = audio::format_audio_output(
-                    &samples,
-                    audio::DEFAULT_SAMPLE_RATE,
-                    audio::DEFAULT_CHANNELS,
-                    &wav_path,
-                    reference.as_deref(),
-                    modalities::Modalities::IMAGE,
-                )?;
-                let spec_path = saved.with_extension("spectrogram.png");
-                let spec_png = audio::render_spectrogram_png(&samples, audio::DEFAULT_SAMPLE_RATE, audio::DEFAULT_CHANNELS)?;
-                std::fs::write(&spec_path, &spec_png)?;
-                let summary = format!("{}\nspectrogram: {}", analysis.summary_text(Some(&saved)).trim_end(), spec_path.display());
-                out.done(json!({ "path": saved, "spectrogram": spec_path, "analysis": analysis, "summary": summary }), || summary.clone());
+                let rec = client.record_audio(seconds).await?;
+                let mut note = String::new();
+                if rec.gaps_ms > 0 {
+                    note.push_str(&format!("{} ms of gaps filled with silence", rec.gaps_ms));
+                }
+                if let Some(why) = &rec.stopped {
+                    note.push_str(&format!("{}stopped early: {why}", if note.is_empty() { "" } else { "; " }));
+                }
+                save_audio(&out, &rec.samples, wav_out, reference, note)?;
             }
             AudioCmd::Control { volume, muted } => {
                 let status = client.audio_control(volume, muted).await?;
@@ -1478,8 +1484,17 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             std::fs::write(&local, &jpeg)?;
             out.done(json!({ "path": local, "bytes": jpeg.len() }), || format!("saved {} ({} bytes)", local.display(), jpeg.len()));
         }
-        Command::Gif { local, seconds, fps, width } => {
-            let shots = capture::record(&client, seconds, fps).await?;
+        Command::Gif { local, seconds, fps, width, screenshots } => {
+            // The console's own video first (also saved as an .mp4), screenshots when it can't.
+            let (shots, source) = match if screenshots { Err(anyhow::anyhow!("--screenshots")) } else { video::record_to_file(&client, seconds, &local).await } {
+                Ok((mp4, clip_fps, frames, kb)) => {
+                    let decode = mp4.clone();
+                    let shots = tokio::task::spawn_blocking(move || video::decode_shots(&decode, clip_fps, fps.clamp(1, capture::MAX_FPS), width)).await??;
+                    (shots, format!("the console's gameplay video ({frames} frames at {clip_fps:.1} fps, {kb} KB): {}", mp4.display()))
+                }
+                Err(why) => (capture::record(&client, seconds, fps).await?, format!("screenshots ({why:#})")),
+            };
+            out.note(format!("from {source}"));
             let sheet_path = local.with_extension("contact_sheet.jpg");
             let sheet_path_clone = sheet_path.clone();
             let (gif, frames, sheet_res) = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -1593,6 +1608,30 @@ async fn update(out: &out::Out, host: Option<String>, port: u16, check: bool, sw
 }
 
 /// `"x,y,w,h"` as the numbers.
+/// Saves `samples` as a .wav (and its spectrogram), analyses it and prints the result with `note`.
+fn save_audio(out: &out::Out, samples: &[i16], wav_out: Option<PathBuf>, reference: Option<PathBuf>, note: String) -> Result<()> {
+    let wav_path = match wav_out {
+        Some(p) => p,
+        None => tools::default_capture_path("wav")?,
+    };
+    let (analysis, saved, _) = audio::format_audio_output(
+        samples,
+        audio::DEFAULT_SAMPLE_RATE,
+        audio::DEFAULT_CHANNELS,
+        &wav_path,
+        reference.as_deref(),
+        modalities::Modalities::IMAGE,
+    )?;
+    let spec_path = saved.with_extension("spectrogram.png");
+    std::fs::write(&spec_path, audio::render_spectrogram_png(samples, audio::DEFAULT_SAMPLE_RATE, audio::DEFAULT_CHANNELS)?)?;
+    let mut summary = format!("{}\nspectrogram: {}", analysis.summary_text(Some(&saved)).trim_end(), spec_path.display());
+    if !note.is_empty() {
+        summary = format!("{note}\n{summary}");
+    }
+    out.done(json!({ "path": saved, "spectrogram": spec_path, "analysis": analysis, "summary": summary }), || summary.clone());
+    Ok(())
+}
+
 fn parse_region(text: &str) -> Result<(u32, u32, u32, u32)> {
     let n: Vec<u32> = text.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().context("region is x,y,w,h")?;
     let [x, y, w, h] = n[..] else { anyhow::bail!("region is x,y,w,h") };

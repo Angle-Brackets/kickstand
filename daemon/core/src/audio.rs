@@ -1,471 +1,485 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Console-side 5-second circular PCM audio ring buffer ("flight recorder") and live chunk streaming.
+//! Background audio capture (sysmodule only): a thread reads the foreground application's sound from the
+//! gameplay recorder (`grc:d`, [`services::grc`]) into a ring holding the last [`audio::RING_MS`], while an
+//! application runs. Replays ([`replay_begin`]) read the ring's newest part; live streams ([`stream`]) follow
+//! its head by stream position. Nothing opens `audout:u` or `audin:u`, and the debugger isn't involved.
 //!
-//! At 48 kHz 16-bit stereo (`192,000` bytes/s), 5 seconds of uncompressed PCM is `960,000` bytes (~937.5 KiB).
-//! The ring buffer is allocated lazily on first use with `try_reserve_exact` and read in place by chunk
-//! offset so `audio_replay` never duplicates the 960 KiB buffer in a client session's heap.
+//! The sampler keeps one `grc:d` session and one `pm:dmnt` session for its whole life. With no application
+//! running it asks pm once a second; with one running that doesn't record gameplay, it sits blocked in
+//! grc's Transfer (no CPU) until one that does comes along.
 
+use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use nx::svc;
-use proto::{ErrorKind, MAX_CHUNK, Response};
-use services::audio::{
-    AudioStatus, BYTES_PER_FRAME, BYTES_PER_SAMPLE, BYTES_PER_SECOND, CHANNELS, SAMPLE_RATE,
-};
+use nx::sync::Mutex;
+use nx::{svc, thread};
+use proto::{AudioCapture, AudioChunk, CaptureState, ErrorKind, MAX_CHUNK, Response, audio};
+use services::grc::{self, Recorder};
 
-use crate::uptime_ms;
+use crate::{log, uptime_ms};
 
-/// Maximum duration held in the retroactive circular buffer (5 seconds = 960,000 bytes).
-pub const MAX_RING_MS: u32 = 5_000;
-/// Stereo `i16` samples per second (`48,000 * 2 = 96,000`).
-pub const SAMPLES_PER_SECOND: usize = (SAMPLE_RATE as usize) * (CHANNELS as usize);
-/// Total `i16` samples in the 5-second circular buffer (`480,000` samples = `960,000` bytes).
-pub const RING_CAPACITY_SAMPLES: usize = SAMPLES_PER_SECOND * (MAX_RING_MS as usize / 1000);
-/// Default proactive streaming chunk duration in ms (`160` ms = `30,720` bytes, ~30 KiB).
-pub const DEFAULT_STREAM_CHUNK_MS: u32 = 160;
-/// Maximum single proactive streaming chunk duration in ms (`320` ms = `61,440` bytes, under `MAX_CHUNK`).
-pub const MAX_STREAM_CHUNK_MS: u32 = 320;
+const RING_BYTES: usize = audio::bytes_for_ms(audio::RING_MS) as usize;
+/// Sound that stops for longer than this (the application was suspended or replaced) starts a new
+/// recording, so a replay never splices two moments together.
+const GAP_MS: u64 = 1_000;
+/// A Transfer blocked this long means the recorder isn't sending: [`CaptureState::Waiting`].
+const WAITING_AFTER_MS: u64 = 400;
+/// How often the sampler checks which application runs while sound flows.
+const CHECK_APP_MS: u64 = 1_000;
+/// How often it checks for SysDVR.
+const CHECK_SYSDVR_MS: u64 = 5_000;
+/// grc's own audio buffer size: one recorder frame (1024 stereo samples, 21.3 ms).
+const TRANSFER_BYTES: usize = grc::AUDIO_BUFFER_SIZE;
 
-static SAMPLER_RUNNING: AtomicBool = AtomicBool::new(false);
-static RING: nx::sync::Mutex<RingBuffer> = nx::sync::Mutex::new(RingBuffer::new());
+static STARTED: AtomicBool = AtomicBool::new(false);
+/// An earlier Kickstand process read grc:d's stream since the console booted, and this one hasn't had any
+/// sound yet: grc sends nothing to a restarted reader (see [`READER_MARK`]).
+static LEFTOVER: AtomicBool = AtomicBool::new(false);
+/// No new grc:d Transfers until this uptime (see [`hold`]).
+static HOLD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+/// This process has written [`READER_MARK`].
+static MARKED: AtomicBool = AtomicBool::new(false);
+/// Written when a process first reads sound from grc:d: the uptime (ms) then; removed by a [`hold`] that
+/// left no Transfer under way. One found at start from this boot (an uptime below now) means an earlier
+/// daemon was stopped without that, most likely in the middle of a Transfer (the game was behind the Album,
+/// say). On 23.0.1 grc then sends nothing more to anyone until a reboot, so a silent recorder means
+/// "reboot", not "wait". A stop after a clean hold leaves grc working (verified on hardware).
+const READER_MARK: &str = "/kickstand/grc-reader";
+/// Whether this process has called grc:d Initialize (once per boot at most, by anyone).
+static INITIALIZE_TRIED: AtomicBool = AtomicBool::new(false);
+static RING: Mutex<Ring> = Mutex::new(Ring::new());
+static PHASE: Mutex<Phase> = Mutex::new(Phase::Starting);
+/// The last title whose control data was read, and its VideoCapture value.
+static VIDEO_CAPTURE: Mutex<Option<(u64, Option<u8>)>> = Mutex::new(None);
 
-/// In-memory circular buffer of interleaved stereo `i16` PCM samples at 48 kHz.
-pub struct RingBuffer {
-    /// Lazily allocated backing storage of length `RING_CAPACITY_SAMPLES`.
-    samples: Vec<i16>,
-    /// Next write index in `0..RING_CAPACITY_SAMPLES` (always even for stereo frame alignment).
-    write_pos: usize,
-    /// Number of valid `i16` samples currently stored (`0..=RING_CAPACITY_SAMPLES`, always even).
-    filled: usize,
-    /// Total `i16` samples ever pushed since boot.
-    total_written: u64,
-    /// Uptime in ms when samples were last pushed.
+/// What the sampler thread is doing.
+#[derive(Clone)]
+enum Phase {
+    Starting,
+    NoApplication,
+    /// Inside a Transfer since this uptime.
+    Transferring { since_ms: u64 },
+    Busy(&'static str),
+    Failed { result: u32, during: &'static str },
+    /// [`hold`] paused it.
+    Held,
+}
+
+/// The ring: stream positions count bytes captured since the daemon started, and never go back.
+struct Ring {
+    buf: Vec<u8>,
+    /// The position after the newest byte.
+    head: u64,
+    /// Where the current recording starts (an application change or a pause in the sound restarts it).
+    start: u64,
     last_push_ms: u64,
-    /// Frozen replay window length in bytes set by [`prepare_replay`], read in chunks by [`read_replay_chunk`].
-    replay_bytes: usize,
-    /// Write position snapshot when [`prepare_replay`] was called.
-    replay_write_pos: usize,
-    /// Filled sample count snapshot when [`prepare_replay`] was called.
-    replay_filled: usize,
 }
 
-impl RingBuffer {
-    pub const fn new() -> Self {
-        Self {
-            samples: Vec::new(),
-            write_pos: 0,
-            filled: 0,
-            total_written: 0,
-            last_push_ms: 0,
-            replay_bytes: 0,
-            replay_write_pos: 0,
-            replay_filled: 0,
-        }
+impl Ring {
+    const fn new() -> Self {
+        Ring { buf: Vec::new(), head: 0, start: 0, last_push_ms: 0 }
     }
 
-    /// Lazily allocates the 960 KiB ring buffer on first use without panicking on OOM.
-    fn ensure_allocated(&mut self) -> bool {
-        if self.samples.len() == RING_CAPACITY_SAMPLES {
-            return true;
-        }
-        if self.samples.try_reserve_exact(RING_CAPACITY_SAMPLES).is_err() {
-            return false;
-        }
-        self.samples.resize(RING_CAPACITY_SAMPLES, 0);
-        true
+    /// The oldest position still held.
+    fn oldest(&self) -> u64 {
+        self.start.max(self.head.saturating_sub(RING_BYTES as u64))
     }
 
-    /// Pushes interleaved stereo `i16` samples into the circular buffer.
-    pub fn push_samples(&mut self, pcm: &[i16], now_ms: u64) -> bool {
-        let aligned_len = pcm.len() & !1;
-        if aligned_len == 0 {
-            return true;
+    fn held(&self) -> u64 {
+        self.head - self.oldest()
+    }
+
+    fn restart(&mut self) {
+        self.start = self.head;
+    }
+
+    /// Appends `data` (whole frames). `false` if the ring couldn't be allocated.
+    fn push(&mut self, data: &[u8], now_ms: u64) -> bool {
+        if self.buf.len() != RING_BYTES {
+            if self.buf.try_reserve_exact(RING_BYTES).is_err() {
+                return false;
+            }
+            self.buf.resize(RING_BYTES, 0);
         }
-        if !self.ensure_allocated() {
-            return false;
+        if self.last_push_ms != 0 && now_ms.saturating_sub(self.last_push_ms) > GAP_MS {
+            self.restart();
         }
-        let slice = &pcm[..aligned_len];
-        let src = if slice.len() > RING_CAPACITY_SAMPLES {
-            &slice[slice.len() - RING_CAPACITY_SAMPLES..]
-        } else {
-            slice
-        };
-        let first_part = (RING_CAPACITY_SAMPLES - self.write_pos).min(src.len());
-        self.samples[self.write_pos..self.write_pos + first_part]
-            .copy_from_slice(&src[..first_part]);
-        let second_part = src.len() - first_part;
-        if second_part > 0 {
-            self.samples[..second_part].copy_from_slice(&src[first_part..]);
-        }
-        self.write_pos = (self.write_pos + src.len()) % RING_CAPACITY_SAMPLES;
-        self.filled = (self.filled + src.len()).min(RING_CAPACITY_SAMPLES);
-        self.total_written = self.total_written.saturating_add(src.len() as u64);
+        let data = &data[..data.len() & !3];
+        let data = &data[data.len().saturating_sub(RING_BYTES)..];
+        let at = (self.head % RING_BYTES as u64) as usize;
+        let first = (RING_BYTES - at).min(data.len());
+        self.buf[at..at + first].copy_from_slice(&data[..first]);
+        self.buf[..data.len() - first].copy_from_slice(&data[first..]);
+        self.head += data.len() as u64;
         self.last_push_ms = now_ms;
         true
     }
 
-    /// Pushes little-endian `i16` stereo bytes into the circular buffer.
-    pub fn push_bytes(&mut self, pcm_le: &[u8], now_ms: u64) -> bool {
-        let frame_bytes = pcm_le.len() & !(BYTES_PER_FRAME - 1);
-        if frame_bytes == 0 {
-            return true;
+    /// Copies `len` bytes from position `from` (which must be held) into `out`.
+    fn copy(&self, from: u64, len: usize, out: &mut Vec<u8>) {
+        let at = (from % RING_BYTES as u64) as usize;
+        let first = (RING_BYTES - at).min(len);
+        out.extend_from_slice(&self.buf[at..at + first]);
+        out.extend_from_slice(&self.buf[..len - first]);
+    }
+}
+
+fn set_phase(phase: Phase) {
+    *PHASE.lock() = phase;
+}
+
+/// Starts the sampler thread (the sysmodule calls this once at start).
+pub fn start() {
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Ok((data, _)) = crate::sd::read(READER_MARK, 0, 32) {
+        let saved_at = core::str::from_utf8(&data).ok().and_then(|t| t.trim().parse::<u64>().ok());
+        // Uptime starts over at a reboot, so a mark saved later than now is from before one.
+        if saved_at.is_some_and(|at| at <= uptime_ms()) {
+            LEFTOVER.store(true, Ordering::SeqCst);
+            log!("audio: an earlier Kickstand read grc:d's stream this boot; it may send nothing more until a reboot");
         }
-        if !self.ensure_allocated() {
-            return false;
-        }
-        for chunk in pcm_le[..frame_bytes].chunks_exact(2) {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            self.samples[self.write_pos] = sample;
-            self.write_pos += 1;
-            if self.write_pos == RING_CAPACITY_SAMPLES {
-                self.write_pos = 0;
+    }
+    // The ring is allocated on the first sound, not here, so a console that never runs a recording game
+    // never pays for it.
+    let spawned = thread::Builder::new().name("audio").stack_size(0x4000).spawn(run);
+    if let Err(rc) = spawned {
+        log!("couldn't start the audio sampler: {rc}");
+        set_phase(Phase::Failed { result: rc.get_value(), during: "starting the audio thread" });
+    }
+}
+
+/// grc's Transfer writes through a mapped buffer; keep it page aligned like official software's.
+#[repr(C, align(4096))]
+struct TransferBuffer([u8; TRANSFER_BYTES]);
+
+fn run() {
+    let watcher = loop {
+        match services::pm::Watcher::open() {
+            Ok(w) => break w,
+            Err(rc) => {
+                set_phase(Phase::Failed { result: rc.get_value(), during: "opening pm:dmnt" });
+                let _ = svc::sleep_thread(5_000_000_000);
             }
         }
-        let added_samples = frame_bytes / BYTES_PER_SAMPLE;
-        self.filled = (self.filled + added_samples).min(RING_CAPACITY_SAMPLES);
-        self.total_written = self.total_written.saturating_add(added_samples as u64);
-        self.last_push_ms = now_ms;
-        true
-    }
-
-    /// Snapshots the ring buffer cursor for a retroactive replay of `duration_ms` (clamped to `1..=5000` ms)
-    /// and returns the total byte length of the replay window.
-    pub fn prepare_replay(&mut self, duration_ms: u32) -> usize {
-        let ms = duration_ms.clamp(1, MAX_RING_MS) as usize;
-        let wanted_frames = (ms * (SAMPLE_RATE as usize)) / 1000;
-        let wanted_samples = (wanted_frames * (CHANNELS as usize)).min(RING_CAPACITY_SAMPLES);
-        self.replay_bytes = wanted_samples * BYTES_PER_SAMPLE;
-        self.replay_write_pos = self.write_pos;
-        self.replay_filled = self.filled;
-        self.replay_bytes
-    }
-
-    /// Reads `[offset .. offset + len]` bytes of little-endian `i16` PCM from the prepared replay window
-    /// without allocating a second copy of the 5-second buffer.
-    ///
-    /// Any leading portion before the earliest sample in the ring buffer is zero-filled (silence).
-    pub fn read_replay_chunk(&self, offset: u64, len: u32) -> (Vec<u8>, u64) {
-        let total = self.replay_bytes;
-        let start_byte = (offset as usize).min(total) & !(BYTES_PER_SAMPLE - 1);
-        let max_len = (len as usize).min(MAX_CHUNK) & !(BYTES_PER_SAMPLE - 1);
-        let end_byte = start_byte.saturating_add(max_len).min(total);
-        if start_byte >= end_byte {
-            return (Vec::new(), total as u64);
-        }
-
-        let wanted_samples = total / BYTES_PER_SAMPLE;
-        let available_samples = self.replay_filled.min(wanted_samples);
-        let silence_prefix_samples = wanted_samples.saturating_sub(available_samples);
-        let ring_start_sample = if self.samples.len() == RING_CAPACITY_SAMPLES {
-            (self.replay_write_pos + RING_CAPACITY_SAMPLES - available_samples) % RING_CAPACITY_SAMPLES
-        } else {
-            0
-        };
-
-        let start_sample = start_byte / BYTES_PER_SAMPLE;
-        let end_sample = end_byte / BYTES_PER_SAMPLE;
-        let mut out = Vec::with_capacity((end_sample - start_sample) * BYTES_PER_SAMPLE);
-
-        for sample_idx in start_sample..end_sample {
-            let sample = if sample_idx < silence_prefix_samples || self.samples.is_empty() {
-                0i16
-            } else {
-                let ring_offset = sample_idx - silence_prefix_samples;
-                let pos = (ring_start_sample + ring_offset) % RING_CAPACITY_SAMPLES;
-                self.samples[pos]
-            };
-            out.extend_from_slice(&sample.to_le_bytes());
-        }
-        (out, total as u64)
-    }
-}
-
-/// Marks the audio ring buffer subsystem ready without spawning a background `audin:u` polling thread.
-pub fn start_sampler() {
-    SAMPLER_RUNNING.store(true, Ordering::SeqCst);
-}
-
-/// Pushes raw PCM samples directly into the global 5-second ring buffer.
-pub fn push_samples(pcm: &[i16]) -> bool {
-    RING.lock().push_samples(pcm, uptime_ms())
-}
-
-/// Pushes raw little-endian `i16` PCM bytes directly into the global 5-second ring buffer.
-pub fn push_bytes(pcm_le: &[u8]) -> bool {
-    RING.lock().push_bytes(pcm_le, uptime_ms())
-}
-
-/// Reads and resamples 32,728 Hz stereo `i16` frames from a 32,768-frame circular buffer (`g_ring`)
-/// in a debugged process into 48,000 Hz stereo `i16` samples in `dst`.
-fn resample_ring_32k_to_48k(
-    dbg: &services::debug::Debugged,
-    ring_base: u64,
-    w: u64,
-    dst: &mut [i16],
-) -> usize {
-    let out_frames = (dst.len() / 2).min(48_000);
-    if out_frames == 0 {
-        return 0;
-    }
-    let in_frames = ((out_frames * 32_728) / 48_000).clamp(1, 32_768);
-    let start_frame = w.saturating_sub(in_frames as u64);
-    let mut block = [0u8; 4096];
-    let mut loaded_blk = usize::MAX;
-    for out_idx in 0..out_frames {
-        let src_off = (out_idx * 32_728) / 48_000;
-        let ring_frame = ((start_frame + src_off as u64) as usize) & 32_767;
-        let blk = ring_frame >> 10;
-        if blk != loaded_blk {
-            let addr = ring_base.wrapping_add((blk as u64) * 4096);
-            if dbg.read(addr, &mut block).is_err() {
-                return out_idx * 2;
-            }
-            loaded_blk = blk;
-        }
-        let byte_off = (ring_frame & 1023) * 4;
-        dst[out_idx * 2] = i16::from_le_bytes([block[byte_off], block[byte_off + 1]]);
-        dst[out_idx * 2 + 1] = i16::from_le_bytes([block[byte_off + 2], block[byte_off + 3]]);
-    }
-    out_frames * 2
-}
-
-/// Reads linear little-endian `i16` stereo samples from a process's `AudioOutBuffer` data pointer.
-fn read_linear_pcm(
-    dbg: &services::debug::Debugged,
-    buf_ptr: u64,
-    data_sz: usize,
-    dst: &mut [i16],
-) -> usize {
-    let max_samples = (data_sz / 2).min(dst.len()) & !1;
-    if max_samples == 0 {
-        return 0;
-    }
-    let mut block = [0u8; 4096];
-    let mut written = 0usize;
-    while written < max_samples {
-        let chunk_samples = (max_samples - written).min(block.len() / 2);
-        let chunk_bytes = chunk_samples * 2;
-        let addr = buf_ptr.wrapping_add((written * 2) as u64);
-        if dbg.read(addr, &mut block[..chunk_bytes]).is_err() {
-            break;
-        }
-        for i in 0..chunk_samples {
-            dst[written + i] = i16::from_le_bytes([block[i * 2], block[i * 2 + 1]]);
-        }
-        written += chunk_samples;
-    }
-    written & !1
-}
-
-/// Captures live PCM stereo samples from the currently running application's audio buffers via
-/// `svcDebugActiveProcess` / `svcReadDebugProcessMemory` without opening `audout:u` or `audin:u` handles.
-fn capture_from_running_app(dst: &mut [i16]) -> usize {
-    let Ok(Some(app)) = services::pm::application() else {
-        return 0;
     };
-    let pid = app.pid;
-    let Ok(dbg) = services::debug::Debugged::attach(pid) else {
-        return 0;
-    };
-    if dbg.pause().is_err() {
-        return 0;
-    }
-
-    // Fast path: check executable NRO mappings for the 32,768-frame stereo ring (`g_ring` / `g_write`).
-    if let Ok((mappings, _)) = dbg.mappings(64) {
-        let mut hdr = [0u8; 40];
-        for m in mappings {
-            if (m.permission & services::debug::PERM_EXECUTE) == 0 {
-                continue;
-            }
-            let base = m.base_address;
-            if dbg.read(base.wrapping_add(0x1490_a2a0), &mut hdr).is_ok() {
-                let buf_ptr = u64::from_le_bytes([
-                    hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
-                ]);
-                let buf_sz = u64::from_le_bytes([
-                    hdr[16], hdr[17], hdr[18], hdr[19], hdr[20], hdr[21], hdr[22], hdr[23],
-                ]);
-                let data_sz = u64::from_le_bytes([
-                    hdr[24], hdr[25], hdr[26], hdr[27], hdr[28], hdr[29], hdr[30], hdr[31],
-                ]);
-                if buf_sz == 0x1000
-                    && data_sz == 0x800
-                    && buf_ptr >= 0x10_0000
-                    && (buf_ptr & 0xfff) == 0
-                {
-                    let mut w_bytes = [0u8; 8];
-                    if dbg.read(base.wrapping_add(0x1490_8e68), &mut w_bytes).is_ok() {
-                        let w = u64::from_le_bytes(w_bytes);
-                        if w > 0 {
-                            let ring_base = base.wrapping_add(0x1491_2360);
-                            let n = resample_ring_32k_to_48k(&dbg, ring_base, w, dst);
-                            if n > 0 {
-                                return n;
-                            }
-                        }
-                    }
-                }
-            }
+    let mut buf = alloc::boxed::Box::new(TransferBuffer([0; TRANSFER_BYTES]));
+    let mut recorder: Option<Recorder> = None;
+    let mut last_pid = None;
+    let mut sysdvr_checked_ms = 0u64;
+    let mut sysdvr = false;
+    let mut logged_failure = false;
+    loop {
+        if held() {
+            set_phase(Phase::Held);
+            let _ = svc::sleep_thread(50_000_000);
+            continue;
         }
-    }
-
-    let Ok(tids) = dbg.threads(32) else {
-        return 0;
-    };
-    let mut stack = [0u8; 256];
-    for tid in tids {
-        let Ok(regs) = dbg.registers(tid) else {
+        let Some(pid) = watcher.application_pid() else {
+            set_phase(Phase::NoApplication);
+            last_pid = None;
+            let _ = svc::sleep_thread(1_000_000_000);
             continue;
         };
-        for stack_base in [regs.sp, regs.fp] {
-            if stack_base < 0x10_0000 || dbg.read(stack_base, &mut stack).is_err() {
-                continue;
-            }
-            for slot in 0..32 {
-                let off = slot * 8;
-                let cand = u64::from_le_bytes([
-                    stack[off],
-                    stack[off + 1],
-                    stack[off + 2],
-                    stack[off + 3],
-                    stack[off + 4],
-                    stack[off + 5],
-                    stack[off + 6],
-                    stack[off + 7],
-                ]);
-                if cand < 0x10_0000 || cand >= 0x80_0000_0000 || (cand & 7) != 0 {
+        let now = uptime_ms();
+        if sysdvr_checked_ms == 0 || now.saturating_sub(sysdvr_checked_ms) >= CHECK_SYSDVR_MS {
+            sysdvr = watcher.running(audio::SYSDVR_PROGRAM_ID);
+            sysdvr_checked_ms = now;
+        }
+        if sysdvr {
+            set_phase(Phase::Busy("SysDVR"));
+            let _ = svc::sleep_thread(2_000_000_000);
+            continue;
+        }
+        if last_pid != Some(pid) {
+            RING.lock().restart();
+            last_pid = Some(pid);
+        }
+        let rec = match &recorder {
+            Some(rec) => rec,
+            None => match Recorder::open() {
+                Ok(rec) => recorder.insert(rec),
+                Err(rc) => {
+                    set_phase(Phase::Failed { result: rc.get_value(), during: "opening grc:d" });
+                    let _ = svc::sleep_thread(5_000_000_000);
                     continue;
                 }
-                let mut hdr = [0u8; 40];
-                // Generic libnx `AudioOutBuffer` struct on stack.
-                if dbg.read(cand, &mut hdr).is_ok() {
-                    let buf_ptr = u64::from_le_bytes([
-                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
-                    ]);
-                    let buf_sz = u64::from_le_bytes([
-                        hdr[16], hdr[17], hdr[18], hdr[19], hdr[20], hdr[21], hdr[22], hdr[23],
-                    ]);
-                    let data_sz = u64::from_le_bytes([
-                        hdr[24], hdr[25], hdr[26], hdr[27], hdr[28], hdr[29], hdr[30], hdr[31],
-                    ]);
-                    if (0x800..=0x20000).contains(&buf_sz)
-                        && (buf_sz & 0x7ff) == 0
-                        && data_sz > 0
-                        && data_sz <= buf_sz
-                        && buf_ptr >= 0x10_0000
-                        && (buf_ptr & 0xff) == 0
-                    {
-                        let n = read_linear_pcm(&dbg, buf_ptr, data_sz as usize, dst);
-                        if n > 0 {
-                            return n;
+            },
+        };
+        // Read until it's time to look at the application again.
+        let round_start = uptime_ms();
+        loop {
+            if held() {
+                break;
+            }
+            let since_ms = uptime_ms();
+            set_phase(Phase::Transferring { since_ms });
+            match rec.transfer(grc::STREAM_AUDIO, &mut buf.0) {
+                Ok(out) => {
+                    logged_failure = false;
+                    let now = uptime_ms();
+                    let len = (out.data_size as usize).min(TRANSFER_BYTES);
+                    if !RING.lock().push(&buf.0[..len], now) {
+                        set_phase(Phase::Failed { result: 0, during: "allocating the audio ring (sysmodule heap full)" });
+                        let _ = svc::sleep_thread(5_000_000_000);
+                        break;
+                    }
+                    if !MARKED.swap(true, Ordering::SeqCst) {
+                        mark_reader(now);
+                    }
+                    // A long wait means the sound stopped: the application may have changed.
+                    if now - since_ms > GAP_MS || now - round_start >= CHECK_APP_MS {
+                        break;
+                    }
+                }
+                Err(rc) if grc::not_initialized(rc) && !INITIALIZE_TRIED.swap(true, Ordering::SeqCst) => {
+                    // Nobody has started grc:d's stream this boot (SysDVR or an earlier Kickstand would have):
+                    // start it, once.
+                    match rec.initialize() {
+                        Ok(()) => log!("audio: started grc:d's stream"),
+                        Err(rc) => {
+                            log!("audio: grc:d Initialize failed: {rc}");
+                            set_phase(Phase::Failed { result: rc.get_value(), during: "starting grc:d's stream" });
+                            let _ = svc::sleep_thread(5_000_000_000);
                         }
                     }
+                    break;
+                }
+                Err(rc) => {
+                    if !logged_failure {
+                        log!("audio: grc:d Transfer failed: {rc}");
+                        logged_failure = true;
+                    }
+                    set_phase(Phase::Failed { result: rc.get_value(), during: "reading audio from grc:d" });
+                    let _ = svc::sleep_thread(2_000_000_000);
+                    break;
                 }
             }
         }
     }
-    0
 }
 
-/// Prepares a retroactive audio replay of the last `duration_ms` (up to 5,000 ms) from the ring buffer
-/// and returns [`Response::Data`] with the first chunk and `file_size` set to the total PCM byte length.
-pub fn replay_begin(duration_ms: u32) -> Response {
-    if duration_ms == 0 || duration_ms > MAX_RING_MS {
-        return Response::error(
-            ErrorKind::BadRequest,
-            alloc::format!("audio replay duration must be 1-{MAX_RING_MS} ms"),
-        );
+fn held() -> bool {
+    uptime_ms() < HOLD_UNTIL_MS.load(Ordering::SeqCst)
+}
+
+/// How long [`hold`] waits for a Transfer under way to finish.
+const HOLD_WAIT_MS: u64 = 1_500;
+
+/// Answer to `CaptureHold`: starts no new grc:d Transfers for `ms` (0 resumes now), and waits up to
+/// [`HOLD_WAIT_MS`] for the ones under way to finish, so stopping this process leaves none behind in grc. A
+/// Transfer finishes within a frame while the application records; one still under way after the wait is
+/// stuck until it records again (`state` is then not [`CaptureState::Held`]).
+pub fn hold(ms: u32) -> AudioCapture {
+    if !started() {
+        return capture();
     }
-    // Attempt an immediate sample grab from the running application if the ring buffer hasn't been fed recently.
-    let now = uptime_ms();
-    let needs_poll = {
-        let ring = RING.lock();
-        ring.filled == 0 || now.saturating_sub(ring.last_push_ms) > 1_000
-    };
-    if needs_poll {
-        let mut temp = Vec::new();
-        if temp.try_reserve_exact(SAMPLES_PER_SECOND).is_ok() {
-            temp.resize(SAMPLES_PER_SECOND, 0i16);
-            let n = capture_from_running_app(&mut temp);
-            if n > 0 {
-                let _ = RING.lock().push_samples(&temp[..n], uptime_ms());
+    HOLD_UNTIL_MS.store(if ms == 0 { 0 } else { uptime_ms() + u64::from(ms) }, Ordering::SeqCst);
+    if ms != 0 {
+        let deadline = uptime_ms() + HOLD_WAIT_MS;
+        while (!matches!(*PHASE.lock(), Phase::Held) || crate::video::transferring()) && uptime_ms() < deadline {
+            let _ = svc::sleep_thread(10_000_000);
+        }
+        let quiet = matches!(*PHASE.lock(), Phase::Held) && !crate::video::transferring();
+        log!("audio: capture held for {} s{}", ms / 1000, if quiet { "" } else { "; a grc:d Transfer is still under way" });
+        if quiet {
+            // Stopping now leaves grc fine for the next reader: don't make it say "reboot". Sound after the
+            // hold (if this process lives on) marks the reader again.
+            MARKED.store(false, Ordering::SeqCst);
+            if let Err(e) = crate::sd::remove_if_exists(READER_MARK) {
+                log!("audio: removing {READER_MARK}: {}", e.message);
             }
         }
     }
-
-    let mut ring = RING.lock();
-    let _total_bytes = ring.prepare_replay(duration_ms);
-    let (data, file_size) = ring.read_replay_chunk(0, MAX_CHUNK as u32);
-    Response::Data { data, file_size }
+    capture()
 }
 
-/// Reads the next chunk of the prepared retroactive audio replay at `offset` (up to `len` bytes, capped at `MAX_CHUNK`).
-pub fn replay_read(offset: u64, len: u32) -> Response {
+/// Notes on the SD card that this boot's grc:d stream has a reader (see [`READER_MARK`]).
+fn mark_reader(now: u64) {
+    if LEFTOVER.swap(false, Ordering::SeqCst) {
+        log!("audio: grc:d sends sound again after the restart");
+    }
+    let text = alloc::format!("{now}");
+    let written = crate::sd::create_dirs("/kickstand").and_then(|()| {
+        let mut file = crate::sd::create_for_write(READER_MARK, text.len() as u64)?;
+        file.write_array::<u8, true>(text.as_bytes()).map_err(|rc| crate::sd::io_error("write", READER_MARK, rc))
+    });
+    if let Err(e) = written {
+        log!("audio: saving {READER_MARK}: {}", e.message);
+    }
+}
+
+/// Whether this daemon captures (the sysmodule, once started).
+pub fn started() -> bool {
+    STARTED.load(Ordering::Relaxed)
+}
+
+/// The capture's state as clients see it. Asks pm which application runs (the sampler may be blocked).
+pub fn state() -> CaptureState {
+    if !started() {
+        return CaptureState::Unsupported;
+    }
+    if let Ok(None) = services::pm::application() {
+        return CaptureState::NoApplication;
+    }
+    match state_quick() {
+        CaptureState::NoApplication => CaptureState::Waiting { ms: 0 },
+        state => state,
+    }
+}
+
+/// [`state`] from what the sampler last said, without asking pm (for loops).
+pub fn state_quick() -> CaptureState {
+    if !started() {
+        return CaptureState::Unsupported;
+    }
+    match PHASE.lock().clone() {
+        Phase::Starting => CaptureState::Waiting { ms: 0 },
+        Phase::NoApplication => CaptureState::NoApplication,
+        Phase::Transferring { since_ms } => {
+            let waited = uptime_ms().saturating_sub(since_ms);
+            if waited < WAITING_AFTER_MS {
+                CaptureState::Capturing
+            } else if LEFTOVER.load(Ordering::Relaxed) {
+                CaptureState::NeedsReboot { ms: waited as u32 }
+            } else {
+                CaptureState::Waiting { ms: waited as u32 }
+            }
+        }
+        Phase::Busy(holder) => CaptureState::Busy { holder: String::from(holder) },
+        Phase::Failed { result, during } => CaptureState::Failed { result, during: String::from(during) },
+        Phase::Held => CaptureState::Held,
+    }
+}
+
+/// Answer to `AudioCapture`.
+pub fn capture() -> AudioCapture {
+    let state = state();
+    let app = if started() { services::pm::application().ok().flatten() } else { None };
+    // The title's VideoCapture setting explains silence; read it (once per title) only when it's quiet.
+    let video_capture = match (&app, &state) {
+        (Some(app), CaptureState::Waiting { ms }) if *ms >= 1_000 => {
+            let mut cached = VIDEO_CAPTURE.lock();
+            match *cached {
+                Some((id, value)) if id == app.program_id => value,
+                _ => {
+                    let value = services::ns::video_capture(app.program_id).ok().flatten();
+                    *cached = Some((app.program_id, value));
+                    value
+                }
+            }
+        }
+        _ => None,
+    };
     let ring = RING.lock();
-    if ring.replay_bytes == 0 {
+    let now = uptime_ms();
+    AudioCapture {
+        state,
+        program_id: app.as_ref().map(|a| a.program_id),
+        hbl: app.as_ref().and_then(|a| a.hbl),
+        video_capture,
+        buffered_ms: audio::ms_for_bytes(ring.held()) as u32,
+        newest_age_ms: (ring.last_push_ms != 0).then(|| now.saturating_sub(ring.last_push_ms) as u32),
+        cursor: ring.head,
+    }
+}
+
+fn unsupported() -> Response {
+    Response::error(
+        ErrorKind::Unsupported,
+        "audio capture runs in Kickstand's background sysmodule, not this NRO: exit the NRO (+) and try again",
+    )
+}
+
+/// This connection's replay: positions `start..start + len`.
+pub type Snapshot = Option<(u64, u64)>;
+
+/// Answer to `AudioReplay`: marks the newest `duration_ms` held and sends its first chunk.
+pub fn replay_begin(snapshot: &mut Snapshot, duration_ms: u32) -> Response {
+    if !started() {
+        return unsupported();
+    }
+    if duration_ms == 0 || duration_ms > audio::REPLAY_MAX_MS {
+        return Response::error(ErrorKind::BadRequest, alloc::format!("audio replays are 1-{} ms", audio::REPLAY_MAX_MS));
+    }
+    let len = {
+        let ring = RING.lock();
+        let len = audio::bytes_for_ms(duration_ms).min(ring.held());
+        *snapshot = Some((ring.head - len, len));
+        len
+    };
+    let first = replay_read(snapshot, 0, MAX_CHUNK as u32);
+    match first {
+        Response::Data { data, .. } => Response::Data { data, file_size: len },
+        other => other,
+    }
+}
+
+/// Answer to `AudioRead`.
+pub fn replay_read(snapshot: &Snapshot, offset: u64, len: u32) -> Response {
+    let Some((start, total)) = *snapshot else {
+        return Response::error(ErrorKind::BadRequest, "no audio replay on this connection; send AudioReplay first");
+    };
+    let offset = offset.min(total) & !1;
+    let len = (len as u64).min(MAX_CHUNK as u64).min(total - offset) as usize & !1;
+    let ring = RING.lock();
+    if start + offset < ring.oldest() {
         return Response::error(
             ErrorKind::BadRequest,
-            "no audio replay prepared on this console; send AudioReplay first",
+            "that part of the audio replay has been overwritten by newer sound; read replays as soon as they're taken",
         );
     }
-    let (data, file_size) = ring.read_replay_chunk(offset, len);
-    Response::Data { data, file_size }
+    let mut data = Vec::with_capacity(len);
+    ring.copy(start + offset, len, &mut data);
+    Response::Data { data, file_size: total }
 }
 
-/// Captures a single live PCM chunk of `duration_ms` (clamped to `20..=MAX_STREAM_CHUNK_MS`, ~32 KiB default)
-/// for proactive `record_audio` streaming, pushing the captured samples into the ring buffer as well.
-///
-/// Waits `duration_ms` so the running application generates a fresh window of samples, then reads them from the
-/// running application (or returns zeroed silence frames if no application audio is active).
-pub fn stream_chunk(duration_ms: u32) -> Response {
-    let ms = if duration_ms == 0 {
-        DEFAULT_STREAM_CHUNK_MS
-    } else {
-        duration_ms.clamp(20, MAX_STREAM_CHUNK_MS)
-    };
-    let frames = ((ms as usize) * (SAMPLE_RATE as usize)) / 1000;
-    let sample_count = frames * (CHANNELS as usize);
-    let byte_len = sample_count * BYTES_PER_SAMPLE;
-
-    let mut pcm_samples = Vec::new();
-    if pcm_samples.try_reserve_exact(sample_count).is_err() {
-        return Response::error(
-            ErrorKind::OutOfMemory,
-            "no room for audio streaming chunk in sysmodule heap",
-        );
+/// Answer to `AudioStream`.
+pub fn stream(from: Option<u64>, min_ms: u32, max_wait_ms: u32) -> Response {
+    if !started() {
+        return unsupported();
     }
-    pcm_samples.resize(sample_count, 0i16);
-
-    let sleep_ns = (ms as i64) * 1_000_000;
-    let _ = svc::sleep_thread(sleep_ns);
-    let _captured = capture_from_running_app(&mut pcm_samples);
-
-    let _ = RING.lock().push_samples(&pcm_samples, uptime_ms());
-
-    let mut data = Vec::with_capacity(byte_len);
-    for s in pcm_samples {
-        data.extend_from_slice(&s.to_le_bytes());
-    }
-    Response::Data {
-        data,
-        file_size: BYTES_PER_SECOND as u64,
+    let deadline = uptime_ms() + u64::from(max_wait_ms.min(audio::MAX_WAIT_MS));
+    let want = audio::bytes_for_ms(min_ms).clamp(4, MAX_CHUNK as u64 & !3);
+    let asked = from.unwrap_or_else(|| RING.lock().head);
+    loop {
+        let state = state_quick();
+        let ring = RING.lock();
+        let pos = asked.min(ring.head);
+        let begin = pos.max(ring.oldest());
+        let available = ring.head - begin;
+        if available >= want || uptime_ms() >= deadline || state != CaptureState::Capturing {
+            let len = available.min(MAX_CHUNK as u64 & !3) as usize;
+            let mut data = Vec::new();
+            if data.try_reserve_exact(len).is_err() {
+                return Response::error(ErrorKind::OutOfMemory, "no room for an audio chunk in the sysmodule's heap");
+            }
+            ring.copy(begin, len, &mut data);
+            return Response::AudioChunk(AudioChunk { from: begin, data, skipped: begin - pos, state });
+        }
+        drop(ring);
+        let _ = svc::sleep_thread(20_000_000);
     }
 }
 
-/// Queries the console's current audio output status (`sample_rate`, `channels`, `target`, `volume`, `muted`).
-pub fn status() -> AudioStatus {
-    services::audio::status().unwrap_or_default()
+/// Queries the console's audio output (target, volume, mute) from `audctl`.
+pub fn status() -> services::audio::AudioStatus {
+    let mut st = services::audio::status().unwrap_or_default();
+    st.output_active = state_quick() == CaptureState::Capturing;
+    st
 }
 
-/// Sets the system master volume (`0.0..=1.0`) and/or mute state, returning the updated [`AudioStatus`].
-pub fn configure(volume: Option<f32>, muted: Option<bool>) -> Result<AudioStatus, nx::result::ResultCode> {
+/// Sets the master volume (`0.0..=1.0`) and/or mute, returning the new state.
+pub fn configure(volume: Option<f32>, muted: Option<bool>) -> Result<services::audio::AudioStatus, nx::result::ResultCode> {
     if let Some(v) = volume {
-        let _ = services::audio::set_volume(v)?;
+        services::audio::set_volume(v)?;
     }
     if let Some(m) = muted {
-        let _ = services::audio::set_mute(m)?;
+        services::audio::set_mute(m)?;
     }
-    services::audio::status()
+    let mut st = services::audio::status()?;
+    st.output_active = state_quick() == CaptureState::Capturing;
+    Ok(st)
 }

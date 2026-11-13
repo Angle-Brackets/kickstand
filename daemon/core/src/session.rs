@@ -46,6 +46,10 @@ pub struct Session {
     token: Option<String>,
     /// While its [`Request::Play`]s run back to back: the [`crate::playback`] generation they started at.
     playing: Option<u32>,
+    /// Its last [`Request::AudioReplay`].
+    audio_replay: crate::audio::Snapshot,
+    /// The video frame it's being sent.
+    video: crate::video::Sending,
 }
 
 /// Something to do once the current reply has been sent.
@@ -63,7 +67,7 @@ impl Session {
     /// [`crate::server::MAX_CLIENTS`]) is unique among the connections being served.
     pub fn new(kind: DaemonKind, slot: usize, who: core::net::Ipv4Addr) -> Self {
         let staging = format!("{}/upload-{slot}.part", path::STAGING_DIR);
-        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None, token: None, playing: None }
+        Session { kind, slot, who, staging, authed: false, memory_applet: false, upload: None, after_reply: None, screenshot: None, token: None, playing: None, audio_replay: None, video: None }
     }
 
     /// What the last request asked for after its reply (exit or reboot), if anything.
@@ -193,9 +197,16 @@ impl Session {
                     Err(resp) => resp,
                 }
             }
-            Request::AudioReplay { duration_ms } => crate::audio::replay_begin(duration_ms),
-            Request::AudioRead { offset, len } => crate::audio::replay_read(offset, len),
-            Request::AudioStreamChunk { duration_ms } => crate::audio::stream_chunk(duration_ms),
+            Request::AudioReplay { duration_ms } => crate::audio::replay_begin(&mut self.audio_replay, duration_ms),
+            Request::AudioRead { offset, len } => crate::audio::replay_read(&self.audio_replay, offset, len),
+            Request::AudioStreamChunk { .. } => Response::error(
+                ErrorKind::Unsupported,
+                "AudioStreamChunk was replaced by AudioStream in protocol 30: update Kickstand on the PC",
+            ),
+            Request::AudioCapture => Response::AudioCapture(crate::audio::capture()),
+            Request::CaptureHold { ms } => Response::AudioCapture(crate::audio::hold(ms)),
+            Request::AudioStream { from, min_ms, max_wait_ms } => crate::audio::stream(from, min_ms, max_wait_ms),
+            Request::VideoStream { restart } => crate::video::stream(self.slot, restart, &mut self.video),
             Request::AudioControl { volume, muted } => {
                 let vol_f32 = volume.map(|v| f32::from(v.min(100)) / 100.0);
                 match crate::audio::configure(vol_f32, muted) {

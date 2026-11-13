@@ -177,3 +177,22 @@ pub fn process_id(program_id: u64) -> Option<u64> {
     let dmnt = service::new_service_object::<DebugMonitorExtService>().ok()?;
     dmnt.get_process_id(ProgramId(program_id)).ok()
 }
+
+/// A `pm:dmnt` session kept open, for a thread that asks often (the audio sampler).
+pub struct Watcher(DebugMonitorExtService);
+
+impl Watcher {
+    pub fn open() -> Result<Self> {
+        Ok(Watcher(service::new_service_object::<DebugMonitorExtService>()?))
+    }
+
+    /// The running application's pid, if one runs.
+    pub fn application_pid(&self) -> Option<u64> {
+        self.0.get_application_process_id().ok()
+    }
+
+    /// Whether `program_id` is running.
+    pub fn running(&self, program_id: u64) -> bool {
+        self.0.get_process_id(ProgramId(program_id)).is_ok()
+    }
+}

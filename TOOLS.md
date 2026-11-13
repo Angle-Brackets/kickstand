@@ -9,7 +9,7 @@ The tool names are the same in every AI app.
 | Area | Tools |
 | :--- | :--- |
 | [Develop & Run Homebrew](#1-develop--run-homebrew) | [`test_build`](#test_build) · [`projects`](#projects) · [`run_nro`](#run_nro) · [`reload_nro`](#reload_nro) · [`nro_output`](#nro_output) · [`supervise`](#supervise) · [`open_hbmenu`](#open_hbmenu) · [`quit_app`](#quit_app) · [`force_quit_app`](#force_quit_app) · [`list_apps`](#list_apps) · [`launch_title`](#launch_title) |
-| [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) |
+| [Screen Vision & Capture](#2-screen-vision--capture) | [`screenshot`](#screenshot) · [`wait_screen`](#wait_screen) · [`record_gif`](#record_gif) · [`audio_replay`](#audio_replay) · [`record_audio`](#record_audio) · [`audio_control`](#audio_control) |
 | [Controller, Keyboard & Macros](#3-controller-keyboard--macros) | [`press`](#press) · [`input`](#input) · [`input_until`](#input_until) · [`type_text`](#type_text) · [`macros`](#macros) · [`record_macro`](#record_macro) · [`save_macro`](#save_macro) · [`play_macro`](#play_macro) · [`control_macro`](#control_macro) |
 | [Debugging, Crash Analysis & Memory](#4-debugging-crash-analysis--memory) | [`crash_reports`](#crash_reports) · [`crash_report`](#crash_report) · [`symbolize`](#symbolize) · [`threads`](#threads) · [`memory_map`](#memory_map) · [`read_memory`](#read_memory) · [`write_memory`](#write_memory) |
 | [SD Card Files & Logs](#5-sd-card-files--logs) | [`list_dir`](#list_dir) · [`stat`](#stat) · [`read_file`](#read_file) · [`tail_file`](#tail_file) · [`find`](#find) · [`grep`](#grep) · [`upload`](#upload) · [`usb_upload`](#usb_upload) · [`download`](#download) · [`delete`](#delete) · [`answer_access`](#answer_access) |
@@ -272,14 +272,47 @@ Wait for the Switch's screen (or a specific `region`) to either **change** (e.g.
 ---
 
 ### `record_gif`
-Record the Switch's screen as a looping GIF from repeated captures and save it on the PC (defaulting to `~/Pictures/kickstand/gif-<timestamp>.gif`). Also returns a JPEG contact sheet of up to 6 evenly spaced frames so the agent can inspect the motion directly.
+Record the Switch's screen and save it on the PC (defaulting to `~/Pictures/kickstand/gif-<timestamp>.gif`), with a JPEG contact sheet of up to 6 evenly spaced frames so the agent can inspect the motion directly.
+- **Gameplay video:** when the running game records gameplay (holding Capture in it saves a clip), or homebrew runs in such a game's place, and `ffmpeg` is installed on the PC, Kickstand streams the console's own 30 fps 1280x720 H.264 from the gameplay recorder (`grc:d`) and saves it as an `.mp4` (the video stream copied, no re-encode, with the game's sound as AAC when audio capture is running), then decodes the GIF frames from it. Nothing is buffered on the console beyond a small queue.
+- **Otherwise** it falls back to repeated screenshots (a few frames a second) and says why.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `local_path` | `string` | `~/Pictures/kickstand/gif-<ts>.gif` | Path on the PC to save the GIF. |
+| `local_path` | `string` | `~/Pictures/kickstand/gif-<ts>.gif` | Path on the PC to save the GIF (the `.mp4` goes next to it). |
 | `seconds` | `number` | `3.0` *(max 30)* | Duration to record in seconds. |
-| `fps` | `integer` | `5` *(max 10)* | Target frames per second. |
+| `fps` | `integer` | `5` *(max 10)* | Frames per second in the GIF. |
 | `width` | `integer` | `640` | Width of the GIF in pixels (`64`–`1280`). |
+
+---
+
+### `audio_replay`
+The last few seconds (up to 5) of the running game's or homebrew's sound, after the fact. The sysmodule reads the foreground application's sound from the console's gameplay recorder (`grc:d`, 48 kHz 16-bit stereo) in the background into a 6-second ring, so this returns what already played. Saved as a `.wav` on the PC and analysed (RMS/peak, dominant frequency, silence, clipping, pops); `reference_wav` finds where a sound effect occurs in it (normalized cross-correlation).
+- **What can be heard:** games that allow video capture, and homebrew running in place of such a game (title takeover). If the host game's control data says *Manual*, the homebrew must opt in by calling `appletInitializeGamePlayRecording()` (libnx) at startup. When nothing can be heard, the reply says why (no application, recording off, SysDVR running, ...) and what to do.
+- **Applets and restarts:** an applet over the game (the home menu, Controllers) pauses the recorder until it closes. If Kickstand's background service is stopped while it waits on the recorder (e.g. the Kickstand NRO started from hbmenu over a game), the recorder sends nothing more until a reboot; the reply then says to reboot. `sysmodule install` and `update` pause capture before restarting it, so they don't cause this.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `seconds` | `number` | `5.0` *(0.1-5)* | How much recent audio to fetch. |
+| `local_path` | `string` | `~/Pictures/kickstand/wav-<ts>.wav` | Where to save the `.wav`. |
+| `reference_wav` | `string` | — | A `.wav` on the PC (an SFX) to look for in the capture. |
+
+### `record_audio`
+The next N seconds of the same sound, streamed live as it plays (same limits as `audio_replay`). Gaps (if the stream fell behind) are filled with silence and reported.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `seconds` | `number` | `3.0` *(0.1-30)* | How long to record. |
+| `local_path` | `string` | `~/Pictures/kickstand/wav-<ts>.wav` | Where to save the `.wav`. |
+| `reference_wav` | `string` | — | A `.wav` on the PC to look for in the recording. |
+
+### `audio_control`
+Query or set the system output volume (0-100%) and mute; also says whether Kickstand is hearing the running application.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `volume` | `integer` | — | New volume, 0-100. |
+| `muted` | `boolean` | — | Mute or unmute. |
+
 
 ---
 

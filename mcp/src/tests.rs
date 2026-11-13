@@ -597,25 +597,69 @@ async fn profile_and_audio_suite_round_trip() {
     assert!(out.text.contains("Top Exclusive (Self-Time) Hotspots:"));
     assert!(svg_path.exists());
 
-    // 2. Audio replay, proactive record_audio, and audio_control end-to-end
+    // 2. Audio: the capture's replay, a live recording, audio_control, and the explanations.
     let status = client.audio_control(Some(60), Some(false)).await.unwrap();
     assert_eq!(status.sample_rate, 48_000);
     assert_eq!(status.channels, 2);
     assert_eq!(status.volume_pct, 60);
     assert!(!status.muted);
 
-    let replay_samples = client.audio_replay(0.5).await.unwrap();
+    // The mock has been "capturing" since it started; let it hold more than the replay.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let (replay_samples, capture) = client.audio_replay(0.5).await.unwrap();
+    assert_eq!(capture.state, proto::CaptureState::Capturing);
     assert_eq!(replay_samples.len(), 24_000 * 2);
     let analysis = crate::audio::analyze_pcm(&replay_samples, 48_000, 2, None);
     assert!(!analysis.silent);
     assert!((analysis.dominant_freq_hz - 440.0).abs() < 5.0);
 
-    let rec_samples = client.record_audio(0.2).await.unwrap();
-    assert_eq!(rec_samples.len(), 9_600 * 2);
+    // A live recording follows the stream with no gaps: the tone stays continuous across chunks.
+    let rec = client.record_audio(0.4).await.unwrap();
+    assert_eq!(rec.samples.len(), 19_200 * 2);
+    assert_eq!(rec.gaps_ms, 0);
+    assert!(rec.stopped.is_none());
+    assert_eq!(crate::audio::analyze_pcm(&rec.samples, 48_000, 2, None).underrun_glitches, 0);
 
     let muted_status = client.audio_control(None, Some(true)).await.unwrap();
     assert!(muted_status.muted);
-    let muted_samples = client.record_audio(0.2).await.unwrap();
-    let muted_analysis = crate::audio::analyze_pcm(&muted_samples, 48_000, 2, None);
-    assert!(muted_analysis.silent);
+    let muted = client.record_audio(0.2).await.unwrap();
+    assert!(crate::audio::analyze_pcm(&muted.samples, 48_000, 2, None).silent);
+}
+
+#[tokio::test]
+async fn audio_says_why_it_hears_nothing() {
+    let (client, console) = with_app(false).await;
+    *console.audio_state.lock().unwrap() = Some(proto::CaptureState::NoApplication);
+    let e = client.record_audio(0.2).await.unwrap_err().to_string();
+    assert!(e.contains("no game or homebrew is running"), "{e}");
+    let e = client.audio_replay(1.0).await.unwrap_err().to_string();
+    assert!(e.contains("no game or homebrew is running"), "{e}");
+
+    *console.audio_state.lock().unwrap() = Some(proto::CaptureState::Busy { holder: "SysDVR".into() });
+    let e = client.audio_replay(1.0).await.unwrap_err().to_string();
+    assert!(e.contains("SysDVR") && e.contains("turn SysDVR off"), "{e}");
+
+    // Homebrew in place of a Manual-mode title: the reply names the opt-in call.
+    let mut c = client.audio_capture().await.unwrap();
+    c.state = proto::CaptureState::Waiting { ms: 3_000 };
+    c.hbl = Some(true);
+    c.video_capture = Some(1);
+    let why = crate::audio::why_silent(&c).unwrap();
+    assert!(why.contains("appletInitializeGamePlayRecording()") && why.contains("3.0 s"), "{why}");
+    c.video_capture = Some(0);
+    assert!(crate::audio::why_silent(&c).unwrap().contains("turns video capture off"));
+    // After a daemon was stopped mid-read, grc needs a reboot: say so instead of "wait".
+    c.state = proto::CaptureState::NeedsReboot { ms: 20_000 };
+    let why = crate::audio::why_silent(&c).unwrap();
+    assert!(why.contains("reboot the console") && why.contains("20.0 s"), "{why}");
+    c.state = proto::CaptureState::Capturing;
+    assert!(crate::audio::why_silent(&c).is_none());
+
+    // A restart pauses capture first; the mock answers Held.
+    assert_eq!(client.hold_capture(1_000).await.unwrap().map(|c| c.state), Some(proto::CaptureState::Held));
+
+    // Video isn't modelled by the mock: record_gif's video path reports why and falls back.
+    let clip = client.record_video(1.0).await.unwrap();
+    assert!(clip.frames.is_empty());
+    assert_eq!(clip.stopped, Some(proto::CaptureState::Unsupported));
 }

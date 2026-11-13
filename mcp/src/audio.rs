@@ -125,6 +125,73 @@ impl AudioAnalysis {
     }
 }
 
+/// Live audio recorded by [`crate::client::Client::record_audio`].
+#[derive(Debug)]
+pub struct Recording {
+    pub samples: Vec<i16>,
+    /// Silence filled in where the stream had gaps (the console's ring overflowed, or the sound paused).
+    pub gaps_ms: u64,
+    /// Why it ended before the length asked for, if it did.
+    pub stopped: Option<String>,
+}
+
+/// What to do so a homebrew program can be heard: the one call that opts in to gameplay recording.
+pub const OPT_IN: &str = "call appletInitializeGamePlayRecording() once at startup (libnx; it hands 96 MiB of the program's memory to the recorder, so it needs the full memory of title takeover)";
+
+/// Why the console isn't capturing audio, and what to do about it; `None` while it is.
+pub fn why_silent(c: &proto::AudioCapture) -> Option<String> {
+    use proto::CaptureState as S;
+    let title = c.program_id.map_or_else(|| "the running title".to_string(), |id| format!("title {id:016x}"));
+    let homebrew = c.hbl == Some(true);
+    Some(match &c.state {
+        S::Capturing => return None,
+        S::Unsupported => "the Kickstand NRO is serving instead of the background sysmodule, and only the sysmodule captures audio: exit the NRO (+) and try again".into(),
+        S::NoApplication => "no game or homebrew is running (the home menu's own sounds aren't recordable): start it first, then capture".into(),
+        S::Busy { holder } => format!(
+            "{holder} is running on the console and reads the same gameplay recorder, so Kickstand stays off it (two readers would each get half the sound): turn {holder} off, or remove its boot2 flag and reboot"
+        ),
+        S::Failed { result, during } => format!("the console's gameplay recorder (grc:d) failed while {during}: result {result:#x}"),
+        S::Held => "gameplay capture is paused while Kickstand restarts its background service; try again in a moment".into(),
+        S::NeedsReboot { ms } => format!(
+            "{title} is running, but the gameplay recorder has sent nothing for {:.1} s, and Kickstand's background service was restarted since it last read the recorder: the console's recorder (grc) sends nothing to a restarted reader until the console reboots. If the game is in front (not the home menu or an applet such as Controllers), reboot the console to capture again",
+            f64::from(*ms) / 1000.0
+        ),
+        S::Waiting { ms } => {
+            let quiet = if *ms >= 1_000 { format!(" for {:.1} s", f64::from(*ms) / 1000.0) } else { String::new() };
+            let base = if homebrew {
+                format!("homebrew is running in place of {title}, but the gameplay recorder has sent no sound{quiet}")
+            } else {
+                format!("{title} is running, but the gameplay recorder has sent no sound{quiet}")
+            };
+            let reason = match c.video_capture {
+                Some(0) => format!(
+                    "{title} turns video capture off in its control data, so nothing it plays{} can be recorded. {}",
+                    if homebrew { " (or homebrew in its place)" } else { "" },
+                    if homebrew { "Run the homebrew in place of a game that allows video capture (in that game, holding Capture saves a clip)" } else { "Kickstand can't hear this game" }
+                ),
+                Some(1) if homebrew => format!(
+                    "{title} sets video capture to Manual, so the program in it must opt in: in the homebrew, {OPT_IN}. Or run it in place of a game whose recording is automatic"
+                ),
+                Some(1) => format!("{title} sets video capture to Manual and hasn't started recording here (some games only record in parts)"),
+                Some(2) => "recording is automatic for this title, so it may be suspended behind the home menu, still starting, or in a part that doesn't record; try again in a moment".to_string(),
+                _ if homebrew => format!(
+                    "homebrew is only heard when it records gameplay: run it in place of a game that allows video capture, or, if that game's recording is Manual, {OPT_IN}"
+                ),
+                _ => "the game may not allow video capture (holding Capture would save a clip if it did), or it's suspended behind the home menu".to_string(),
+            };
+            format!("{base}: {reason}")
+        }
+    })
+}
+
+/// One line on the capture, for replies: how much is buffered and how fresh it is.
+pub fn capture_line(c: &proto::AudioCapture) -> String {
+    let age = c.newest_age_ms.map_or_else(String::new, |ms| {
+        if ms < 500 { ", live".to_string() } else { format!(", newest from {:.1} s ago", f64::from(ms) / 1000.0) }
+    });
+    format!("console audio capture: {:.1} s buffered{age}", f64::from(c.buffered_ms) / 1000.0)
+}
+
 /// Encodes interleaved 16-bit signed PCM samples into a standard 44-byte RIFF/WAVE byte buffer.
 pub fn encode_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     let data_bytes = samples.len() * 2;
@@ -583,113 +650,121 @@ fn resample_mono(mono: &[f64], src_rate: u32, dst_rate: u32) -> Vec<f64> {
     out
 }
 
-/// Computes normalized cross-correlation (NCC) of `reference` against `captured`, returning [`ReferenceMatch`]
-/// with `{ detected, timestamp_ms, confidence }`.
-pub fn match_reference(captured: &WavData, reference: &WavData) -> ReferenceMatch {
-    let cap_mono = downmix_mono_norm(&captured.samples, captured.channels);
-    let ref_raw = downmix_mono_norm(&reference.samples, reference.channels);
-    let ref_mono = resample_mono(&ref_raw, reference.sample_rate, captured.sample_rate);
-
-    let n = cap_mono.len();
-    let m = ref_mono.len();
-    if m == 0 || n < m || captured.sample_rate == 0 {
-        return ReferenceMatch {
-            detected: false,
-            timestamp_ms: 0.0,
-            confidence: 0.0,
-        };
-    }
-
-    let ref_mean = ref_mono.iter().copied().sum::<f64>() / (m as f64);
-    let ref_zero: Vec<f64> = ref_mono.iter().map(|&x| x - ref_mean).collect();
-    let ref_energy: f64 = ref_zero.iter().map(|&x| x * x).sum();
-    if ref_energy <= 1e-12 {
-        return ReferenceMatch {
-            detected: false,
-            timestamp_ms: 0.0,
-            confidence: 0.0,
-        };
-    }
-
-    // Prefix sums of `cap_mono` and `cap_mono^2` for O(1) window variance lookup.
-    let mut prefix_sum = vec![0.0f64; n + 1];
-    let mut prefix_sq = vec![0.0f64; n + 1];
-    for i in 0..n {
-        prefix_sum[i + 1] = prefix_sum[i] + cap_mono[i];
-        prefix_sq[i + 1] = prefix_sq[i] + cap_mono[i] * cap_mono[i];
-    }
-
-    let window_ncc = |lag: usize| -> f64 {
-        let sum_x = prefix_sum[lag + m] - prefix_sum[lag];
-        let sum_x2 = prefix_sq[lag + m] - prefix_sq[lag];
-        let mean_x = sum_x / (m as f64);
-        let var_x = (sum_x2 - sum_x * mean_x).max(0.0);
-        let denom = (var_x * ref_energy).sqrt();
-        if denom <= 1e-10 {
-            return 0.0;
+/// In-place iterative radix-2 FFT (`re.len()` a power of two); `inverse` scales by `1/n`.
+fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
+    let n = re.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
         }
-        let mut dot = 0.0f64;
-        let slice = &cap_mono[lag..lag + m];
-        for i in 0..m {
-            dot += slice[i] * ref_zero[i];
-        }
-        // Note: sum(x_i * (r_i - r_mean)) == sum((x_i - x_mean) * (r_i - r_mean)) because sum(r_zero) == 0.
-        (dot / denom).abs().clamp(0.0, 1.0)
-    };
-
-    let max_lag = n - m;
-    // Fast two-stage search: coarse stride followed by exact single-sample refinement around top candidates.
-    let stride = if max_lag * m > 2_000_000 { 8 } else { 1 };
-    let mut best_lag = 0usize;
-    let mut best_score = 0.0f64;
-
-    if stride == 1 {
-        for lag in 0..=max_lag {
-            let score = window_ncc(lag);
-            if score > best_score {
-                best_score = score;
-                best_lag = lag;
-            }
-        }
-    } else {
-        let mut candidates = Vec::new();
-        for lag in (0..=max_lag).step_by(stride) {
-            let sum_x = prefix_sum[lag + m] - prefix_sum[lag];
-            let sum_x2 = prefix_sq[lag + m] - prefix_sq[lag];
-            let var_x = (sum_x2 - sum_x * (sum_x / (m as f64))).max(0.0);
-            if var_x <= 1e-10 {
-                continue;
-            }
-            let mut dot = 0.0f64;
-            let slice = &cap_mono[lag..lag + m];
-            for i in (0..m).step_by(4) {
-                dot += slice[i] * ref_zero[i];
-            }
-            let approx = (dot * 4.0) / (var_x * ref_energy).sqrt();
-            candidates.push((lag, approx.abs()));
-        }
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        for &(center_lag, _) in candidates.iter().take(24) {
-            let lo = center_lag.saturating_sub(stride * 2);
-            let hi = (center_lag + stride * 2).min(max_lag);
-            for lag in lo..=hi {
-                let score = window_ncc(lag);
-                if score > best_score {
-                    best_score = score;
-                    best_lag = lag;
-                }
-            }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
         }
     }
-
-    let timestamp_ms = (best_lag as f64) * 1000.0 / f64::from(captured.sample_rate);
-    ReferenceMatch {
-        detected: best_score >= REFERENCE_MATCH_THRESHOLD,
-        timestamp_ms,
-        confidence: best_score,
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let mut len = 2;
+    while len <= n {
+        let angle = sign * 2.0 * std::f64::consts::PI / len as f64;
+        let (w_re, w_im) = (angle.cos(), angle.sin());
+        for start in (0..n).step_by(len) {
+            let (mut cur_re, mut cur_im) = (1.0, 0.0);
+            for k in 0..len / 2 {
+                let (a, b) = (start + k, start + k + len / 2);
+                let t_re = re[b] * cur_re - im[b] * cur_im;
+                let t_im = re[b] * cur_im + im[b] * cur_re;
+                re[b] = re[a] - t_re;
+                im[b] = im[a] - t_im;
+                re[a] += t_re;
+                im[a] += t_im;
+                let next = cur_re * w_re - cur_im * w_im;
+                cur_im = cur_re * w_im + cur_im * w_re;
+                cur_re = next;
+            }
+        }
+        len <<= 1;
+    }
+    if inverse {
+        let scale = 1.0 / n as f64;
+        re.iter_mut().for_each(|x| *x *= scale);
+        im.iter_mut().for_each(|x| *x *= scale);
     }
 }
 
+/// `sum_i x[lag + i] * y[i]` for every lag in `0..=x.len() - y.len()`, through the FFT.
+fn cross_correlate(x: &[f64], y: &[f64]) -> Vec<f64> {
+    let n = (x.len() + y.len()).next_power_of_two();
+    let (mut xr, mut xi) = (vec![0.0; n], vec![0.0; n]);
+    let (mut yr, mut yi) = (vec![0.0; n], vec![0.0; n]);
+    xr[..x.len()].copy_from_slice(x);
+    yr[..y.len()].copy_from_slice(y);
+    fft(&mut xr, &mut xi, false);
+    fft(&mut yr, &mut yi, false);
+    // X * conj(Y)
+    for k in 0..n {
+        let (a, b, c, d) = (xr[k], xi[k], yr[k], -yi[k]);
+        xr[k] = a * c - b * d;
+        xi[k] = a * d + b * c;
+    }
+    fft(&mut xr, &mut xi, true);
+    xr.truncate(x.len() - y.len() + 1);
+    xr
+}
+
+/// A window this much quieter than the reference (power ratio, -30 dB) can't hold that sound, however well
+/// its shape happens to correlate (correlation ignores loudness, so near-silence would otherwise match).
+const MIN_WINDOW_POWER_RATIO: f64 = 1e-3;
+
+/// Finds `reference` (e.g. an SFX asset) in `captured` by normalized cross-correlation over every lag
+/// (computed exactly through the FFT): where it matches best, and how well (`confidence`, the Pearson
+/// correlation of that window with the reference, `0..=1`). Both are mixed down to mono, and the reference
+/// is resampled to the capture's rate. A window much quieter than the reference never matches.
+pub fn match_reference(captured: &WavData, reference: &WavData) -> ReferenceMatch {
+    let none = ReferenceMatch { detected: false, timestamp_ms: 0.0, confidence: 0.0 };
+    let cap = downmix_mono_norm(&captured.samples, captured.channels);
+    let raw = downmix_mono_norm(&reference.samples, reference.channels);
+    let refm = resample_mono(&raw, reference.sample_rate, captured.sample_rate);
+    let (n, m) = (cap.len(), refm.len());
+    if m < 16 || n < m || captured.sample_rate == 0 {
+        return none;
+    }
+    let mean = refm.iter().sum::<f64>() / m as f64;
+    let ref_zero: Vec<f64> = refm.iter().map(|x| x - mean).collect();
+    let ref_energy: f64 = ref_zero.iter().map(|x| x * x).sum();
+    if ref_energy <= 1e-12 {
+        return none;
+    }
+    // Window sums for each lag's mean and variance.
+    let mut sum = vec![0.0f64; n + 1];
+    let mut sq = vec![0.0f64; n + 1];
+    for i in 0..n {
+        sum[i + 1] = sum[i] + cap[i];
+        sq[i + 1] = sq[i] + cap[i] * cap[i];
+    }
+    // sum(x * (r - mean_r)) == sum((x - mean_x) * (r - mean_r)), since sum(r - mean_r) == 0.
+    let dots = cross_correlate(&cap, &ref_zero);
+    let mut best = (0usize, 0.0f64);
+    for (lag, dot) in dots.iter().enumerate() {
+        let s = sum[lag + m] - sum[lag];
+        let var = (sq[lag + m] - sq[lag] - s * s / m as f64).max(0.0);
+        if var < ref_energy * MIN_WINDOW_POWER_RATIO {
+            continue;
+        }
+        let score = (dot / (var * ref_energy).sqrt()).abs().min(1.0);
+        if score > best.1 {
+            best = (lag, score);
+        }
+    }
+    ReferenceMatch {
+        detected: best.1 >= REFERENCE_MATCH_THRESHOLD,
+        timestamp_ms: best.0 as f64 * 1000.0 / f64::from(captured.sample_rate),
+        confidence: best.1,
+    }
+}
 /// Loads a reference `.wav` file from `reference_path` and cross-correlates it against `captured`.
 pub fn match_reference_file(captured: &WavData, reference_path: &Path) -> Result<ReferenceMatch> {
     let ref_wav = read_wav_file(reference_path)?;
@@ -1015,53 +1090,99 @@ mod tests {
         assert_eq!(analysis.clipping_samples, 2);
     }
 
+    /// Deterministic noise in -1..1 (a 64-bit LCG), so the tests don't depend on a random crate.
+    fn noise(seed: &mut u64) -> f64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0
+    }
+
+    /// A 60 ms chirp from `f0` to `f1` Hz under a sine envelope, as stereo samples.
+    fn chirp(f0: f64, f1: f64, amp: f64) -> Vec<i16> {
+        let frames = 2_880usize;
+        let mut out = Vec::with_capacity(frames * 2);
+        let mut phase = 0.0f64;
+        for n in 0..frames {
+            let f = f0 + (f1 - f0) * n as f64 / frames as f64;
+            phase += 2.0 * std::f64::consts::PI * f / 48_000.0;
+            let env = (std::f64::consts::PI * n as f64 / frames as f64).sin();
+            let v = (amp * env * phase.sin()) as i16;
+            out.push(v);
+            out.push(v);
+        }
+        out
+    }
+
+    /// Two seconds of "game audio": noise plus a chord, with `sfx` mixed in at `onset_frame` if given.
+    fn scene(sfx: Option<(&[i16], usize)>) -> WavData {
+        let frames = 96_000usize;
+        let mut seed = 7u64;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for n in 0..frames {
+            let t = n as f64 / 48_000.0;
+            let chord = 2_500.0 * ((2.0 * std::f64::consts::PI * 220.0 * t).sin() + (2.0 * std::f64::consts::PI * 277.2 * t).sin());
+            let v = chord + 3_000.0 * noise(&mut seed);
+            samples.push(v as i16);
+            samples.push(v as i16);
+        }
+        if let Some((sfx, onset)) = sfx {
+            for (i, s) in sfx.iter().enumerate() {
+                let at = onset * 2 + i;
+                samples[at] = (f64::from(samples[at]) + f64::from(*s)).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+        WavData { sample_rate: 48_000, channels: 2, samples }
+    }
+
+    fn wav(samples: Vec<i16>) -> WavData {
+        WavData { sample_rate: 48_000, channels: 2, samples }
+    }
+
     #[test]
-    fn reference_wav_cross_correlation_finds_embedded_chirp_at_250ms() {
-        let sample_rate = 48_000u32;
-        let channels = 2u16;
+    fn reference_found_where_it_was_mixed_into_noisy_audio() {
+        let jump = chirp(500.0, 1_800.0, 14_000.0);
+        // 1234.5 ms in: frame 59,256.
+        let captured = scene(Some((&jump, 59_256)));
+        let found = match_reference(&captured, &wav(jump.clone()));
+        assert!(found.detected, "{found:?}");
+        assert!((found.timestamp_ms - 1_234.5).abs() < 0.1, "{found:?}");
+        // Mixed with noise and music, the correlation is high but not perfect (it isn't the clip itself).
+        assert!(found.confidence > 0.7 && found.confidence < 0.99, "{found:?}");
+    }
 
-        // Build a 60 ms frequency-swept chirp (500 Hz -> 1800 Hz) as the reference SFX.
-        let ref_frames = 2_880usize; // 60 ms at 48 kHz
-        let mut ref_samples = Vec::with_capacity(ref_frames * 2);
-        for n in 0..ref_frames {
-            let t = (n as f64) / f64::from(sample_rate);
-            let freq = 500.0 + (1_300.0 * (n as f64) / (ref_frames as f64));
-            let env = (std::f64::consts::PI * (n as f64) / (ref_frames as f64)).sin();
-            let val = (18_000.0 * env * (2.0 * std::f64::consts::PI * freq * t).sin()) as i16;
-            ref_samples.push(val);
-            ref_samples.push(val);
+    #[test]
+    fn a_sound_that_isnt_there_isnt_matched() {
+        let jump = chirp(500.0, 1_800.0, 14_000.0);
+        let coin = chirp(3_000.0, 1_200.0, 14_000.0);
+        // The capture has the jump; the coin sound never plays.
+        let captured = scene(Some((&jump, 30_000)));
+        let found = match_reference(&captured, &wav(coin));
+        assert!(!found.detected, "{found:?}");
+        assert!(found.confidence < 0.3, "{found:?}");
+        // Nor in the same scene without any effect.
+        let found = match_reference(&scene(None), &wav(jump));
+        assert!(!found.detected, "{found:?}");
+    }
+
+    #[test]
+    fn near_silence_never_matches() {
+        // Faint dither: its shape can correlate with anything, but it's 60 dB too quiet to be the sound.
+        let mut seed = 3u64;
+        let faint: Vec<i16> = (0..96_000).map(|_| (2.0 * noise(&mut seed)) as i16).collect();
+        let found = match_reference(&wav(faint), &wav(chirp(500.0, 1_800.0, 14_000.0)));
+        assert!(!found.detected && found.confidence == 0.0, "{found:?}");
+    }
+
+    #[test]
+    fn fft_correlation_matches_the_direct_sum() {
+        let mut seed = 11u64;
+        let x: Vec<f64> = (0..1_000).map(|_| noise(&mut seed)).collect();
+        let y: Vec<f64> = (0..37).map(|_| noise(&mut seed)).collect();
+        let fast = cross_correlate(&x, &y);
+        assert_eq!(fast.len(), x.len() - y.len() + 1);
+        for lag in [0, 1, 500, 963] {
+            let direct: f64 = (0..y.len()).map(|i| x[lag + i] * y[i]).sum();
+            assert!((fast[lag] - direct).abs() < 1e-9, "lag {lag}: {} vs {direct}", fast[lag]);
         }
-        let ref_wav = WavData {
-            sample_rate,
-            channels,
-            samples: ref_samples.clone(),
-        };
-
-        // Embed the reference SFX at exactly t = 250.0 ms (frame 12,000) in a 0.8s recording.
-        let total_frames = 38_400usize;
-        let onset_frame = 12_000usize; // 250 ms
-        let mut cap_samples = vec![0i16; total_frames * 2];
-        for i in 0..ref_samples.len() {
-            cap_samples[onset_frame * 2 + i] = (f64::from(ref_samples[i]) * 0.85) as i16;
-        }
-        let cap_wav = WavData {
-            sample_rate,
-            channels,
-            samples: cap_samples,
-        };
-
-        let matched = match_reference(&cap_wav, &ref_wav);
-        assert!(matched.detected, "reference SFX should be detected");
-        assert!(
-            matched.confidence > 0.95,
-            "expected high confidence > 0.95, got {:.4}",
-            matched.confidence
-        );
-        assert!(
-            (matched.timestamp_ms - 250.0).abs() < 1.0,
-            "expected timestamp ~250.0 ms, got {:.2} ms",
-            matched.timestamp_ms
-        );
     }
 
     #[test]

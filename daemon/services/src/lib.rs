@@ -9,6 +9,7 @@ extern crate alloc;
 pub mod audio;
 pub mod caps;
 pub mod debug;
+pub mod grc;
 pub mod hid;
 pub mod idle;
 pub mod ns;

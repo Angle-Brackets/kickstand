@@ -42,7 +42,7 @@ fn main() {
     daemon_core::pm_input::restore();
     indicator::start();
     daemon_core::start_hold_expiry();
-    daemon_core::audio::start_sampler();
+    daemon_core::audio::start();
     if daemon_core::tokens::load(None) == 0 {
         log!("no tokens in {}: pair a PC through the Kickstand NRO", proto::path::TOKEN_PATH);
     }
