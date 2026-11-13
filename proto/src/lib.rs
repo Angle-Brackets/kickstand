@@ -25,6 +25,7 @@
 
 extern crate alloc;
 
+mod bytes;
 pub mod crc32;
 pub mod discovery;
 pub mod hbl;
@@ -164,7 +165,11 @@ pub enum Request {
     /// `path` once [`Request::UploadFinish`] verifies it.
     UploadBegin { path: String, size: u64 },
     /// Chunks must arrive in order: `offset` equals the bytes received so far.
-    UploadChunk { offset: u64, data: Vec<u8> },
+    UploadChunk {
+        offset: u64,
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+    },
     UploadFinish { crc32: u32 },
     UploadAbort,
     /// Deletes a file, or a directory (which must be empty unless `recursive`). Only inside the write
@@ -234,7 +239,11 @@ pub enum Request {
     ReadMemory { address: u64, len: u32 },
     /// Writes `data` (at most [`MAX_CHUNK`]) to the running application's memory at `address`. Only to
     /// homebrew (the application is hbloader), never a game's memory.
-    WriteMemory { address: u64, data: Vec<u8> },
+    WriteMemory {
+        address: u64,
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+    },
     /// (18) hbmenu's applet: the Album, which Atmosphère runs hbloader in place of (applet mode: no game
     /// needed, less memory). Answers [`Response::App`] with its process, if the Album is open.
     AppletStatus,
@@ -649,7 +658,11 @@ pub enum Response {
     Pong { nonce: u64, uptime_ms: u64 },
     Dir { entries: Vec<DirEntry>, truncated: bool },
     Stat(DirEntry),
-    Data { data: Vec<u8>, file_size: u64 },
+    Data {
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+        file_size: u64,
+    },
     UploadReady { staging_path: String },
     ChunkOk { received: u64 },
     UploadDone { path: String, size: u64 },
@@ -781,6 +794,7 @@ pub struct AudioCapture {
 pub struct AudioChunk {
     /// The stream position of `data`'s first byte.
     pub from: u64,
+    #[serde(with = "bytes")]
     pub data: Vec<u8>,
     /// Bytes between the position asked for and `from` that are gone (overwritten, or from before the
     /// sound last restarted): a gap in the recording.
@@ -792,6 +806,7 @@ pub struct AudioChunk {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct VideoChunk {
     /// Part of one frame's H.264 NAL units (Annex B), empty if none arrived in time.
+    #[serde(with = "bytes")]
     pub data: Vec<u8>,
     /// `data` starts a frame.
     pub frame_start: bool,
@@ -1079,6 +1094,28 @@ pub fn frame_len(prefix: [u8; 4]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte fields are written as bytes now, the same on the wire as the sequence they were before, so
+    /// older daemons and clients still understand them.
+    #[test]
+    fn byte_fields_encode_as_they_did_as_sequences() {
+        #[derive(Serialize, Deserialize)]
+        enum Old {
+            _A,
+            _B,
+            _C,
+            _D,
+            _E,
+            _F,
+            UploadChunk { offset: u64, data: Vec<u8> },
+        }
+        let data: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
+        let new = Request::UploadChunk { offset: 7, data: data.clone() };
+        // Only meaningful while UploadChunk is the seventh variant.
+        assert_eq!(encode(&new).unwrap(), encode(&Old::UploadChunk { offset: 7, data: data.clone() }).unwrap());
+        let Ok(Request::UploadChunk { offset: 7, data: back }) = decode::<Request>(&encode(&new).unwrap()[4..]) else { panic!() };
+        assert_eq!(back, data);
+    }
     use alloc::vec;
 
     #[test]

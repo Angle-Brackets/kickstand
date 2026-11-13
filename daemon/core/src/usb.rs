@@ -197,7 +197,7 @@ fn serve_device(device: &Device, config: &'static Config<'static>) -> &'static s
     };
     log!("USB client connected (slot {slot})");
     crate::activity::connected(slot, Ipv4Addr::UNSPECIFIED);
-    let mut link = UsbLink { device, config, rx, tx, ended: "the PC went away" };
+    let mut link = UsbLink { device, config, rx, tx, posted: None, ended: "the PC went away" };
     server::serve(&mut link, config, slot, Ipv4Addr::UNSPECIFIED);
     crate::activity::disconnected(slot);
     server::free_slot(slot);
@@ -209,6 +209,9 @@ struct UsbLink<'a> {
     config: &'static Config<'static>,
     rx: PageBuf,
     tx: PageBuf,
+    /// The OUT transfer already posted into `rx` (its id): the next request arrives while the last one is
+    /// handled (an upload chunk's SD write), instead of after.
+    posted: Option<u32>,
     /// Why the link ended, for the log.
     ended: &'static str,
 }
@@ -256,15 +259,25 @@ impl UsbLink<'_> {
 
     /// Runs one transfer to the end; the bytes moved.
     fn transfer(&mut self, dir: Dir, len: usize, deadline_ms: u64) -> Option<usize> {
+        let urb = self.start(dir, len)?;
+        self.complete(dir, urb, deadline_ms)
+    }
+
+    /// Posts a transfer of `len` bytes from (IN) or into (OUT) its buffer; its id.
+    fn start(&mut self, dir: Dir, len: usize) -> Option<u32> {
         let buf = if dir == Dir::Out { &mut self.rx } else { &mut self.tx };
-        let urb = match self.device.post(dir, buf, len) {
-            Ok(urb) => urb,
+        match self.device.post(dir, buf, len) {
+            Ok(urb) => Some(urb),
             Err(rc) => {
                 log!("USB transfer didn't start: {rc}");
                 self.ended = "a transfer failed to start";
-                return None;
+                None
             }
-        };
+        }
+    }
+
+    /// Waits for the posted transfer `urb` to end; the bytes moved.
+    fn complete(&mut self, dir: Dir, urb: u32, deadline_ms: u64) -> Option<usize> {
         match self.wait(dir, deadline_ms) {
             Waited::Done => {}
             Waited::Unplugged => {
@@ -288,6 +301,15 @@ impl UsbLink<'_> {
     }
 }
 
+impl Drop for UsbLink<'_> {
+    /// A transfer still posted into `rx` must end before `rx` is freed.
+    fn drop(&mut self) {
+        if self.posted.take().is_some() {
+            self.device.cancel(Dir::Out);
+        }
+    }
+}
+
 impl Link for UsbLink<'_> {
     fn receive(&mut self, frame: &mut Vec<u8>, _config: &Config) -> bool {
         if CLOSE.load(Ordering::Acquire) {
@@ -295,7 +317,14 @@ impl Link for UsbLink<'_> {
             return false;
         }
         let capacity = self.rx.len();
-        let Some(n) = self.transfer(Dir::Out, capacity, crate::uptime_ms() + usb::IDLE_MS) else { return false };
+        let urb = match self.posted.take() {
+            Some(urb) => urb,
+            None => match self.start(Dir::Out, capacity) {
+                Some(urb) => urb,
+                None => return false,
+            },
+        };
+        let Some(n) = self.complete(Dir::Out, urb, crate::uptime_ms() + usb::IDLE_MS) else { return false };
         // A full buffer means the PC sent more than one frame can be.
         let Some(body) = (n < capacity).then(|| usb::unpad(&self.rx.as_slice()[..n])).flatten() else {
             log!("USB client sent a malformed transfer ({n} bytes)");
@@ -304,6 +333,9 @@ impl Link for UsbLink<'_> {
         };
         frame.clear();
         frame.extend_from_slice(body);
+        // `rx` is free again: let the next request come in while this one is handled. (A close or the end
+        // of the link cancels it: the device is disabled, which ends its transfers.)
+        self.posted = self.start(Dir::Out, capacity);
         true
     }
 

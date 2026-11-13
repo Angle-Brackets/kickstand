@@ -152,6 +152,7 @@ pub fn run(config: &'static Config<'static>) {
     clear_staging();
     if config.kind == DaemonKind::Sysmodule {
         crate::usb::start(config);
+        crate::writer::start();
     }
     let mailboxes: &'static [Mailbox; MAX_CLIENTS] = Box::leak(Box::new(core::array::from_fn(|_| Mailbox::new())));
     // A stoppable server (the NRO) joins its workers before returning: hbloader loads the next NRO into the

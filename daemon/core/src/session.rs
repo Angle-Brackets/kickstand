@@ -20,10 +20,25 @@ use crate::sd;
 
 struct Upload {
     path: String,
-    file: FileAccessor,
+    /// `None` while [`crate::writer`] has it.
+    file: Option<FileAccessor>,
+    /// The client slot, whose [`crate::writer`] cell this upload uses.
+    slot: usize,
     size: u64,
     received: u64,
     crc: u32,
+    /// Chunks not yet written: the SD card is much faster with large writes (64 KiB ones ran at 13 MB/s).
+    /// Empty with no capacity if the heap couldn't spare it; then each chunk is written as it comes.
+    pending: Vec<u8>,
+    /// A second buffer, so `pending` fills while the other is written on [`crate::writer`]'s thread. Without
+    /// one (no writer thread, or no memory), the writes happen here.
+    spare: Vec<u8>,
+    /// [`crate::writer`] has a write of ours.
+    in_flight: bool,
+    /// For the log: system ticks at the start, and spent writing to the SD card and checksumming.
+    started: u64,
+    writing: u64,
+    checking: u64,
 }
 
 pub struct Session {
@@ -347,7 +362,22 @@ impl Session {
         match file {
             Ok(file) => {
                 crate::log!("upload {path}: {size} bytes");
-                self.upload = Some(Upload { path, file, size, received: 0, crc: crc32::INIT });
+                let pending = write_buffer(size);
+                let spare = if pending.capacity() > 0 && crate::writer::running() { write_buffer(size) } else { Vec::new() };
+                self.upload = Some(Upload {
+                    path,
+                    file: Some(file),
+                    slot: self.slot,
+                    size,
+                    received: 0,
+                    crc: crc32::INIT,
+                    pending,
+                    spare,
+                    in_flight: false,
+                    started: nx::arm::get_system_tick(),
+                    writing: 0,
+                    checking: 0,
+                });
                 Response::UploadReady { staging_path: self.staging.clone() }
             }
             Err(e) => Response::Error(e),
@@ -363,13 +393,30 @@ impl Session {
             self.abort_upload();
             return Response::error(ErrorKind::UploadState, msg);
         }
-        if let Err(rc) = up.file.write_array::<u8, false>(data) {
+        let t0 = nx::arm::get_system_tick();
+        up.crc = crc32::update(up.crc, data);
+        let t1 = nx::arm::get_system_tick();
+        let result = if up.pending.capacity() == 0 {
+            match up.file.as_mut() {
+                Some(file) => file.write_array::<u8, false>(data),
+                None => Ok(()),
+            }
+        } else {
+            let mut result = Ok(());
+            if up.pending.len() + data.len() > up.pending.capacity() {
+                result = up.write_pending();
+            }
+            up.pending.extend_from_slice(data);
+            result.and_then(|()| if up.pending.len() == up.pending.capacity() { up.write_pending() } else { Ok(()) })
+        };
+        if let Err(rc) = result {
             let err = sd::io_error("write", &self.staging, rc);
             self.abort_upload();
             return Response::Error(err);
         }
         up.received += data.len() as u64;
-        up.crc = crc32::update(up.crc, data);
+        up.checking += t1 - t0;
+        up.writing += nx::arm::get_system_tick() - t1;
         Response::ChunkOk { received: up.received }
     }
 
@@ -390,7 +437,19 @@ impl Session {
             let msg = format!("crc32 {crc:08x}, client expected {expected_crc:08x}");
             return Response::error(ErrorKind::ChecksumMismatch, msg);
         }
-        let Upload { path, file, size, .. } = up;
+        let mut up = up;
+        let t0 = nx::arm::get_system_tick();
+        if let Err(rc) = up.write_pending().and_then(|()| up.settle()) {
+            drop(up);
+            let _ = sd::remove_if_exists(&self.staging);
+            return Response::Error(sd::io_error("write", &self.staging, rc));
+        }
+        up.writing += nx::arm::get_system_tick() - t0;
+        let (path, size, started, writing, checking) = (core::mem::take(&mut up.path), up.size, up.started, up.writing, up.checking);
+        let Some(file) = up.file.take() else {
+            return Response::error(ErrorKind::UploadState, "the upload's file went missing");
+        };
+        drop(up);
         if let Err(rc) = file.flush() {
             return Response::Error(sd::io_error("flush", &self.staging, rc));
         }
@@ -398,7 +457,14 @@ impl Session {
         let result = sd::remove_if_exists(&path).and_then(|()| sd::rename(&self.staging, &path));
         match result {
             Ok(()) => {
-                crate::log!("upload {path}: done");
+                let ms = |ticks: u64| ticks * 1000 / nx::arm::get_system_tick_frequency();
+                let total = ms(nx::arm::get_system_tick() - started).max(1);
+                crate::log!(
+                    "upload {path}: done, {size} bytes in {total} ms ({} KB/s; SD writes {} ms, CRC {} ms)",
+                    size / total,
+                    ms(writing),
+                    ms(checking)
+                );
                 Response::UploadDone { path, size }
             }
             Err(e) => Response::Error(e),
@@ -549,6 +615,60 @@ impl Session {
         if self.upload.take().is_some() {
             let _ = sd::remove_if_exists(&self.staging);
         }
+    }
+}
+
+/// How much of an upload is gathered before writing it: up to 512 KiB, if the heap has it.
+fn write_buffer(size: u64) -> Vec<u8> {
+    const MOST: usize = 512 * 1024;
+    let want = (size.min(MOST as u64) as usize).max(1);
+    let mut buf = Vec::new();
+    if size > proto::MAX_CHUNK as u64 && buf.try_reserve_exact(want).is_ok() {
+        return buf;
+    }
+    Vec::new()
+}
+
+impl Upload {
+    /// Writes the gathered chunks: hands them to [`crate::writer`] when there's a spare buffer to fill
+    /// meanwhile (a write's error then shows at the next one), else writes them here.
+    fn write_pending(&mut self) -> nx::result::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        if self.spare.capacity() == 0 && !self.in_flight {
+            let result = match self.file.as_mut() {
+                Some(file) => file.write_array::<u8, false>(&self.pending),
+                None => Ok(()),
+            };
+            self.pending.clear();
+            return result;
+        }
+        self.settle()?;
+        let Some(file) = self.file.take() else { return Ok(()) };
+        let buf = core::mem::replace(&mut self.pending, core::mem::take(&mut self.spare));
+        crate::writer::submit(self.slot, crate::writer::Job { file, buf, result: Ok(()) });
+        self.in_flight = true;
+        Ok(())
+    }
+
+    /// Waits for the write on [`crate::writer`]'s thread, if any, and takes the file and buffer back.
+    fn settle(&mut self) -> nx::result::Result<()> {
+        if !core::mem::take(&mut self.in_flight) {
+            return Ok(());
+        }
+        let Some(job) = crate::writer::wait(self.slot) else { return Ok(()) };
+        self.file = Some(job.file);
+        self.spare = job.buf;
+        job.result
+    }
+}
+
+impl Drop for Upload {
+    /// The writer may still have the file and a buffer: wait for them, so the file is closed before the
+    /// staging file is removed and the slot's cell is free for the next upload.
+    fn drop(&mut self) {
+        let _ = self.settle();
     }
 }
 

@@ -25,6 +25,7 @@ pub mod tokens;
 pub mod tray;
 pub mod usb;
 pub mod video;
+pub mod writer;
 
 pub use proto::DaemonKind;
 
