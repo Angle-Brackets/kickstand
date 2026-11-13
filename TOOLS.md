@@ -70,10 +70,10 @@ Start a homebrew NRO (either uploaded from `local_path` on the PC or already on 
 ### `reload_nro`
 Swap a new build of the homebrew that's running for the old one, without going back to the Home Menu. For the edit, build, test loop: much faster than [`run_nro`](#run_nro), which reopens hbmenu from the Home Menu every time.
 - Uploads the build to the SD card while the old one still runs (over USB when a cable is connected), then presses `+` so the old one exits. Homebrew that returns from `main` stays inside the same hbloader process, and Kickstand starts the new build there, by the fastest of:
-  1. **`hook`**: the app implements Kickstand's [next-load hook](#the-next-load-hook) and starts the new build itself. hello.nro: about **1 s** from the `+` to the new build's first line of output.
-  2. **`hbmenu`**: the app exits to hbmenu, Y starts its NetLoader, and the Kickstand NRO is sent to open the build (about 3-5 s).
-  3. **`cold`**: the same as `run_nro` (about 14 s), when no homebrew was running or it didn't come back to hbmenu.
-- The result's first line names the path taken and the time per phase: `upload` (to the SD card), `exit` (from `+` until the old build was out of the way) and `load` (until the new build's stdout connected). Read the rest of the stdout with [`nro_output`](#nro_output).
+  1. **`hook`**: the app implements Kickstand's [next-load hook](#the-next-load-hook) and starts the new build itself. hello.nro on hardware: **1.9 s** for the whole call, of which 1.4 s is the press itself (Kickstand attaches its virtual controller and gives it a second to be noticed; the app exits and the new build starts while `+` is still held). A large app that tears down before claiming takes longer: see the hook's notes.
+  2. **`hbmenu`**: the app exits to hbmenu, Y starts its NetLoader, and the Kickstand NRO is sent to open the build (hello.nro: 4.4 s).
+  3. **`cold`**: the same as `run_nro` (13-23 s, longer when an NRO has to be closed first), when no homebrew was running or it didn't come back to hbmenu.
+- The result's first line names the path taken and the time per phase: `upload` (to the SD card), `exit` (from pressing `+` until the old build was out of the way) and `load` (until the new build's stdout connected). On the `hook` path the exit and the load happen during the press, so they are one figure. Read the rest of the stdout with [`nro_output`](#nro_output).
 - With `replay_macro`, plays a saved macro once the build is up, to get back to the state under test.
 
 | Parameter | Type | Default | Description |
@@ -100,15 +100,17 @@ A few lines in your homebrew make `reload_nro` skip hbmenu and NetLoader altoget
 sdmc:/switch/mygame/mygame.nro
 "sdmc:/switch/mygame/mygame.nro" "--level" "3" "5656a8c0_NXLINK_"
 ```
-Line 1 is the NRO to load; line 2 is its argv string, which hbloader passes to the next NRO as it is (hbmenu's convention: every argument in double quotes, the NRO's own path first, and nxlink's address marker last, so the new build's stdout comes back to Kickstand). When your app is about to return from `main`, it should:
+Line 1 is the NRO to load; line 2 is its argv string, which hbloader passes to the next NRO as it is (hbmenu's convention: every argument in double quotes, the NRO's own path first, and nxlink's address marker last, so the new build's stdout comes back to Kickstand). When your app has decided to quit (as soon as it knows, before tearing down: `envSetNextLoad` only fills in hbloader's buffer, so the teardown can follow; or just before returning from `main`), it should:
 1. Do nothing unless it was started from a PC over nxlink (libnx: `__nxlink_host.s_addr != 0`; otherwise an argument ending in `_NXLINK_`). A launch from hbmenu by hand never follows the file.
 2. Read the file, if it exists.
 3. Delete it, and only if the delete worked, call `envSetNextLoad(line1, line2)`.
-4. Return from `main` as usual.
+4. Finish quitting and return from `main` as usual.
 
-The delete is what claims the request. If the app doesn't claim it within 3 s of the `+`, Kickstand deletes it itself and goes through hbmenu instead; only one of the two deletes can succeed, so Kickstand always knows which way it went, and an app can't follow a request Kickstand gave up on. Kickstand also clears a leftover request before `run_nro` and before any reload that doesn't use the hook. Kickstand notices the hook by the file name in your NRO, so nothing needs configuring.
+The new build loads into the same process, so it inherits whatever the old one left behind: an app that returns without closing what it opened (Vulkan or nvdrv, JIT code memory) can crash the next build on its first allocations. This is true of any relaunch through hbmenu too, not just the hook. Uprising NX does this today: the second build dies in `malloc` within a second.
 
-**C (libnx)**, called just before returning from `main()` (libnx mounts `sdmc:` by default):
+The delete is what claims the request. If the app doesn't claim it within 15 s of the `+`, Kickstand deletes it itself and goes through hbmenu instead; only one of the two deletes can succeed, so Kickstand always knows which way it went, and an app can't follow a request Kickstand gave up on. Kickstand also clears a leftover request before `run_nro` and before any reload that doesn't use the hook. Kickstand notices the hook by the file name in your NRO, so nothing needs configuring.
+
+**C (libnx)**, called once the app has decided to quit, or just before returning from `main()` (libnx mounts `sdmc:` by default):
 ```c
 #include <switch.h>
 #include <netinet/in.h>

@@ -62,8 +62,10 @@ const HOT_Y_REPEAT: Duration = Duration::from_millis(1000);
 /// How long to wait for the chain-loaded NRO to connect its `nxlink` stdout.
 const HOT_OUTPUT_WAIT: Duration = if cfg!(test) { Duration::from_millis(500) } else { launch::OUTPUT_WAIT };
 
-/// How long the app gets to claim the next-load request after the exit button(s).
-const HOOK_WAIT: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(3) };
+/// How long the app gets to claim the next-load request after the exit button(s). Generous, because only
+/// apps that name the request file are asked, and a large one can take seconds to tear down before it gets
+/// to the hook (Uprising NX: about 5 s); a late claim is still safe, since only one delete can win.
+const HOOK_WAIT: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(15) };
 /// How often to look whether the request was claimed.
 const HOOK_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_millis(40) };
 
@@ -125,8 +127,9 @@ impl ReloadPath {
 pub struct Phases {
     /// Putting the build on the SD card (or checking it's there).
     pub upload: Duration,
-    /// From the exit button(s) until the old NRO was out of the way: the request claimed (hook), or
-    /// NetLoader listening (hbmenu). `None` for a full relaunch.
+    /// From pressing the exit button(s) until the old NRO was out of the way: the request claimed (hook), or
+    /// NetLoader listening (hbmenu). Includes the press itself, about 1.3 s: Kickstand's virtual controller
+    /// is attached and given a second to be noticed. `None` for a full relaunch.
     pub exit: Option<Duration>,
     /// From then until the new build connected its stdout (`None` if it never did); for a full relaunch,
     /// all of [`launch::run_nro`].
@@ -150,6 +153,14 @@ impl Reloaded {
         let mut parts = vec![format!("upload {}", secs(self.phases.upload))];
         if self.path == ReloadPath::Cold {
             parts.extend(self.phases.load.map(|d| format!("relaunch {}", secs(d))));
+        } else if self.path == ReloadPath::Hook {
+            // The app exits and hbloader loads the new build while the button is still held, so the two
+            // can't be told apart from here.
+            let exit = self.phases.exit.unwrap_or_default();
+            parts.push(match self.phases.load {
+                Some(load) => format!("press, exit and load {}", secs(exit + load)),
+                None => format!("press and exit {}, load ? (no stdout)", secs(exit)),
+            });
         } else {
             parts.extend(self.phases.exit.map(|d| format!("exit {}", secs(d))));
             parts.push(match self.phases.load {
@@ -415,8 +426,8 @@ async fn try_in_process_reload(
     };
 
     if pressed_at.is_none() && !already_at_hbmenu && !buttons.is_empty() {
-        client.press(buttons.clone(), 1, 120).await?;
         pressed_at = Some(Instant::now());
+        client.press(buttons.clone(), 1, 120).await?;
         notes.push(format!(
             "pressed {} to exit the running NRO back to hbmenu in-process (pid {})",
             button_names(&buttons),
@@ -522,11 +533,12 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
     client.upload(NEXT_LOAD, request.as_bytes()).await.context("writing the next-load request")?;
     // The old build's stdout closes as it exits; that won't mean hbmenu is showing.
     launch::nro_starting();
+    // Before the press: the app exits while it's held, and the press itself takes over a second.
+    let pressed_at = Instant::now();
     if let Err(e) = client.press(buttons.to_vec(), 1, 120).await {
         let _ = withdraw(client).await;
         return Err(e);
     }
-    let pressed_at = Instant::now();
     let names = button_names(buttons);
 
     let claimed = loop {
@@ -558,8 +570,8 @@ async fn try_hook(client: &Client, sd_dest: &str, args: &[String], buttons: &[Bu
     let output = output.accept(HOT_OUTPUT_WAIT).await?;
     let load = output.as_ref().map(|_| load_from.elapsed());
     let mut notes = vec![format!(
-        "pressed {names}; the app claimed the next-load request after {:.2} s and hbloader loaded {sd_dest} \
-         directly (same process, pid {pid}; no hbmenu)",
+        "pressed {names}; the app claimed the next-load request {:.2} s after the press began and hbloader \
+         loaded {sd_dest} directly (same process, pid {pid}; no hbmenu)",
         exit.as_secs_f64()
     )];
     if output.is_none() {

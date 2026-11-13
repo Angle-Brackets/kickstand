@@ -3,7 +3,7 @@
 //! `nxlink -s -a <switch-ip> hello.nro`; it proves the toolchain, the nx runtime and sockets work.
 //!
 //! With `--stay` it keeps running until + is pressed, and it is the reference for Kickstand's hot-reload hook
-//! ([`kickstand_next_load`]): `kickstand reload hello.nro -- --stay` swaps in a new build in about a second.
+//! ([`kickstand_next_load`]): `kickstand reload hello.nro -- --stay` swaps in a new build in under 2 s.
 
 #![no_std]
 #![no_main]

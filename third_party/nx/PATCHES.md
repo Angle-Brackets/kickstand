@@ -31,3 +31,6 @@ Local changes (worth upstreaming):
    and reads held keys through it to decide title overrides, so dropping any `Context` (an NRO's input screen,
    a sysmodule's input reader) left pm seeing no buttons, and holding R no longer opened hbmenu, until a
    reboot. Found on hardware (fw 23.0.1).
+8. `rrt0` stops the loader info string at its first NUL. hbloader passes its whole buffer (`nx-hbloader 2.4.5`,
+   a NUL, then a quotation C callers never see, since libnx's `envGetLoaderInfo` is read as a C string), so
+   `hbl::get_loader_info()` returned the quotation too.

@@ -215,6 +215,12 @@ unsafe fn normal_entry(loader_mode: LoaderMode, exit_config: Option<ExitFn>) -> 
                                     loader_info_data,
                                     loader_info_data_len,
                                 );
+                                // hbloader passes its whole buffer: the version, a NUL, then more text that
+                                // C callers never see (they read it as a C string). Stop at the NUL too.
+                                let loader_info_slice = loader_info_slice
+                                    .split(|&b| b == 0)
+                                    .next()
+                                    .unwrap_or(loader_info_slice);
                                 if let Ok(loader_info) = core::str::from_utf8(loader_info_slice) {
                                     hbl::set_loader_info(loader_info);
                                 }
