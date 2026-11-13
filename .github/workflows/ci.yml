@@ -2,8 +2,10 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    # main, and release branches like v0.1.2 (release tags are the release workflow's)
+    branches: [main, "v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,3 +24,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run workspace tests
         run: cargo test --workspace --locked
+      # The one-time USB setup for real, on this throwaway runner: the udev rule with sudo on Linux, WinUSB
+      # with libwdi on Windows (runners are administrators), nothing on macOS.
+      - name: USB setup (changes this runner's system)
+        env:
+          KICKSTAND_SYSTEM_TESTS: "1"
+        run: cargo test -p kickstand --locked usb_setup -- --nocapture

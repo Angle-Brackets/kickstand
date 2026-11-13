@@ -66,13 +66,18 @@ pub fn run(gui: bool) -> Result<String> {
     #[cfg(windows)]
     {
         let _ = gui;
-        let exe = std::env::current_exe().context("finding this program")?;
-        let output = privesc::PrivilegedCommand::new(&exe)
-            .args(["usb-setup", "--install-driver"])
-            .run()
-            .context("asking Windows for permission")?;
-        if !output.success() {
-            bail!("the driver installation didn't finish (cancelled, or it failed; Kickstand's log has the details)");
+        if is_elevated() {
+            // Already allowed (an admin shell, or CI): no prompt needed.
+            install_driver()?;
+        } else {
+            let exe = std::env::current_exe().context("finding this program")?;
+            let output = privesc::PrivilegedCommand::new(&exe)
+                .args(["usb-setup", "--install-driver"])
+                .run()
+                .context("asking Windows for permission")?;
+            if !output.success() {
+                bail!("the driver installation didn't finish (cancelled, or it failed)");
+            }
         }
         if let Some(marker) = driver_marker() {
             let _ = std::fs::write(marker, "WinUSB for 057e:3000\n");
@@ -103,6 +108,13 @@ fn mentions_device(text: &str) -> bool {
         let line = line.to_ascii_lowercase();
         line.contains("\"057e\"") && line.contains("\"3000\"")
     })
+}
+
+/// Whether this process already runs with administrator rights.
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    // SAFETY: no arguments; reads this process's token.
+    unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
 
 /// Remembers that [`run`] installed the driver, as Windows can't be asked cheaply.
@@ -153,5 +165,55 @@ mod tests {
         assert!(!mentions_device("# ATTRS{idVendor}==\"057e\", ATTRS{idProduct}==\"3000\""));
         assert!(!mentions_device("SUBSYSTEMS==\"usb\", ATTRS{manufacturer}==\"NVIDIA Corp.\", ATTRS{product}==\"APX\""));
         assert!(!mentions_device("ATTRS{idVendor}==\"057e\", ATTRS{idProduct}==\"2000\""));
+    }
+
+    /// The tests that really set this machine up run only with `KICKSTAND_SYSTEM_TESTS=1` (CI sets it on
+    /// throwaway runners), so `cargo test` on a developer's PC never changes their system.
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    fn system_tests() -> bool {
+        let on = std::env::var_os("KICKSTAND_SYSTEM_TESTS").is_some_and(|v| v == "1");
+        if !on {
+            eprintln!("skipped: set KICKSTAND_SYSTEM_TESTS=1 to let this test change the system");
+        }
+        on
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_needs_no_setup() {
+        assert_eq!(needed(), None);
+        let done = run(false).unwrap();
+        assert!(done.contains("Nothing to set up"), "{done}");
+    }
+
+    /// Writes the udev rule with sudo (passwordless on CI runners) and checks it took.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_setup_writes_the_udev_rule() {
+        if !system_tests() {
+            return;
+        }
+        let done = run(false).unwrap();
+        assert!(done.contains(UDEV_RULE_PATH), "{done}");
+        let text = std::fs::read_to_string(UDEV_RULE_PATH).unwrap();
+        assert_eq!(text.trim(), UDEV_RULE);
+        assert_eq!(needed(), None, "the rule is installed, so nothing should be needed");
+    }
+
+    /// Installs WinUSB for 057e:3000 with libwdi (CI runners are already administrators, so no prompt) and
+    /// checks Windows' driver store has the package.
+    #[cfg(windows)]
+    #[test]
+    fn windows_setup_installs_winusb() {
+        if !system_tests() {
+            return;
+        }
+        assert!(is_elevated(), "CI runners run as administrator; this test needs that");
+        let done = run(false).unwrap();
+        assert!(done.contains("WinUSB"), "{done}");
+        assert_eq!(needed(), None, "the marker is written, so nothing should be needed");
+        let out = std::process::Command::new("pnputil").args(["/enum-drivers"]).output().unwrap();
+        let listing = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+        assert!(listing.contains("kickstand.inf"), "pnputil /enum-drivers doesn't list kickstand.inf:\n{listing}");
     }
 }
