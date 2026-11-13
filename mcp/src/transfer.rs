@@ -94,7 +94,8 @@ fn recent_failure() -> Option<(Duration, String)> {
     (ago < USB_RETRY_AFTER).then(|| (ago, why.clone()))
 }
 
-fn remember_failure(why: &anyhow::Error) {
+/// Keeps automatic uploads off USB for [`USB_RETRY_AFTER`] after a USB attempt failed.
+pub fn remember_failure(why: &anyhow::Error) {
     *USB_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), format!("{why:#}")));
 }
 

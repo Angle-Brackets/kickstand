@@ -38,8 +38,9 @@ it, so look before you act and leave it how you found it.
   source lines. For a hang: `threads` with the `elf` gives every thread's stack.
 - Logs on the SD card: `tail_file` (it can follow and stop at a line), `grep` and `find`. Both run on the
   console, so nothing large crosses Wi-Fi.
-- Sending files to the SD card: use `upload` for small files (configs, `.nro` builds), and prefer `usb_upload`
-  for large files like ROMs, ISOs or `.o2r` asset archives whenever `status` reports a USB cable. It goes
+- Sending files to the SD card: `upload` picks the fastest way itself (USB for files of 4 MB or more when a
+  cable is in, else Wi-Fi, saying why if USB failed). `usb_upload` insists on USB, for large files like ROMs,
+  ISOs or `.o2r` asset archives when you want an error instead of a slow Wi-Fi copy. It goes
   through Kickstand's own USB interface, so nothing on the console is opened or closed. If it says the PC
   needs a one-time setup (a udev rule, or a driver on Windows), pass that on to the user rather than trying
   to do it.

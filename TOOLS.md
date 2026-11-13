@@ -565,7 +565,7 @@ Search a file, or every file under a folder, for lines containing some text. The
 ---
 
 ### `upload`
-Upload a file from the PC to the Switch's SD card over Wi-Fi. Streamed from disk in chunks and verified with CRC-32 on the console before replacing the target file. For large files (ROMs, ISOs, `.o2r` archives), prefer [`usb_upload`](#usb_upload) when the Switch is connected via USB.
+Upload a file from the PC to the Switch's SD card the fastest way available: straight to the SD card when it's mounted on the PC, over USB for files of 4 MB or more when a cable is plugged in (see [`usb_upload`](#usb_upload) for the one-time setup), else over Wi-Fi. If USB fails, the file goes over Wi-Fi and the result says why; automatic uploads then stay on Wi-Fi for 5 minutes. Streamed from disk in chunks and verified with CRC-32 on the console before replacing the target file. [`run_nro`](#run_nro) and [`reload_nro`](#reload_nro) choose the same way: a large build is copied over USB first and started from the SD card.
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -749,7 +749,7 @@ kickstand grep --json -i error /kickstand/logs | jq -r '.matches[] | "\(.path):\
 | **SD Card Files** | `kickstand ls <path>` | List a directory on the SD card. |
 | | `kickstand cat <path>` | Print a file from the SD card. |
 | | `kickstand get <remote> <local>` | Download a file from the SD card to the PC. |
-| | `kickstand put [--usb] <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified over Wi-Fi, or `--usb` over USB). |
+| | `kickstand put [--usb\|--wifi] <local> <remote>` | Upload a file from the PC to the SD card (CRC-32 verified) the fastest way available: a mounted SD card, USB for files of 4 MB or more when a cable is in, else Wi-Fi. `--usb` or `--wifi` insists on one. |
 | | `kickstand usb-put <local> <remote>` | Upload a file from the PC to the SD card over a USB cable (Kickstand's own USB interface, or a mounted SD card), for large files. |
 | | `kickstand tail [-f] [-n <lines>] <path>` | Print the last lines of an SD card file (and follow with `-f`). |
 | | `kickstand find <dir> [name] [--max <n>]` | Find files and folders by name, searched on the console. |

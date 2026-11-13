@@ -119,13 +119,17 @@ enum Command {
     Cat { path: String },
     /// Copy a file from the SD card to this PC.
     Get { path: String, local: PathBuf },
-    /// Upload a file to the SD card (over Wi-Fi, or --usb over USB).
+    /// Upload a file to the SD card the fastest way available: a mounted SD card, else USB for files of 4 MB
+    /// or more when a cable is in, else Wi-Fi (--usb or --wifi to insist on one).
     Put {
         local: PathBuf,
         path: String,
-        /// Copy over a USB cable (Kickstand's own USB interface, or a mounted SD card) instead of Wi-Fi.
-        #[arg(long)]
+        /// Only over USB (Kickstand's own USB interface, or a mounted SD card); fail rather than use Wi-Fi.
+        #[arg(long, conflicts_with = "wifi")]
         usb: bool,
+        /// Only over Wi-Fi.
+        #[arg(long)]
+        wifi: bool,
     },
     /// Upload a file to the SD card over a USB cable, for large files like ROMs or .o2r archives: through
     /// Kickstand's own USB interface (whatever runs on the console keeps running), or straight to its SD card
@@ -869,24 +873,11 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 format!("{} bytes in {secs:.1}s ({}) -> {}", data.len(), mb_per_s(data.len() as u64, secs), local.display())
             });
         }
-        Command::Put { local, path, usb: false } => {
-            let path = check_path(&path, true)?;
-            typed_or_allowed(&path, access::Need::Write, false)?;
-            let stats = client.upload_file(&path, &local).await?;
-            let secs = stats.elapsed.as_secs_f64();
-            out.done(json!({ "local": local, "path": path, "bytes": stats.size, "seconds": secs }), || {
-                format!("{} bytes in {secs:.1}s ({})", stats.size, mb_per_s(stats.size, secs))
-            });
+        Command::Put { local, path, usb, wifi } => {
+            let transport = if usb { transfer::Transport::Usb } else if wifi { transfer::Transport::Wifi } else { transfer::Transport::Auto };
+            put(&client, &out, &local, &path, transport).await?;
         }
-        Command::Put { local, path, usb: true } | Command::UsbPut { local, path } => {
-            let path = check_path(&path, true)?;
-            typed_or_allowed(&path, access::Need::Write, false)?;
-            let stats = usb::upload(&client, &local, &path).await?;
-            let secs = stats.elapsed.as_secs_f64();
-            out.done(json!({ "local": local, "path": path, "via": stats.via, "bytes": stats.size, "seconds": secs }), || {
-                format!("{} bytes via {} in {secs:.1}s ({})", stats.size, stats.via, mb_per_s(stats.size, secs))
-            });
-        }
+        Command::UsbPut { local, path } => put(&client, &out, &local, &path, transfer::Transport::Usb).await?,
         Command::Tail { path, lines, follow } => {
             use std::io::Write;
             let path = check_path(&path, false)?;
@@ -1580,6 +1571,19 @@ fn parse_region(text: &str) -> Result<(u32, u32, u32, u32)> {
 }
 
 /// "1.23 MB/s" for `bytes` moved in `secs`.
+/// `kickstand put` / `usb-put`.
+async fn put(client: &Client, out: &out::Out, local: &std::path::Path, path: &str, transport: transfer::Transport) -> Result<()> {
+    let path = check_path(path, true)?;
+    typed_or_allowed(&path, access::Need::Write, false)?;
+    let sent = transfer::put_file(client, local, &path, transport).await?;
+    let secs = sent.elapsed.as_secs_f64();
+    out.done(
+        json!({ "local": local, "path": path, "via": sent.via, "bytes": sent.size, "seconds": secs, "note": sent.note }),
+        || sent.describe(),
+    );
+    Ok(())
+}
+
 fn mb_per_s(bytes: u64, secs: f64) -> String {
     format!("{:.2} MB/s", bytes as f64 / 1e6 / secs.max(1e-6))
 }

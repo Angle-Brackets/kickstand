@@ -145,7 +145,7 @@ target/release/kickstand link code
 
 ### USB Transfers
 
-`usb_upload` (and `kickstand usb-put`) send large files over a USB-C cable from the PC straight to the console (not through the dock). The sysmodule presents its own USB device only for the transfer, so whatever runs on the Switch keeps running. The PC needs a one-time setup to be allowed to open that device:
+`upload`, `kickstand put`, `run_nro` and `reload_nro` use USB by themselves for files of 4 MB or more when a cable is plugged in (falling back to Wi-Fi, with the reason, if it fails); `usb_upload` (and `kickstand usb-put`) insist on it. They send files over a USB-C cable from the PC straight to the console (not through the dock). The sysmodule presents its own USB device only for the transfer, so whatever runs on the Switch keeps running. The PC needs a one-time setup to be allowed to open that device:
 
 - **Linux:** add a udev rule (needs sudo), then unplug and replug the cable:
   ```sh

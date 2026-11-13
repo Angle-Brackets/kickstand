@@ -1796,19 +1796,14 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Upload a file from this PC to the Switch's SD card over Wi-Fi, e.g. a fresh .nro build. Streamed in chunks and verified with CRC-32 before it replaces the old file. For large files (ROMs, ISOs, .o2r archives, multi-MB assets), prefer usb_upload whenever status reports a USB cable (much faster). Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
+    #[tool(description = "Upload a file from this PC to the Switch's SD card, e.g. a fresh .nro build, the fastest way available: straight to the SD card if it's mounted on this PC, over USB for files of 4 MB or more when a cable is plugged in, else over Wi-Fi (also when USB fails; the result says why). Streamed in chunks and verified with CRC-32 before it replaces the old file. usb_upload forces USB. Atmosphère's and hekate's folders and the top of the card are never writable. Outside Kickstand's folders and the projects' folders the user is asked first (a question in this app); if they say no, don't look for another way.")]
     async fn upload(&self, Parameters(args): Parameters<UploadArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let remote = check_path(&args.remote_path, true)?;
             self.permit(&context.peer, &remote, Need::Write, false, &format!("write {remote}")).await?;
-            let stats = self.client.upload_file(&remote, std::path::Path::new(&args.local_path)).await?;
-            let secs = stats.elapsed.as_secs_f64();
-            anyhow::Ok(format!(
-                "uploaded {} -> {remote}: {} bytes in {secs:.1}s ({:.2} MB/s)",
-                args.local_path,
-                stats.size,
-                stats.size as f64 / 1e6 / secs.max(1e-6)
-            ))
+            let local = std::path::Path::new(&args.local_path);
+            let sent = crate::transfer::put_file(&self.client, local, &remote, crate::transfer::Transport::Auto).await?;
+            anyhow::Ok(format!("uploaded {} -> {remote}: {}", args.local_path, sent.describe()))
         };
         result.await.map_or_else(fail, ok)
     }

@@ -456,6 +456,26 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
     if mode == Mode::Applet && is_game(target, &crate::project::load_all().unwrap_or_default()) {
         bail!("{target} is a game: it runs with full memory only (mode \"full\"), never in applet mode");
     }
+    // A large build goes to the SD card over USB first (much faster than NetLoader over Wi-Fi), then starts
+    // from there through the Kickstand NRO. If USB fails, NetLoader sends it as before.
+    let mut notes = Vec::new();
+    let program = match program {
+        Program::Local { nro, dest } if crate::transfer::prefers_usb(nro.len() as u64) => {
+            let dest = check_path(&dest, true)?;
+            match crate::transfer::put_bytes(client, &nro, &dest, crate::transfer::Transport::Usb).await {
+                Ok(sent) => {
+                    notes.push(format!("copied {dest} to the SD card first: {}", sent.describe()));
+                    Program::Sd(dest)
+                }
+                Err(e) => {
+                    notes.push(format!("USB copy failed ({e:#}); sending over Wi-Fi through NetLoader"));
+                    crate::transfer::remember_failure(&e);
+                    Program::Local { nro, dest }
+                }
+            }
+        }
+        program => program,
+    };
     // For an NRO on the SD card: its path (the Kickstand NRO is what's sent, and it opens that).
     let mut opens = None;
     let (nro, dest, args) = match program {
@@ -485,7 +505,6 @@ pub async fn run_nro(client: &Client, program: Program, args: Vec<String>, mode:
         }
     };
 
-    let mut notes = Vec::new();
     let output = nxlink::OutputListener::bind().await?;
     // hbmenu can't be told apart from an NRO, so only a process known to show hbmenu is used as is.
     let current = status(client, mode).await?;
