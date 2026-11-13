@@ -90,7 +90,7 @@ pub mod hekate {
 }
 
 /// This side's protocol revision: bumped whenever a request or response is appended (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// The oldest revision that still encodes every message the way this one does. Peers from this one up
 /// talk to each other; older ones are refused at [`Request::Hello`].
@@ -335,19 +335,36 @@ pub enum Request {
     /// (29) Samples the running application's (or applet's) call stacks every `interval_ms` for
     /// `duration_ms` (optionally restricted to `thread_id`). Answers [`Response::Profile`].
     Profile { duration_ms: u32, interval_ms: u32, thread_id: Option<u64> },
-    /// (29) Snapshots the last `duration_ms` of the console's 48 kHz 16-bit stereo PCM audio ring buffer
-    /// into the session's replay buffer. Answers [`Response::Data`] with `data` empty and `file_size` set to
-    /// the total byte length of the snapshot; read its chunks with [`Request::AudioRead`].
+    /// (29) Marks the last `duration_ms` (at most [`audio::REPLAY_MAX_MS`]) of the audio the sysmodule has
+    /// been recording in the background ([`audio`]) for reading with [`Request::AudioRead`]: less when less
+    /// has been recorded since the application started or its sound last resumed. Answers [`Response::Data`]
+    /// with the first chunk and `file_size` the snapshot's length in bytes (0 when nothing is recorded; ask
+    /// [`Request::AudioCapture`] why), or an error when this daemon can't capture.
     AudioReplay { duration_ms: u32 },
-    /// (29) Reads `len` bytes from `offset` of the session's last [`Request::AudioReplay`] snapshot. Answers
-    /// [`Response::Data`].
+    /// (29) Reads `len` bytes from `offset` of this connection's last [`Request::AudioReplay`] snapshot.
+    /// Answers [`Response::Data`], or an error if that part has since been overwritten (read faster).
     AudioRead { offset: u64, len: u32 },
-    /// (29) Captures `duration_ms` (at most 1,000 ms) of live 48 kHz 16-bit stereo PCM audio. Answers
-    /// [`Response::Data`] with the raw PCM bytes.
+    /// (29) Replaced by [`Request::AudioStream`] in protocol 30; answered [`ErrorKind::Unsupported`].
     AudioStreamChunk { duration_ms: u32 },
     /// (29) Queries or updates system audio output volume (`0..=100`) and mute state. Answers
     /// [`Response::AudioStatus`].
     AudioControl { volume: Option<u8>, muted: Option<bool> },
+    /// (30) What the background audio capture is doing ([`audio`]). Answers [`Response::AudioCapture`].
+    AudioCapture,
+    /// (30) Live audio from byte `from` of the capture's stream ([`AudioCapture::cursor`]; `None` = from
+    /// now), waiting up to `max_wait_ms` (at most [`audio::MAX_WAIT_MS`]) until at least `min_ms` of it has
+    /// arrived, or less if capturing stops. Answers [`Response::AudioChunk`] with at most [`MAX_CHUNK`] bytes.
+    AudioStream { from: Option<u64>, min_ms: u32, max_wait_ms: u32 },
+    /// (30) The next piece of the running application's gameplay video (H.264), read from `grc:d` while
+    /// a client keeps asking (it stops [`video::IDLE_MS`] after the last ask). `restart` drops what was
+    /// queued, to start a new clip. Frames come in pieces of at most [`MAX_CHUNK`] bytes; one reply waits
+    /// up to [`video::MAX_WAIT_MS`]. One client at a time. Answers [`Response::VideoChunk`].
+    VideoStream { restart: bool },
+    /// (30) Pause gameplay capture (audio and video) for `ms` (0 resumes it), waiting up to 1.5 s for the
+    /// `grc:d` Transfers under way to finish. Send it before anything stops the sysmodule while the game is
+    /// in front: grc sends nothing to a new reader after one was stopped mid-Transfer. Answers
+    /// [`Response::AudioCapture`], whose state is [`CaptureState::Held`] when nothing is left under way.
+    CaptureHold { ms: u32 },
 }
 
 /// What [`Request::Playback`] does.
@@ -464,7 +481,11 @@ impl Request {
             Request::AudioReplay { .. }
             | Request::AudioRead { .. }
             | Request::AudioStreamChunk { .. }
+            | Request::AudioCapture
+            | Request::AudioStream { .. }
             | Request::AudioControl { volume: None, muted: None } => "listening to audio",
+            Request::VideoStream { .. } => "looking at the screen",
+            Request::CaptureHold { .. } => "pausing gameplay capture",
             Request::AudioControl { .. } => "changing audio volume",
         }
     }
@@ -666,6 +687,121 @@ pub enum Response {
     Profile { app: App, elapsed_ms: u32, ticks: u32, samples: Vec<ProfileSample> },
     /// (29) Answer to [`Request::AudioControl`].
     AudioStatus(AudioOutStatus),
+    /// (30) Answer to [`Request::AudioCapture`].
+    AudioCapture(AudioCapture),
+    /// (30) Answer to [`Request::AudioStream`].
+    AudioChunk(AudioChunk),
+    /// (30) Answer to [`Request::VideoStream`].
+    VideoChunk(VideoChunk),
+}
+
+/// Audio capture (protocol 30). The sysmodule reads the foreground application's sound from `grc:d`, the
+/// gameplay recorder (48 kHz, 16-bit, stereo, interleaved little-endian), into a ring of the last
+/// [`RING_MS`](audio::RING_MS) while an application runs. Only applications that record gameplay can be
+/// heard: a game that allows video capture (holding the Capture button saves a clip), or homebrew running
+/// in such a game's place; a host whose control data says Manual needs the homebrew to call
+/// `appletInitializeGamePlayRecording()`.
+pub mod audio {
+    pub const SAMPLE_RATE: u32 = 48_000;
+    pub const CHANNELS: u16 = 2;
+    pub const BYTES_PER_SECOND: u32 = SAMPLE_RATE * CHANNELS as u32 * 2;
+    /// What the console keeps.
+    pub const RING_MS: u32 = 6_000;
+    /// The longest replay: less than the ring, so a replay being read isn't overwritten.
+    pub const REPLAY_MAX_MS: u32 = 5_000;
+    /// The longest [`super::Request::AudioStream`] wait.
+    pub const MAX_WAIT_MS: u32 = 2_000;
+    /// The program id of SysDVR's sysmodule, which reads the same streams.
+    pub const SYSDVR_PROGRAM_ID: u64 = 0x00FF_0000_A53B_B665;
+
+    /// Bytes in `ms` of audio, whole frames.
+    pub const fn bytes_for_ms(ms: u32) -> u64 {
+        (ms as u64 * SAMPLE_RATE as u64 / 1000) * CHANNELS as u64 * 2
+    }
+
+    /// Milliseconds in `bytes` of audio.
+    pub const fn ms_for_bytes(bytes: u64) -> u64 {
+        bytes * 1000 / BYTES_PER_SECOND as u64
+    }
+}
+
+/// Video streaming (protocol 30): see [`Request::VideoStream`].
+pub mod video {
+    /// The reader stops this long after the last [`super::Request::VideoStream`].
+    pub const IDLE_MS: u64 = 3_000;
+    /// The longest a [`super::Request::VideoStream`] waits for a frame.
+    pub const MAX_WAIT_MS: u32 = 1_000;
+}
+
+/// What the console's gameplay capture (`grc:d`) is doing, for audio and video alike.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum CaptureState {
+    /// This daemon can't capture: the NRO (only the sysmodule can), or firmware before 6.0.
+    Unsupported,
+    /// No application is running (the home menu, or only applets).
+    NoApplication,
+    /// An application runs but the recorder has sent nothing for `ms`: it doesn't record gameplay (see
+    /// [`audio`]), or it is suspended behind the home menu.
+    Waiting { ms: u32 },
+    /// Audio is arriving.
+    Capturing,
+    /// Another program reads the recorder (SysDVR), so Kickstand stays off it: two readers would each get
+    /// part of the stream.
+    Busy { holder: String },
+    /// A `grc:d` call failed with `result` while doing `during`.
+    Failed { result: u32, during: String },
+    /// Like [`CaptureState::Waiting`], but an earlier daemon process read the recorder since the console
+    /// booted and was stopped, and grc sends nothing to a restarted reader until a reboot (seen on 23.0.1).
+    NeedsReboot { ms: u32 },
+    /// [`Request::CaptureHold`] paused capture, and no `grc:d` Transfer is under way.
+    Held,
+}
+
+/// Answer to [`Request::AudioCapture`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AudioCapture {
+    pub state: CaptureState,
+    /// The running application's program id (the host title when hbloader runs in its place).
+    pub program_id: Option<u64>,
+    /// Whether that's hbloader (hbmenu or an NRO), when Atmosphère says.
+    pub hbl: Option<bool>,
+    /// The running title's `VideoCapture` setting from its control data (0 off, 1 manual: the program must
+    /// call `InitializeGamePlayRecording`, 2 automatic), read when it isn't being heard.
+    pub video_capture: Option<u8>,
+    /// How much audio the ring holds now (since the application started or its sound resumed).
+    pub buffered_ms: u32,
+    /// How long ago the newest audio arrived, if any has.
+    pub newest_age_ms: Option<u32>,
+    /// The stream position after the newest byte: bytes captured since the daemon started.
+    pub cursor: u64,
+}
+
+/// Answer to [`Request::AudioStream`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AudioChunk {
+    /// The stream position of `data`'s first byte.
+    pub from: u64,
+    pub data: Vec<u8>,
+    /// Bytes between the position asked for and `from` that are gone (overwritten, or from before the
+    /// sound last restarted): a gap in the recording.
+    pub skipped: u64,
+    pub state: CaptureState,
+}
+
+/// Answer to [`Request::VideoStream`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VideoChunk {
+    /// Part of one frame's H.264 NAL units (Annex B), empty if none arrived in time.
+    pub data: Vec<u8>,
+    /// `data` starts a frame.
+    pub frame_start: bool,
+    /// `data` ends that frame.
+    pub frame_end: bool,
+    /// The recorder's timestamp for the frame.
+    pub timestamp: u64,
+    /// Frames dropped on the console since the last reply because the client read too slowly.
+    pub dropped: u32,
+    pub state: CaptureState,
 }
 
 /// One sampled thread stack from [`Request::Profile`].
@@ -1077,6 +1213,10 @@ mod tests {
                 Request::AudioRead { .. } => 55,
                 Request::AudioStreamChunk { .. } => 56,
                 Request::AudioControl { .. } => 57,
+                Request::AudioCapture => 58,
+                Request::AudioStream { .. } => 59,
+                Request::VideoStream { .. } => 60,
+                Request::CaptureHold { .. } => 61,
             }
         }
         fn response(r: &Response) -> u8 {
@@ -1110,6 +1250,9 @@ mod tests {
                 Response::UsbOpened { .. } => 26,
                 Response::Profile { .. } => 27,
                 Response::AudioStatus(_) => 28,
+                Response::AudioCapture(_) => 29,
+                Response::AudioChunk(_) => 30,
+                Response::VideoChunk(_) => 31,
             }
         }
         let s = || String::from("/a");
@@ -1172,6 +1315,10 @@ mod tests {
             Request::AudioRead { offset: 0, len: 0 },
             Request::AudioStreamChunk { duration_ms: 0 },
             Request::AudioControl { volume: None, muted: None },
+            Request::AudioCapture,
+            Request::AudioStream { from: None, min_ms: 0, max_wait_ms: 0 },
+            Request::VideoStream { restart: false },
+            Request::CaptureHold { ms: 0 },
         ];
         for (i, req) in requests.iter().enumerate() {
             assert_eq!((request(req) as usize, encode(req).unwrap()[4]), (i, i as u8), "{req:?}");
@@ -1213,6 +1360,24 @@ mod tests {
                 volume_pct: 50,
                 muted: false,
                 output_active: true,
+            }),
+            Response::AudioCapture(AudioCapture {
+                state: CaptureState::Capturing,
+                program_id: None,
+                hbl: None,
+                video_capture: None,
+                buffered_ms: 0,
+                newest_age_ms: None,
+                cursor: 0,
+            }),
+            Response::AudioChunk(AudioChunk { from: 0, data: Vec::new(), skipped: 0, state: CaptureState::NoApplication }),
+            Response::VideoChunk(VideoChunk {
+                data: Vec::new(),
+                frame_start: false,
+                frame_end: false,
+                timestamp: 0,
+                dropped: 0,
+                state: CaptureState::Unsupported,
             }),
         ];
         for (i, resp) in responses.iter().enumerate() {

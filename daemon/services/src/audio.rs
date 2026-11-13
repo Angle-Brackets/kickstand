@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Audio control (`audctl`) and output (`audout:u`) wrappers.
-//! Command ids and struct layouts follow libnx `source/services/audctl.c` and `audout.c` (ISC).
+//! Audio control (`audctl`): output target, volume and mute. Command ids and struct layouts follow libnx
+//! `source/services/audctl.c` (ISC). Capture goes through `grc:d` ([`crate::grc`]), not `audout:u`/`audin:u`.
 
-use nx::ipc::sf::{self, sm};
+use nx::ipc::sf::sm;
 use nx::result::Result;
 use nx::service;
-use nx::service::audio::{
-    AudioInterfaceName, AudioOutManagerService, IAudioOutManagerClient,
-};
 use nx::version::{self, Version};
 
 /// Native Horizon OS audio mixer sample rate (48 kHz).
@@ -20,8 +17,6 @@ pub const BYTES_PER_SAMPLE: usize = 2;
 pub const BYTES_PER_FRAME: usize = (CHANNELS as usize) * BYTES_PER_SAMPLE;
 /// Bytes per second of 48 kHz 16-bit stereo PCM (`192,000` bytes/s).
 pub const BYTES_PER_SECOND: usize = (SAMPLE_RATE as usize) * BYTES_PER_FRAME;
-/// Page alignment required by `AudioBuffer` sample buffers (`0x1000`).
-pub const PAGE_SIZE: usize = 0x1000;
 
 /// Output routing target (`AudioTarget` in libnx `audctl.h`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -136,7 +131,7 @@ pub struct AudioStatus {
     /// System output master volume (`0.0..=1.0`).
     pub master_volume: f32,
     pub muted: bool,
-    /// Whether `audout:u` reports at least one output device and started state.
+    /// Whether the running application's sound is being captured (filled in by the caller).
     pub output_active: bool,
 }
 
@@ -182,22 +177,12 @@ fn query_active_target(ctl: &AudCtlService) -> AudioTarget {
     AudioTarget::Speaker
 }
 
-/// Queries `audout:u` for sample rate, channel count and whether an output device is present
-/// without opening a stateful `IAudioOut` session or copying a process handle into `audio`.
-pub fn probe_audio_out() -> Result<(u32, u16, bool)> {
-    let audout = service::new_service_object::<AudioOutManagerService>()?;
-    let mut names = [AudioInterfaceName::new(); 4];
-    let count = audout
-        .list_audio_outs_auto(sf::Buffer::from_mut_array(&mut names))
-        .or_else(|_| audout.list_audio_outs(sf::Buffer::from_mut_array(&mut names)))
-        .unwrap_or(0);
-    Ok((SAMPLE_RATE, CHANNELS, count > 0))
-}
-
-/// Queries the current audio output state (`audctl` + `audout:u`).
-/// Gracefully falls back to defaults if a service is unavailable on the current firmware.
+/// Queries the current audio output state from `audctl` (one session, closed after). `audout:u` and
+/// `audin:u` are never touched: an earlier version polled them from the sysmodule and leaked handles inside
+/// the audio sysmodule until it failed with 0xD201 (out of handles). `output_active` is left false here;
+/// the caller fills it from the capture.
 pub fn status() -> Result<AudioStatus> {
-    let (sample_rate, channels, output_active) = probe_audio_out().unwrap_or((SAMPLE_RATE, CHANNELS, false));
+    let (sample_rate, channels, output_active) = (SAMPLE_RATE, CHANNELS, false);
     let Ok(ctl) = service::new_service_object::<AudCtlService>() else {
         return Ok(AudioStatus {
             sample_rate,
@@ -262,14 +247,4 @@ pub fn set_mute(mute: bool) -> Result<AudioStatus> {
         target: target as u32,
     })?;
     status()
-}
-
-/// Attempts to capture up to `out_samples.len()` `i16` PCM samples within `_timeout_ns`.
-///
-/// On Horizon OS, `audin:u` is microphone input (not system mixer loopback) and repeatedly opening
-/// `IAudioIn` sessions from a background sysmodule leaks server-side handles inside `audio`
-/// (`0100000000000014`, `0xD201` / `svc::ResultOutOfHandles`). Returning `Ok(0)` lets the ring buffer
-/// and streaming pipeline serve pushed PCM samples or zero-filled silence without touching `audin:u`.
-pub fn try_capture_samples(_out_samples: &mut [i16], _timeout_ns: i64) -> Result<usize> {
-    Ok(0)
 }

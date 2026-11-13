@@ -634,6 +634,42 @@ pub(crate) fn default_capture_path(ext: &str) -> anyhow::Result<std::path::PathB
 const DEFAULT_KEEP_AWAKE_MINUTES: u32 = 30;
 
 impl Tools {
+    /// Saves captured audio, analyses it and formats the reply for the session's modalities, `note` first.
+    async fn audio_reply(
+        &self,
+        samples: Vec<i16>,
+        note: String,
+        local_path: Option<String>,
+        reference_wav: Option<String>,
+        context: &RequestContext<RoleServer>,
+    ) -> anyhow::Result<Vec<ContentBlock>> {
+        let wav_path = match local_path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => default_capture_path("wav")?,
+        };
+        let ref_path = reference_wav.map(std::path::PathBuf::from);
+        let modalities = self.session_modalities(context);
+        let (_, _, mut blocks) = tokio::task::spawn_blocking(move || {
+            crate::audio::format_audio_output(
+                &samples,
+                crate::audio::DEFAULT_SAMPLE_RATE,
+                crate::audio::DEFAULT_CHANNELS,
+                &wav_path,
+                ref_path.as_deref(),
+                modalities,
+            )
+        })
+        .await??;
+        blocks.insert(0, ContentBlock::text(note));
+        Ok(blocks)
+    }
+
+    /// Streams `seconds` of the console's own gameplay video next to `near` (an .mp4 via ffmpeg). Returns
+    /// the file, its frame rate, frame count and size in KB; errors say why it couldn't (for the fallback).
+    async fn gameplay_video(&self, seconds: f64, near: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, f64, usize, usize)> {
+        crate::video::record_to_file(&self.client, seconds, near).await
+    }
+
     fn session_key(&self, context: &RequestContext<RoleServer>) -> String {
         context
             .peer
@@ -1613,12 +1649,36 @@ impl Tools {
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Record the Switch's screen (from repeated screenshots, a few frames a second) saved on this PC (by default in ~/Pictures/kickstand/), e.g. to inspect an animation or bug. Adapts to the modalities registered in ping: video-capable sessions receive an encoded clip (MP4/GIF), image-capable sessions receive a contact sheet of up to 6 evenly spaced frames, and text-only sessions receive a frame/motion summary.")]
+    #[tool(description = "Record the Switch's screen for a few seconds (default 3, max 30), e.g. to inspect an animation or a bug, saved on this PC (by default in ~/Pictures/kickstand/). When the running game records gameplay (or homebrew runs in such a game's place) and ffmpeg is installed, this streams the console's own 30 fps H.264 video and saves it as an .mp4 (no re-encoding), plus a GIF; otherwise it falls back to repeated screenshots (a few frames a second) and says why. Adapts to the modalities registered in ping: video-capable sessions also get the clip, image-capable sessions a contact sheet of up to 6 evenly spaced frames, text-only sessions a frame/motion summary.")]
     async fn record_gif(&self, Parameters(args): Parameters<RecordGifArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let seconds = args.seconds.unwrap_or(3.0);
             let width = args.width.unwrap_or(640).clamp(64, 1280);
-            let shots = crate::capture::record(&self.client, seconds, args.fps.unwrap_or(5)).await?;
+            let fps = args.fps.unwrap_or(5).clamp(1, crate::capture::MAX_FPS);
+            let path = match args.local_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => default_capture_path("gif")?,
+            };
+            // The console's own video first; screenshots when it can't.
+            let mut mp4 = None;
+            let source;
+            let shots = match self.gameplay_video(seconds, &path).await {
+                Ok((saved, clip_fps, frames, kb)) => {
+                    let decode = saved.clone();
+                    let shots =
+                        tokio::task::spawn_blocking(move || crate::video::decode_shots(&decode, clip_fps, fps, width)).await??;
+                    source = format!("the console's gameplay video: {frames} frames at {clip_fps:.0} fps, {kb} KB, saved as {}", saved.display());
+                    mp4 = Some(saved);
+                    shots
+                }
+                Err(why) => {
+                    source = format!("screenshots (not the console's video stream: {why:#})");
+                    crate::capture::record(&self.client, seconds, fps).await?
+                }
+            };
+            if shots.is_empty() {
+                anyhow::bail!("no frames came out of {source}");
+            }
             {
                 let mut ring = self.video_ring.lock().unwrap();
                 for s in &shots {
@@ -1628,58 +1688,41 @@ impl Tools {
             let span = shots.last().map_or(0.0, |s| s.at.as_secs_f64());
             let frames = shots.len();
             let pref = self.session_modalities(&context).preferred_visual();
-            let path = match args.local_path {
-                Some(p) => std::path::PathBuf::from(p),
-                None => default_capture_path("gif")?,
-            };
             let shots_for_gif = shots.clone();
             let (gif, sheet) = tokio::task::spawn_blocking(move || {
                 anyhow::Ok((crate::capture::gif(&shots_for_gif, width)?, crate::capture::contact_sheet(&shots_for_gif, 6)?))
             })
             .await??;
             tokio::fs::write(&path, &gif).await?;
-            let fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
+            let gif_fps = if span > 0.0 { (frames - 1) as f64 / span } else { 0.0 };
+            let head = format!("from {source}\nsaved {} ({frames} frames, {gif_fps:.1} fps, {} KB)", path.display(), gif.len() / 1024);
             match pref {
                 VisualFormat::Video => {
-                    let clip_path = path.with_extension("mp4");
-                    let clip = tokio::task::spawn_blocking(move || {
-                        crate::capture::export_clip(&shots, width, VisualFormat::Video, Some(clip_path))
-                    })
-                    .await??;
-                    let saved = clip.path.as_ref().unwrap_or(&path);
-                    let text = format!(
-                        "saved {} ({frames} frames, {fps:.1} fps, {} KB; video modality clip at {})",
-                        path.display(),
-                        gif.len() / 1024,
-                        saved.display()
-                    );
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&clip.bytes);
+                    let (clip_path, bytes, mime) = match &mp4 {
+                        Some(p) if p.extension().is_some_and(|e| e == "mp4") => (p.clone(), tokio::fs::read(p).await?, "video/mp4"),
+                        _ => {
+                            let clip_path = path.with_extension("mp4");
+                            let clip = tokio::task::spawn_blocking(move || {
+                                crate::capture::export_clip(&shots, width, VisualFormat::Video, Some(clip_path))
+                            })
+                            .await??;
+                            (clip.path.unwrap_or_else(|| path.clone()), clip.bytes, clip.mime_type)
+                        }
+                    };
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                     anyhow::Ok(vec![
-                        ContentBlock::text(text),
-                        ContentBlock::image(b64, clip.mime_type),
+                        ContentBlock::text(format!("{head}; video modality clip at {}", clip_path.display())),
+                        ContentBlock::image(b64, mime),
                         jpeg_block(&sheet),
                     ])
                 }
-                VisualFormat::ContactSheet => {
-                    let text = format!(
-                        "saved {} ({frames} frames, {fps:.1} fps, {} KB); contact sheet below",
-                        path.display(),
-                        gif.len() / 1024
-                    );
-                    anyhow::Ok(vec![ContentBlock::text(text), jpeg_block(&sheet)])
-                }
+                VisualFormat::ContactSheet => anyhow::Ok(vec![ContentBlock::text(format!("{head}; contact sheet below")), jpeg_block(&sheet)]),
                 VisualFormat::TextSummary => {
                     let clip = tokio::task::spawn_blocking(move || {
                         crate::capture::export_clip(&shots, width, VisualFormat::TextSummary, None)
                     })
                     .await??;
-                    let text = format!(
-                        "saved {} ({frames} frames, {fps:.1} fps, {} KB); {}",
-                        path.display(),
-                        gif.len() / 1024,
-                        clip.summary
-                    );
-                    anyhow::Ok(vec![ContentBlock::text(text)])
+                    anyhow::Ok(vec![ContentBlock::text(format!("{head}; {}", clip.summary))])
                 }
             }
         };
@@ -2017,73 +2060,64 @@ impl Tools {
         result.await.map_or_else(fail, ok)
     }
 
-    #[tool(description = "Save the last N seconds (up to 5.0 s) of console audio from the daemon's rolling 48 kHz 16-bit stereo ring buffer to a `.wav` file on this PC and analyze it (RMS/peak dBFS, dominant frequency, silence, clipping, underrun/pop glitches, and optional reference `.wav` cross-correlation). Output adapts to the session's modalities registered in ping (inline WAV for audio, waveform+spectrogram PNG for image, or DSP metrics text).")]
+    #[tool(description = "Hear the last few seconds (up to 5) of the running game's or homebrew's sound, after the fact: Kickstand's sysmodule records it continuously in the background from the console's gameplay recorder (grc:d), so this returns what already played (just after a glitch, a missing sound effect or a crash). Saved as a .wav on this PC and analysed (level, dominant frequency, silence, clipping, pops); reference_wav says whether and where a sound effect occurs in it. Only games that allow video capture can be heard, and homebrew running in place of such a game; when nothing can be heard the reply says why and what to change (e.g. the one call that opts homebrew in). Output follows the modalities registered in ping (the .wav for audio, a spectrogram for images, else text).")]
     async fn audio_replay(&self, Parameters(args): Parameters<AudioReplayArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let seconds = args.seconds.unwrap_or(5.0).clamp(0.1, 5.0);
-            let samples = self.client.audio_replay(seconds).await?;
-            let wav_path = match args.local_path {
-                Some(p) => std::path::PathBuf::from(p),
-                None => default_capture_path("wav")?,
-            };
-            let ref_path = args.reference_wav.map(std::path::PathBuf::from);
-            let modalities = self.session_modalities(&context);
-            let (_, _, blocks) = tokio::task::spawn_blocking(move || {
-                crate::audio::format_audio_output(
-                    &samples,
-                    crate::audio::DEFAULT_SAMPLE_RATE,
-                    crate::audio::DEFAULT_CHANNELS,
-                    &wav_path,
-                    ref_path.as_deref(),
-                    modalities,
-                )
-            })
-            .await??;
-            anyhow::Ok(blocks)
+            let (samples, capture) = self.client.audio_replay(seconds).await?;
+            let got = samples.len() as f64 / f64::from(proto::audio::BYTES_PER_SECOND / 2);
+            let mut note = format!("{} (asked for {seconds:.1} s, got {got:.2} s", crate::audio::capture_line(&capture));
+            if got + 0.05 < seconds {
+                note.push_str(": that's all since the sound started or last resumed");
+            }
+            note.push(')');
+            self.audio_reply(samples, note, args.local_path, args.reference_wav, &context).await
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Proactively record live 48 kHz 16-bit stereo audio from the Switch for `seconds` (0.1 to 30.0 s, default 3.0 s), save it as a `.wav` file on this PC, and run DSP waveform/glitch/reference-correlation analysis. Output adapts to the session's modalities registered in ping.")]
+    #[tool(description = "Record the next N seconds (0.1-30, default 3) of the running game's or homebrew's sound as it plays, streamed live from the console's gameplay recorder (grc:d): start it, then make the sound happen (input, play_macro) from another call or let the game run. Saved as a .wav on this PC and analysed like audio_replay, with optional reference_wav matching. Same limits as audio_replay: only games that allow video capture, and homebrew in such a game's place; otherwise the reply says why.")]
     async fn record_audio(&self, Parameters(args): Parameters<RecordAudioArgs>, context: RequestContext<RoleServer>) -> CallToolResult {
         let result = async {
             let seconds = args.seconds.unwrap_or(3.0).clamp(0.1, 30.0);
-            let samples = self.client.record_audio(seconds).await?;
-            let wav_path = match args.local_path {
-                Some(p) => std::path::PathBuf::from(p),
-                None => default_capture_path("wav")?,
-            };
-            let ref_path = args.reference_wav.map(std::path::PathBuf::from);
-            let modalities = self.session_modalities(&context);
-            let (_, _, blocks) = tokio::task::spawn_blocking(move || {
-                crate::audio::format_audio_output(
-                    &samples,
-                    crate::audio::DEFAULT_SAMPLE_RATE,
-                    crate::audio::DEFAULT_CHANNELS,
-                    &wav_path,
-                    ref_path.as_deref(),
-                    modalities,
-                )
-            })
-            .await??;
-            anyhow::Ok(blocks)
+            let rec = self.client.record_audio(seconds).await?;
+            let got = rec.samples.len() as f64 / f64::from(proto::audio::BYTES_PER_SECOND / 2);
+            let mut note = format!("recorded {got:.2} s of live console audio");
+            if rec.gaps_ms > 0 {
+                let _ = write!(note, "; {} ms of gaps filled with silence (the stream fell behind or the sound paused)", rec.gaps_ms);
+            }
+            if let Some(why) = &rec.stopped {
+                let _ = write!(note, "; stopped early: {why}");
+            }
+            self.audio_reply(rec.samples, note, args.local_path, args.reference_wav, &context).await
         };
         result.await.map_or_else(fail, CallToolResult::success)
     }
 
-    #[tool(description = "Query or set the Switch's system audio output volume (0-100%) and mute state. Call with no arguments to inspect the active audio output target (BuiltInSpeaker, Headphones, TvOutput, UsbOutput), sample rate, volume, and mute status.")]
+    #[tool(description = "Query or set the Switch's system audio output volume (0-100%) and mute state. Call with no arguments to see the output target (speaker, headphones, TV, USB, Bluetooth), volume, mute, and whether Kickstand is hearing the running application (see audio_replay).")]
     async fn audio_control(&self, Parameters(args): Parameters<AudioControlArgs>) -> CallToolResult {
         let result = async {
             let status = self.client.audio_control(args.volume, args.muted).await?;
-            anyhow::Ok(format!(
-                "audio output: target={}, {} Hz {}ch, volume={}%{}, active={}",
+            let mut text = format!(
+                "audio output: {}, volume {}%{}",
                 status.target,
-                status.sample_rate,
-                status.channels,
                 status.volume_pct,
                 if status.muted { " (muted)" } else { "" },
-                status.output_active
-            ))
+            );
+            match self.client.audio_capture().await {
+                Ok(c) => match crate::audio::why_silent(&c) {
+                    None => {
+                        let _ = write!(text, "\n{}", crate::audio::capture_line(&c));
+                    }
+                    Some(why) => {
+                        let _ = write!(text, "\nnot hearing the application: {why}");
+                    }
+                },
+                Err(e) => {
+                    let _ = write!(text, "\n{e:#}");
+                }
+            }
+            anyhow::Ok(text)
         };
         result.await.map_or_else(fail, ok)
     }

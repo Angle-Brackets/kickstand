@@ -46,6 +46,10 @@ it, so look before you act and leave it how you found it.
 - Don't sleep and then screenshot. Use `wait_screen` (`still` for menus and fades, `change` for "did
   something happen"), or `then: "still"` on `press`, `input` and `play_macro`, which waits and looks in the
   same call.
+- `record_gif` and `audio_replay`/`record_audio` use the console's gameplay recorder: real 30 fps video (with
+  sound) and the game's audio, but only from games that allow video capture (holding Capture saves a clip)
+  or homebrew running in one's place. When they can't, the reply says why; follow it rather than retrying.
+  An applet over the game (Controllers, the home menu) pauses the recorder: dismiss it first.
 
 ## Input
 

@@ -24,6 +24,10 @@ pub struct Console {
     /// A running application, for tests of closing one (none unless a test sets it).
     pub app: Mutex<MockApp>,
     playback: Mutex<MockPlayback>,
+    /// When its audio "capture" started: a 440 Hz tone, one stream position per byte since then.
+    audio_start: Instant,
+    /// What the capture reports instead of capturing, for tests of the explanations.
+    pub audio_state: Mutex<Option<proto::CaptureState>>,
 }
 
 /// Like the daemon's `playback` module: Plays take their steps' time, and can be paused and stopped.
@@ -70,7 +74,16 @@ struct MockClient {
 
 impl Console {
     pub fn new(root: PathBuf, tokens: Vec<String>, pair_code: Option<String>) -> Self {
-        Console { root, tokens: Mutex::new(tokens), pair_code, activity: Mutex::default(), app: Mutex::default(), playback: Mutex::default() }
+        Console {
+            root,
+            tokens: Mutex::new(tokens),
+            pair_code,
+            activity: Mutex::default(),
+            app: Mutex::default(),
+            playback: Mutex::default(),
+            audio_start: Instant::now(),
+            audio_state: Mutex::default(),
+        }
     }
 
     fn connected(&self, from: SocketAddr) -> u64 {
@@ -109,6 +122,26 @@ impl Console {
                 activity.recent.pop_front();
             }
             activity.recent.push_back(Event { at: Instant::now(), id, ip, app, what: doing });
+        }
+    }
+
+    /// The capture's stream position: bytes of audio since it started.
+    fn audio_head(&self) -> u64 {
+        proto::audio::bytes_for_ms(self.audio_start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32)
+    }
+
+    fn audio_capture(&self) -> proto::AudioCapture {
+        let state = self.audio_state.lock().unwrap().clone().unwrap_or(proto::CaptureState::Capturing);
+        let head = self.audio_head();
+        let capturing = state == proto::CaptureState::Capturing;
+        proto::AudioCapture {
+            state,
+            program_id: Some(0x0100_0000_0000_1234),
+            hbl: Some(false),
+            video_capture: (!capturing).then_some(2),
+            buffered_ms: if capturing { proto::audio::ms_for_bytes(head).min(u64::from(proto::audio::RING_MS)) as u32 } else { 0 },
+            newest_age_ms: capturing.then_some(0),
+            cursor: head,
         }
     }
 
@@ -292,7 +325,7 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
     let mut session_token = None;
     let mut upload: Option<Upload> = None;
     let mut memory = mock_memory();
-    let mut audio_replay_buf: Vec<u8> = Vec::new();
+    let mut audio_replay: Option<(u64, u64)> = None;
     let mut audio_volume: u8 = 80;
     let mut audio_muted: bool = false;
     // While this connection's Plays run back to back: the generation they started at.
@@ -544,20 +577,59 @@ async fn handle(mut stream: TcpStream, console: &Console, id: u64) -> Result<()>
                     .collect();
                 Response::Profile { app: MOCK_APP, elapsed_ms: duration_ms, ticks, samples }
             }
+            Request::AudioCapture => Response::AudioCapture(console.audio_capture()),
+            Request::CaptureHold { .. } => Response::AudioCapture(proto::AudioCapture { state: proto::CaptureState::Held, ..console.audio_capture() }),
             Request::AudioReplay { duration_ms } => {
-                audio_replay_buf = mock_pcm_bytes(duration_ms.clamp(100, 5_000), audio_volume, audio_muted);
-                Response::Data { data: Vec::new(), file_size: audio_replay_buf.len() as u64 }
+                let c = console.audio_capture();
+                let len = if c.state == proto::CaptureState::Capturing {
+                    proto::audio::bytes_for_ms(duration_ms.min(proto::audio::REPLAY_MAX_MS)).min(c.cursor)
+                } else {
+                    0
+                };
+                audio_replay = Some((c.cursor - len, len));
+                Response::Data { data: Vec::new(), file_size: len }
             }
-            Request::AudioRead { offset, len } => {
-                let start = (offset as usize).min(audio_replay_buf.len());
-                let end = (start + (len as usize).min(proto::MAX_CHUNK)).min(audio_replay_buf.len());
-                Response::Data { data: audio_replay_buf[start..end].to_vec(), file_size: audio_replay_buf.len() as u64 }
+            Request::AudioRead { offset, len } => match audio_replay {
+                Some((start, total)) => {
+                    let offset = offset.min(total);
+                    let len = (len as u64).min(proto::MAX_CHUNK as u64).min(total - offset);
+                    Response::Data { data: mock_pcm(start + offset, len as usize, audio_volume, audio_muted), file_size: total }
+                }
+                None => Response::error(ErrorKind::BadRequest, "no audio replay on this connection"),
+            },
+            Request::AudioStreamChunk { .. } => Response::error(ErrorKind::Unsupported, "replaced by AudioStream in protocol 30"),
+            Request::AudioStream { from, min_ms, max_wait_ms } => {
+                let c = console.audio_capture();
+                if c.state != proto::CaptureState::Capturing {
+                    Response::AudioChunk(proto::AudioChunk { from: c.cursor, data: Vec::new(), skipped: 0, state: c.state })
+                } else {
+                    let pos = from.unwrap_or(c.cursor);
+                    let want = proto::audio::bytes_for_ms(min_ms).min(proto::MAX_CHUNK as u64);
+                    let deadline = Instant::now() + std::time::Duration::from_millis(u64::from(max_wait_ms.min(proto::audio::MAX_WAIT_MS)));
+                    let mut head = c.cursor;
+                    while head.saturating_sub(pos) < want && Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        head = console.audio_head();
+                    }
+                    let oldest = head.saturating_sub(proto::audio::bytes_for_ms(proto::audio::RING_MS));
+                    let begin = pos.min(head).max(oldest);
+                    let len = (head - begin).min(proto::MAX_CHUNK as u64 & !3) as usize;
+                    Response::AudioChunk(proto::AudioChunk {
+                        from: begin,
+                        data: mock_pcm(begin, len, audio_volume, audio_muted),
+                        skipped: begin - pos.min(head),
+                        state: proto::CaptureState::Capturing,
+                    })
+                }
             }
-            Request::AudioStreamChunk { duration_ms } => {
-                let data = mock_pcm_bytes(duration_ms.clamp(50, 1_000), audio_volume, audio_muted);
-                let file_size = data.len() as u64;
-                Response::Data { data, file_size }
-            }
+            Request::VideoStream { .. } => Response::VideoChunk(proto::VideoChunk {
+                data: Vec::new(),
+                frame_start: false,
+                frame_end: false,
+                timestamp: 0,
+                dropped: 0,
+                state: proto::CaptureState::Unsupported,
+            }),
             Request::AudioControl { volume, muted } => {
                 if let Some(v) = volume {
                     audio_volume = v.min(100);
@@ -590,12 +662,13 @@ const MOCK_RECORDING: [proto::RecordedInput; 5] = [
     proto::RecordedInput { at_ms: 1500, buttons: 0, left: (0, 0), right: (0, 0) },
 ];
 
-fn mock_pcm_bytes(duration_ms: u32, volume: u8, muted: bool) -> Vec<u8> {
-    let frames = (duration_ms as usize) * 48;
-    let mut out = Vec::with_capacity(frames * 4);
+/// `len` bytes of the mock's capture from stream position `pos`: a 440 Hz tone, continuous across calls.
+fn mock_pcm(pos: u64, len: usize, volume: u8, muted: bool) -> Vec<u8> {
     let amp = if muted || volume == 0 { 0.0 } else { 12_000.0 * (f64::from(volume) / 100.0) };
-    for n in 0..frames {
-        let t = (n as f64) / 48_000.0;
+    let first = pos / 4;
+    let mut out = Vec::with_capacity(len);
+    for n in 0..(len / 4) as u64 {
+        let t = (first + n) as f64 / 48_000.0;
         let s = (amp * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as i16;
         out.extend_from_slice(&s.to_le_bytes());
         out.extend_from_slice(&s.to_le_bytes());

@@ -120,3 +120,21 @@ impl Names {
         Ok(core::str::from_utf8(&name[..end]).map(String::from).unwrap_or_default())
     }
 }
+
+/// `NacpStruct::video_capture` (switchbrew NACP page): 0 disabled, 1 manual (the program must call
+/// `InitializeGamePlayRecording`), 2 enabled (am sets recording up itself).
+const NACP_VIDEO_CAPTURE: usize = 0x3035;
+
+/// The `VideoCapture` setting in `application_id`'s control data. Allocates the control data buffer
+/// (0x24000) for the call only.
+pub fn video_capture(application_id: u64) -> Result<Option<u8>> {
+    let control = service::new_service_object::<GetterService>()?.get_read_only_application_control_data_interface()?;
+    let mut buf = Vec::new();
+    if buf.try_reserve_exact(CONTROL_DATA_SIZE).is_err() {
+        return Ok(None);
+    }
+    buf.resize(CONTROL_DATA_SIZE, 0);
+    let args = ControlDataArgs { source: 0, pad: [0; 7], application_id };
+    let size = control.get_application_control_data(args, sf::Buffer::from_mut_array(&mut buf))?;
+    Ok(((size as usize) >= NACP_SIZE).then(|| buf[NACP_VIDEO_CAPTURE]))
+}

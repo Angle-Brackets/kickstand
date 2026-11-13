@@ -548,8 +548,25 @@ pub async fn restart_sysmodule(client: &Client, nro: Option<Vec<u8>>) -> Result<
         Some(nro) => nro,
         None => client.read(LAUNCHER, 0, u64::MAX).await.context("reading the Kickstand NRO")?.0,
     };
+    // Stop reading the gameplay recorder first, while the game is still in front to finish the read under
+    // way: grc sends nothing more to anyone (until a reboot) after a reader is stopped in the middle of one.
+    let mut held = None;
+    if let Ok(info) = client.hello().await
+        && info.kind == DaemonKind::Sysmodule
+        && info.protocol >= 30
+    {
+        held = client.hold_capture(60_000).await.ok().flatten();
+    }
     let started = run_nro(client, Program::Local { nro, dest: LAUNCHER.into() }, Vec::new(), Mode::Applet).await?;
     let mut notes = started.notes;
+    match held.map(|c| c.state) {
+        Some(proto::CaptureState::Held) => notes.insert(0, "paused gameplay capture for the restart".into()),
+        Some(proto::CaptureState::Waiting { .. } | proto::CaptureState::NeedsReboot { .. }) => notes.insert(
+            0,
+            "a read from the gameplay recorder was still under way (the game wasn't recording just then), so audio and video capture may need a reboot after this restart".into(),
+        ),
+        _ => {}
+    }
     drop(started.output);
     // Until the NRO has stopped it, the old sysmodule may still answer.
     let start = tokio::time::Instant::now();
