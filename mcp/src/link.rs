@@ -186,7 +186,8 @@ impl App {
         let folder = |path: Option<PathBuf>| path.is_some_and(|p| p.is_dir());
         let home = home();
         match self {
-            App::ClaudeCode => find_on_path("claude").is_some(),
+            // A desktop launcher's PATH often lacks ~/.local/bin, where Claude Code's installer puts it.
+            App::ClaudeCode => claude_command().is_some() || home.as_ref().is_some_and(|h| h.join(".claude.json").is_file()),
             App::ClaudeDesktop => folder(desktop_config_path().and_then(|p| p.parent().map(Path::to_path_buf))),
             // ~/.gemini alone could be Antigravity's.
             App::GeminiCli => find_on_path("gemini").is_some() || home.as_ref().is_some_and(|h| h.join(".gemini/settings.json").is_file()),
@@ -237,7 +238,7 @@ pub fn link(app: App) -> Result<String> {
     let (command, args) = server_command(Some(app))?;
     match app.config().with_context(|| format!("no {} config location on this system", app.name()))? {
         Config::ClaudeCli => {
-            let claude = find_on_path("claude").context("Claude Code's `claude` command isn't installed")?;
+            let claude = claude_command().context("Claude Code's `claude` command isn't installed")?;
             if let State::Linked { .. } = state(app) {
                 // Replaced, so it runs this copy of Kickstand.
                 run(&claude, &["mcp", "remove", "-s", "user", NAME]).ok();
@@ -262,7 +263,7 @@ pub fn link(app: App) -> Result<String> {
 pub fn unlink(app: App) -> Result<String> {
     let removed = match app.config().with_context(|| format!("no {} config location on this system", app.name()))? {
         Config::ClaudeCli => {
-            let claude = find_on_path("claude").context("Claude Code's `claude` command isn't installed")?;
+            let claude = claude_command().context("Claude Code's `claude` command isn't installed")?;
             run(&claude, &["mcp", "remove", "-s", "user", NAME])?;
             true
         }
@@ -399,6 +400,16 @@ fn desktop_config_path() -> Option<PathBuf> {
 
 fn home() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// Claude Code's `claude`: on PATH, else where its installers put it (the native installer's ~/.local/bin,
+/// the older ~/.claude/local), which a program started from a desktop launcher may not have on PATH.
+fn claude_command() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    find_on_path("claude").or_else(|| {
+        let home = home()?;
+        [home.join(".local/bin").join(exe), home.join(".claude/local").join(exe)].into_iter().find(|p| p.is_file())
+    })
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
