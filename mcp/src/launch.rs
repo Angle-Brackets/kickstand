@@ -643,6 +643,29 @@ pub(crate) fn is_game(path: &str, projects: &std::collections::BTreeMap<String, 
     })
 }
 
+/// Whether this Kickstand process knows what the hbloader process runs: it started an NRO there, or saw
+/// hbmenu come back. A freshly started one doesn't, and asks [`shows_hbmenu`].
+pub(crate) fn knows_what_runs() -> bool {
+    HBMENU_PID.load(Ordering::Relaxed) != 0 || STARTS.load(Ordering::Relaxed) != 0
+}
+
+/// Whether the application's hbloader (`pid`) shows hbmenu, asked of the console: the NRO loaded in it has
+/// the same header as `sdmc:/hbmenu.nro` (size, segments and build id). Notes it, like [`nro_exited`].
+pub(crate) async fn shows_hbmenu(client: &Client, pid: u64) -> Result<bool> {
+    let map = client.memory_map().await?;
+    if map.app.pid != pid {
+        return Ok(false);
+    }
+    let Some(nro) = map.regions.iter().find(|r| r.nro) else { return Ok(false) };
+    let loaded = client.read_memory(nro.base, 0x60).await?;
+    let (file, _) = client.read("/hbmenu.nro", 0, 0x60).await?;
+    let hbmenu = loaded.len() == 0x60 && loaded == file;
+    if hbmenu {
+        HBMENU_PID.store(pid, Ordering::Relaxed);
+    }
+    Ok(hbmenu)
+}
+
 /// Notes that the NRO in process `pid` exited (its stdout closed), so that process shows hbmenu again.
 pub fn nro_exited(pid: u64) {
     if pid != 0 {

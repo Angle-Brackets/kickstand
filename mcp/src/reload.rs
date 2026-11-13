@@ -510,7 +510,12 @@ async fn try_in_process_reload(
 
     let mut notes = Vec::new();
     let buttons = default_exit_buttons(exit_buttons);
-    let already_at_hbmenu = app.pid != 0 && app.pid == launch::HBMENU_PID.load(Ordering::Relaxed) && exit_buttons.is_none();
+    let mut already_at_hbmenu = app.pid != 0 && app.pid == launch::HBMENU_PID.load(Ordering::Relaxed) && exit_buttons.is_none();
+    // A Kickstand that just started doesn't know whether an NRO or hbmenu is showing: ask the console, rather
+    // than press + into hbmenu and wait for a request it will never claim.
+    if !already_at_hbmenu && exit_buttons.is_none() && mode == Mode::Full && !launch::knows_what_runs() {
+        already_at_hbmenu = launch::shows_hbmenu(client, app.pid).await.unwrap_or(false);
+    }
     // When the exit button(s) went in: the start of the exit phase.
     let mut pressed_at = None;
 
