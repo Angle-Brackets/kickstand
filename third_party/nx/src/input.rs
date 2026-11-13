@@ -352,6 +352,8 @@ pub struct Context {
     supported_style_tags: hid::NpadStyleTag,
     shmem_handle: svc::Handle,
     shmem: SharedMemoryFormat,
+    /// The applet resource user id npad was activated for (0 in a sysmodule).
+    aruid: u64,
 }
 
 impl Context {
@@ -381,9 +383,8 @@ impl Context {
             player_count += 1;
         }
 
-        let aruid = AppletResourceUserId::new(
-            applet::GLOBAL_ARUID.load(core::sync::atomic::Ordering::Relaxed),
-        );
+        let aruid_value = applet::GLOBAL_ARUID.load(core::sync::atomic::Ordering::Relaxed);
+        let aruid = AppletResourceUserId::new(aruid_value);
         let players = sf::Buffer::from_array(&players[..player_count]);
 
         let mut hid_srv = service::new_service_object::<HidService>()?;
@@ -412,6 +413,7 @@ impl Context {
             supported_style_tags,
             shmem_handle: shmem_handle.handle,
             shmem: unsafe { SharedMemoryFormat::from_shmem_ptr(shmem_address)? },
+            aruid: aruid_value,
         })
     }
 
@@ -477,9 +479,15 @@ impl Context {
 impl Drop for Context {
     /// Destroys the [`Context`], un-mapping the shared-memory and closing it, and also closing its [`IHidClient`] session
     fn drop(&mut self) {
-        let _ = self
-            .hid_service
-            .deactivate_npad(AppletResourceUserId::new(0));
+        // Deactivate npad only for this context's own applet resource user id. Id 0 is shared by every
+        // process that isn't an applet (all sysmodules, Atmosphère's pm among them): pm activates npad there
+        // once and reads held keys through it to decide title overrides, so deactivating it would leave pm
+        // seeing no buttons until a reboot.
+        if self.aruid != 0 {
+            let _ = self
+                .hid_service
+                .deactivate_npad(AppletResourceUserId::new(self.aruid));
+        }
         let _ = unsafe {
             svc::unmap_shared_memory(self.shmem_handle, self.shmem.as_ptr(), shmem::SHMEM_SIZE)
         };
